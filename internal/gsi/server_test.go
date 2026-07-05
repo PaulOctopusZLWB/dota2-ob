@@ -13,6 +13,7 @@ import (
 	"testing/fstest"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
 )
@@ -197,4 +198,69 @@ func TestDashboardLoadsFromSameServer(t *testing.T) {
 	if !strings.Contains(string(body), "/api/latest") {
 		t.Fatalf("dashboard did not reference /api/latest: %s", body)
 	}
+}
+
+func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("profile-gsi"))
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+	profiler := profile.NewProfiler()
+
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithProfiler(profiler)))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"provider":{"name":"Dota 2"},"map":{"game_time":123},"hero":{"team2":{"player0":{"xpos":100,"ypos":200}}}}`))
+	if err != nil {
+		t.Fatalf("POST /gsi returned error: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /gsi status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	resp, err = http.Get(server.URL + "/api/profile")
+	if err != nil {
+		t.Fatalf("GET /api/profile returned error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var profileBody struct {
+		SnapshotCount uint64 `json:"snapshot_count"`
+		Fields        []struct {
+			Path      string `json:"path"`
+			SeenCount uint64 `json:"seen_count"`
+		} `json:"fields"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&profileBody); err != nil {
+		t.Fatalf("decode profile JSON: %v", err)
+	}
+	if profileBody.SnapshotCount != 1 {
+		t.Fatalf("snapshot count = %d, want 1", profileBody.SnapshotCount)
+	}
+	if !profileHasPath(profileBody.Fields, "hero.team2.player0.xpos") {
+		t.Fatalf("profile missing hero.team2.player0.xpos: %#v", profileBody.Fields)
+	}
+
+	summaryPath := filepath.Join(root, "profile-gsi", "session_summary.md")
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read session summary: %v", err)
+	}
+	if !strings.Contains(string(data), "Hero positions: available") {
+		t.Fatalf("summary missing hero position conclusion:\n%s", data)
+	}
+}
+
+func profileHasPath(fields []struct {
+	Path      string `json:"path"`
+	SeenCount uint64 `json:"seen_count"`
+}, path string) bool {
+	for _, field := range fields {
+		if field.Path == path && field.SeenCount > 0 {
+			return true
+		}
+	}
+	return false
 }

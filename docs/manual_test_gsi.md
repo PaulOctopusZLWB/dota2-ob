@@ -30,6 +30,12 @@ Check health from another shell:
 curl -i http://127.0.0.1:43210/healthz
 ```
 
+Open the local dashboard:
+
+```text
+http://127.0.0.1:43210/
+```
+
 ## Run A Spectator Session
 
 1. Launch Steam and Dota 2 manually.
@@ -51,11 +57,27 @@ Each line should parse as one JSON object with:
 - `payload`
 - `raw`
 
-For MVP-1, record:
+Inspect the latest state and field profile:
+
+```bash
+curl -s http://127.0.0.1:43210/api/latest
+curl -s http://127.0.0.1:43210/api/profile
+```
+
+The session summary is written to:
+
+```text
+data/sessions/<session-id>/session_summary.md
+```
+
+For the MVP validation run, record:
 
 - account used,
 - match type,
 - observation duration,
 - whether `raw.jsonl` was created,
+- whether `/api/latest` shows hero/player sections,
+- whether `/api/profile` shows expected field paths,
+- whether `session_summary.md` answers the required availability questions,
 - whether the file grows while spectating,
 - any observed DotaTV delay.

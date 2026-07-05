@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
 )
@@ -16,6 +18,7 @@ const maxSnapshotBytes = 10 << 20
 type Server struct {
 	store     *session.Store
 	latest    *state.Latest
+	profiler  *profile.Profiler
 	dashboard http.Handler
 	mux       *http.ServeMux
 }
@@ -31,6 +34,12 @@ func WithLatest(latest *state.Latest) Option {
 func WithDashboard(handler http.Handler) Option {
 	return func(server *Server) {
 		server.dashboard = handler
+	}
+}
+
+func WithProfiler(profiler *profile.Profiler) Option {
+	return func(server *Server) {
+		server.profiler = profiler
 	}
 }
 
@@ -53,6 +62,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/latest", s.handleLatest)
+	s.mux.HandleFunc("/api/profile", s.handleProfile)
 	s.mux.HandleFunc("/gsi", s.handleGSI)
 	if s.dashboard != nil {
 		s.mux.Handle("/", s.dashboard)
@@ -91,6 +101,13 @@ func (s *Server) handleGSI(w http.ResponseWriter, r *http.Request) {
 	if s.latest != nil {
 		s.latest.Update(record.ReceivedAt, record.Payload)
 	}
+	if s.profiler != nil {
+		s.profiler.Observe(record.ReceivedAt, record.Payload)
+		if err := profile.WriteSummary(filepath.Join(s.store.SessionDir(), "session_summary.md"), s.profiler.Snapshot()); err != nil {
+			http.Error(w, "failed to write session summary", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -110,5 +127,17 @@ func (s *Server) handleLatest(w http.ResponseWriter, _ *http.Request) {
 	}
 	if err := json.NewEncoder(w).Encode(latest.Snapshot(sessionID)); err != nil {
 		http.Error(w, "failed to encode latest state", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleProfile(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	profiler := s.profiler
+	if profiler == nil {
+		profiler = profile.NewProfiler()
+	}
+	if err := json.NewEncoder(w).Encode(profiler.Snapshot()); err != nil {
+		http.Error(w, "failed to encode field profile", http.StatusInternalServerError)
 	}
 }
