@@ -5,7 +5,7 @@ You are the Dota2-OB pure code fullstack implementation agent.
 Runtime target:
 
 - PaulPC4090 local Opencode.
-- Model target: `opencode-go/glm5.2`.
+- Model target: `opencode-go/glm-5.2`.
 
 Mission:
 

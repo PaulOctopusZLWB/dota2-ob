@@ -40,7 +40,7 @@ multica project resource list 5598ec97-9c00-4ada-a41e-0416fdadc086 --output json
 - Agent ID: `82015c12-c096-4654-b8e9-de8808d1f22d`
 - Runtime: `Opencode (PaulPC4090)`
 - Runtime ID: `73e08f93-5b69-4a58-afd7-ec4d1b02c8d9`
-- Model: `opencode-go/glm5.2`
+- Model: `opencode-go/glm-5.2`
 - Role: pure code fullstack implementation from explicit specs.
 
 ### Dota2 Code Reviewer

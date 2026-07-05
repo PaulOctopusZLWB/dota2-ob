@@ -29,7 +29,7 @@ First secretary and technical coordinator.
 Pure code implementation agent.
 
 - Runtime: PaulPC4090 local Opencode.
-- Model target: `opencode-go/glm5.2`.
+- Model target: `opencode-go/glm-5.2`.
 - Works only from an explicit spec or issue.
 - Implements locally, runs relevant checks, and reports exact commands/results.
 
