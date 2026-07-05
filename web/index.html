@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dota2-OB</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8ece7;
+      --muted: #a4aaa0;
+      --line: #30352f;
+      --panel: #171a16;
+      --panel-2: #20241d;
+      --accent: #9bcf53;
+      --gold: #d4a845;
+      --danger: #cf5f53;
+      --void: #0d0f0c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(155, 207, 83, 0.08) 1px, transparent 1px),
+        linear-gradient(rgba(155, 207, 83, 0.06) 1px, transparent 1px),
+        var(--void);
+      background-size: 42px 42px;
+      font-family: "Cascadia Code", "IBM Plex Mono", ui-monospace, monospace;
+      letter-spacing: 0;
+    }
+
+    .shell {
+      width: min(1440px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0 32px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: end;
+      gap: 20px;
+      padding: 0 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(24px, 4vw, 52px);
+      line-height: 0.95;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(110px, 1fr));
+      gap: 8px;
+      min-width: min(520px, 100%);
+    }
+
+    .metric,
+    .slot {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)), var(--panel);
+      border-radius: 8px;
+    }
+
+    .metric {
+      padding: 10px 12px;
+    }
+
+    .label {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .value {
+      display: block;
+      margin-top: 6px;
+      font-size: 18px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+
+    main {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .lanes {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .lane {
+      display: grid;
+      gap: 10px;
+    }
+
+    .lane-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .slot {
+      display: grid;
+      grid-template-columns: 36px minmax(120px, 1.2fr) repeat(6, minmax(74px, 1fr));
+      align-items: center;
+      gap: 8px;
+      min-height: 74px;
+      padding: 10px;
+      overflow: hidden;
+    }
+
+    .slot.empty {
+      opacity: 0.55;
+    }
+
+    .index {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      color: var(--void);
+      background: var(--accent);
+      font-weight: 900;
+    }
+
+    .hero {
+      min-width: 0;
+    }
+
+    .hero strong {
+      display: block;
+      font-size: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .hero span,
+    .cell span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+
+    .cell strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .alive {
+      color: var(--accent);
+    }
+
+    .dead {
+      color: var(--danger);
+    }
+
+    .gold {
+      color: var(--gold);
+    }
+
+    @media (max-width: 980px) {
+      header,
+      .lanes {
+        grid-template-columns: 1fr;
+      }
+
+      .meta {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .slot {
+        grid-template-columns: 32px minmax(100px, 1fr) repeat(2, minmax(74px, 1fr));
+      }
+
+      .slot .cell:nth-child(n+5) {
+        display: none;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .shell {
+        width: min(100vw - 20px, 1440px);
+        padding-top: 16px;
+      }
+
+      .meta,
+      .slot {
+        grid-template-columns: 1fr;
+      }
+
+      .index {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <h1>Dota2-OB</h1>
+      <section class="meta" aria-label="Session state">
+        <div class="metric"><span class="label">Status</span><span class="value" id="status">empty</span></div>
+        <div class="metric"><span class="label">Map Time</span><span class="value" id="map-time">-</span></div>
+        <div class="metric"><span class="label">Session</span><span class="value" id="session">-</span></div>
+      </section>
+    </header>
+    <main>
+      <section class="lanes" id="lanes"></section>
+    </main>
+  </div>
+
+  <script>
+    const lanes = document.querySelector("#lanes");
+    const teams = [
+      { key: "team2", name: "Radiant" },
+      { key: "team3", name: "Dire" }
+    ];
+
+    function get(obj, path) {
+      return path.reduce((acc, key) => acc && acc[key] !== undefined ? acc[key] : undefined, obj);
+    }
+
+    function fmt(value, fallback = "-") {
+      return value === undefined || value === null || value === "" ? fallback : String(value);
+    }
+
+    function html(value, fallback = "-") {
+      return fmt(value, fallback).replace(/[&<>"']/g, char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function pct(current, max) {
+      if (current === undefined || max === undefined || Number(max) === 0) return "-";
+      return `${current}/${max}`;
+    }
+
+    function render(snapshot) {
+      document.querySelector("#status").textContent = fmt(snapshot.status);
+      document.querySelector("#session").textContent = fmt(snapshot.session_id);
+      document.querySelector("#map-time").textContent = fmt(get(snapshot, ["map", "game_time"]));
+
+      lanes.innerHTML = teams.map(team => {
+        const slots = Array.from({ length: 5 }, (_, index) => renderSlot(snapshot, team.key, `player${index}`, index));
+        return `<section class="lane">
+          <div class="lane-title"><strong>${team.name}</strong><span>${team.key}</span></div>
+          ${slots.join("")}
+        </section>`;
+      }).join("");
+    }
+
+    function renderSlot(snapshot, team, player, index) {
+      const hero = get(snapshot, ["hero", team, player]) || {};
+      const playerData = get(snapshot, ["player", team, player]) || {};
+      const hasData = Object.keys(hero).length > 0 || Object.keys(playerData).length > 0;
+      const alive = hero.alive === false ? "dead" : "alive";
+      const goldNet = playerData.gold ?? playerData.net_worth;
+      return `<article class="slot ${hasData ? "" : "empty"}">
+        <div class="index">${index + 1}</div>
+        <div class="hero"><strong>${html(hero.name || hero.id || playerData.name, "empty")}</strong><span>${html(playerData.name || player)}</span></div>
+        <div class="cell"><strong>${html(hero.level)}</strong><span>level</span></div>
+        <div class="cell"><strong class="${alive}">${alive}</strong><span>state</span></div>
+        <div class="cell"><strong>${html(pct(hero.health, hero.max_health))}</strong><span>health</span></div>
+        <div class="cell"><strong>${html(pct(hero.mana, hero.max_mana))}</strong><span>mana</span></div>
+        <div class="cell"><strong>${html(hero.xpos)}, ${html(hero.ypos)}</strong><span>x/y</span></div>
+        <div class="cell"><strong class="gold">${html(goldNet)}</strong><span>gold/net</span></div>
+      </article>`;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/latest", { cache: "no-store" });
+        render(await response.json());
+      } catch (error) {
+        render({ status: "offline", session_id: "-", map: {} });
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>

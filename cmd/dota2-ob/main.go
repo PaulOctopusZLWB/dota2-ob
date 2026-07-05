@@ -7,6 +7,7 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
 )
 
 func main() {
@@ -18,10 +19,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("create session store: %v", err)
 	}
+	latest := state.NewLatest()
 
 	log.Printf("dota2-ob listening on http://%s", *addr)
 	log.Printf("capturing raw GSI snapshots under %s/%s", *dataDir, store.SessionID())
-	if err := http.ListenAndServe(*addr, gsi.NewServer(store)); err != nil {
+	if err := http.ListenAndServe(*addr, gsi.NewServer(
+		store,
+		gsi.WithLatest(latest),
+		gsi.WithDashboard(http.FileServer(http.Dir("web"))),
+	)); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }
