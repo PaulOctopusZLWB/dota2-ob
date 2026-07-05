@@ -69,13 +69,24 @@ Use stable/low-risk sources first:
 4. Computer vision only for visible UI facts not available from GSI.
 5. Unofficial Game Coordinator or packet/memory approaches only after explicit approval.
 
+## Safety Gate
+
+MVP and normal development stay inside low-risk spectator-only collection:
+
+- local Dota 2 Game State Integration,
+- Steam Web API metadata,
+- downloaded replay/demo parsing,
+- local files and local dashboards.
+
+The project does not use process memory reads, code injection, packet capture, protocol bypass, anti-cheat bypass, gameplay automation, or DotaTV delay/fog-of-war bypass unless Paul explicitly approves a separate high-risk research scope.
+
 ## Repository
 
 Primary repository:
 
 `https://github.com/PaulOctopusZLWB/dota2-ob.git`
 
-Current note: the GitHub repository appears to be newly created and empty as of 2026-07-05. Multica repo checkout needs a usable branch/ref, so an initial commit is required before checkout can succeed.
+Current note: the repository is initialized on `main` and Multica checkout has been verified with `--ref main`.
 
 ## Local Documents
 
@@ -84,3 +95,5 @@ Current note: the GitHub repository appears to be newly created and empty as of 
 - `research/multica_agent_harness_best_practices.md` - Multica/harness/prompt/skill operating notes.
 - `docs/spec_template.md` - required spec structure.
 - `docs/review_checklist.md` - reviewer checklist.
+- `docs/safety_and_account_risk.md` - allowed/disallowed data-source and account-risk boundaries.
+- `docs/plans/2026-07-05-mvp-gsi-validation.md` - MVP plan and acceptance requirements.

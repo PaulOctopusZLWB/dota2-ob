@@ -27,7 +27,9 @@ Development follows:
 See:
 
 - `docs/workspace_operating_model.md`
+- `docs/safety_and_account_risk.md`
 - `docs/spec_template.md`
 - `docs/review_checklist.md`
+- `docs/plans/2026-07-05-mvp-gsi-validation.md`
 - `research/dota2_live_data_sources.md`
 - `research/multica_agent_harness_best_practices.md`
