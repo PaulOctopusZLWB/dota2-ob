@@ -1,0 +1,2 @@
+/data/sessions/*
+!/data/sessions/.gitkeep
