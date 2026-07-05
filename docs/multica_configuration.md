@@ -16,6 +16,7 @@ Date: 2026-07-05
 - Lead: `G胖`
 - Status: `in_progress`
 - GitHub resource ID: `a552ae42-ad4b-4880-803d-2dd983234d4a`
+- GitHub resource ref: `main`
 
 Note: the authoritative resource id is available from:
 
@@ -69,3 +70,5 @@ multica project resource list 5598ec97-9c00-4ada-a41e-0416fdadc086 --output json
 - Agent `description` is catalog metadata. Runtime behavior belongs in `instructions`.
 - Project `description` is durable task context.
 - Skills are bound after agent creation and should be added with `agent skills add`, not replacement `set`.
+- Repository initial commit: `247e426`.
+- Multica checkout was verified from a clean temporary directory with `multica repo checkout https://github.com/PaulOctopusZLWB/dota2-ob.git --ref main`.
