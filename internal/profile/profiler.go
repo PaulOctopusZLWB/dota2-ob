@@ -201,25 +201,22 @@ func availability(ok bool) string {
 }
 
 func hasTenPlayerData(paths []string) bool {
-	for _, team := range []string{"team2", "team3"} {
-		for index := 0; index < 5; index++ {
-			prefixHero := fmt.Sprintf("hero.%s.player%d", team, index)
-			prefixPlayer := fmt.Sprintf("player.%s.player%d", team, index)
-			if !hasPrefix(paths, prefixHero) && !hasPrefix(paths, prefixPlayer) {
-				return false
-			}
-		}
-	}
-	return true
+	return len(playerSlots(paths, "hero")) >= 10 && len(playerSlots(paths, "player")) >= 10
 }
 
-func hasPrefix(paths []string, prefix string) bool {
+func playerSlots(paths []string, section string) map[string]struct{} {
+	slots := make(map[string]struct{})
 	for _, path := range paths {
-		if path == prefix || strings.HasPrefix(path, prefix+".") {
-			return true
+		parts := strings.Split(path, ".")
+		if len(parts) < 3 {
+			continue
 		}
+		if parts[0] != section || !strings.HasPrefix(parts[1], "team") || !strings.HasPrefix(parts[2], "player") {
+			continue
+		}
+		slots[parts[1]+"."+parts[2]] = struct{}{}
 	}
-	return false
+	return slots
 }
 
 func hasAnySuffix(paths []string, suffix string) bool {

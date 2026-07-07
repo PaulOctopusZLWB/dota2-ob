@@ -1,2 +1,3 @@
 /data/sessions/*
 !/data/sessions/.gitkeep
+/data/*.log

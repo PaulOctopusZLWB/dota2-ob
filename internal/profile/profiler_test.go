@@ -87,6 +87,43 @@ func TestWriteSummaryClassifiesCoreAvailability(t *testing.T) {
 	}
 }
 
+func TestWriteSummaryRecognizesDotaSpectatorPlayerSlots(t *testing.T) {
+	profiler := profile.NewProfiler()
+	payload := map[string]any{
+		"hero": map[string]any{
+			"team2": map[string]any{},
+			"team3": map[string]any{},
+		},
+		"player": map[string]any{
+			"team2": map[string]any{},
+			"team3": map[string]any{},
+		},
+	}
+	for player := 0; player < 10; player++ {
+		team := "team2"
+		if player >= 5 {
+			team = "team3"
+		}
+		slot := "player" + string(rune('0'+player))
+		payload["hero"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{
+			"name": "npc_dota_hero_axe",
+			"xpos": float64(100 + player),
+			"ypos": float64(200 + player),
+		}
+		payload["player"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{
+			"name": "player",
+			"gold": float64(500 + player),
+		}
+	}
+
+	profiler.Observe(time.Date(2026, 7, 7, 14, 47, 46, 0, time.UTC), payload)
+
+	summary := profile.RenderSummary(profiler.Snapshot())
+	if !strings.Contains(summary, "Ten-player hero/player data: available") {
+		t.Fatalf("summary did not recognize team2 player0-4 plus team3 player5-9:\n%s", summary)
+	}
+}
+
 func findField(t *testing.T, fields []profile.Field, path string) profile.Field {
 	t.Helper()
 	for _, field := range fields {
