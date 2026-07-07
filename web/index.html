@@ -237,8 +237,8 @@
   <script>
     const lanes = document.querySelector("#lanes");
     const teams = [
-      { key: "team2", name: "Radiant" },
-      { key: "team3", name: "Dire" }
+      { key: "team2", name: "Radiant", start: 0 },
+      { key: "team3", name: "Dire", start: 5 }
     ];
 
     function get(obj, path) {
@@ -270,7 +270,7 @@
       document.querySelector("#map-time").textContent = fmt(get(snapshot, ["map", "game_time"]));
 
       lanes.innerHTML = teams.map(team => {
-        const slots = Array.from({ length: 5 }, (_, index) => renderSlot(snapshot, team.key, `player${index}`, index));
+        const slots = Array.from({ length: 5 }, (_, index) => renderSlot(snapshot, team.key, `player${team.start + index}`, team.start + index));
         return `<section class="lane">
           <div class="lane-title"><strong>${team.name}</strong><span>${team.key}</span></div>
           ${slots.join("")}

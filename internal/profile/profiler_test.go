@@ -124,6 +124,21 @@ func TestWriteSummaryRecognizesDotaSpectatorPlayerSlots(t *testing.T) {
 	}
 }
 
+func TestWriteSummaryIncludesObservedUpdateCadence(t *testing.T) {
+	profiler := profile.NewProfiler()
+	start := time.Date(2026, 7, 7, 14, 47, 46, 0, time.UTC)
+	payload := map[string]any{"provider": map[string]any{"name": "Dota 2"}}
+
+	profiler.Observe(start, payload)
+	profiler.Observe(start.Add(2*time.Second), payload)
+	profiler.Observe(start.Add(6*time.Second), payload)
+
+	summary := profile.RenderSummary(profiler.Snapshot())
+	if !strings.Contains(summary, "Observed update cadence: average 3s between snapshots") {
+		t.Fatalf("summary missing cadence:\n%s", summary)
+	}
+}
+
 func findField(t *testing.T, fields []profile.Field, path string) profile.Field {
 	t.Helper()
 	for _, field := range fields {

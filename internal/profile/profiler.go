@@ -107,6 +107,10 @@ func RenderSummary(snapshot Snapshot) string {
 	if snapshot.LastSeenAt != nil {
 		builder.WriteString(fmt.Sprintf("- Session last update: %s\n", snapshot.LastSeenAt.Format(time.RFC3339Nano)))
 	}
+	if snapshot.StartedAt != nil && snapshot.LastSeenAt != nil && snapshot.SnapshotCount > 1 {
+		averageInterval := snapshot.LastSeenAt.Sub(*snapshot.StartedAt) / time.Duration(snapshot.SnapshotCount-1)
+		builder.WriteString(fmt.Sprintf("- Observed update cadence: average %s between snapshots\n", averageInterval))
+	}
 
 	builder.WriteString("\n## Availability\n\n")
 	builder.WriteString(fmt.Sprintf("- Ten-player hero/player data: %s\n", availability(hasTenPlayerData(paths))))
