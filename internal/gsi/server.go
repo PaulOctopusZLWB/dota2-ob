@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
@@ -19,6 +20,7 @@ type Server struct {
 	store     *session.Store
 	latest    *state.Latest
 	profiler  *profile.Profiler
+	engine    *analytics.Engine
 	dashboard http.Handler
 	mux       *http.ServeMux
 }
@@ -43,6 +45,12 @@ func WithProfiler(profiler *profile.Profiler) Option {
 	}
 }
 
+func WithAnalytics(engine *analytics.Engine) Option {
+	return func(server *Server) {
+		server.engine = engine
+	}
+}
+
 func NewServer(store *session.Store, opts ...Option) http.Handler {
 	server := &Server{
 		store: store,
@@ -63,6 +71,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/latest", s.handleLatest)
 	s.mux.HandleFunc("/api/profile", s.handleProfile)
+	s.mux.HandleFunc("/api/analytics", s.handleAnalytics)
+	s.mux.HandleFunc("/api/events", s.handleEvents)
 	s.mux.HandleFunc("/gsi", s.handleGSI)
 	if s.dashboard != nil {
 		s.mux.Handle("/", s.dashboard)
@@ -108,6 +118,16 @@ func (s *Server) handleGSI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Analytics state is updated only after the snapshot was accepted and
+	// persisted, preserving raw data before deriving events.
+	if s.engine != nil {
+		tick := analytics.Normalize(record.ReceivedAt, record.Payload)
+		s.engine.Observe(tick)
+		if err := analytics.WriteSummaryFiles(s.store.SessionDir(), s.store.SessionID(), s.engine); err != nil {
+			http.Error(w, "failed to write analytics summary", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -139,5 +159,33 @@ func (s *Server) handleProfile(w http.ResponseWriter, _ *http.Request) {
 	}
 	if err := json.NewEncoder(w).Encode(profiler.Snapshot()); err != nil {
 		http.Error(w, "failed to encode field profile", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleAnalytics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	engine := s.engine
+	if engine == nil {
+		engine = analytics.NewEngine()
+	}
+	sessionID := ""
+	if s.store != nil {
+		sessionID = s.store.SessionID()
+	}
+	if err := json.NewEncoder(w).Encode(engine.Snapshot(sessionID)); err != nil {
+		http.Error(w, "failed to encode analytics snapshot", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	engine := s.engine
+	if engine == nil {
+		engine = analytics.NewEngine()
+	}
+	if err := json.NewEncoder(w).Encode(engine.Events()); err != nil {
+		http.Error(w, "failed to encode events", http.StatusInternalServerError)
 	}
 }

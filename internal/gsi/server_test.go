@@ -12,6 +12,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -259,6 +260,107 @@ func profileHasPath(fields []struct {
 }, path string) bool {
 	for _, field := range fields {
 		if field.Path == path && field.SeenCount > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAnalyticsAPIsEmptyValidJSON(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("analytics-empty"))
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(analytics.NewEngine())))
+	defer server.Close()
+
+	for _, endpoint := range []string{"/api/analytics", "/api/events"} {
+		resp, err := http.Get(server.URL + endpoint)
+		if err != nil {
+			t.Fatalf("GET %s returned error: %v", endpoint, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("%s status = %d, want %d; body=%s", endpoint, resp.StatusCode, http.StatusOK, body)
+		}
+		var v any
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("%s did not decode as JSON: %v; body=%s", endpoint, err, body)
+		}
+		resp.Body.Close()
+	}
+}
+
+func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("analytics-live"))
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+	engine := analytics.NewEngine()
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(engine)))
+	defer server.Close()
+
+	first := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+	second := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+
+	if resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(first)); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("first POST: err=%v status=%v", err, resp)
+	} else {
+		resp.Body.Close()
+	}
+	// First accepted snapshot must update tick count but derive no events.
+	if got := engine.TickCount(); got != 1 {
+		t.Fatalf("tick count after first = %d, want 1", got)
+	}
+	if ev := engine.Events(); len(ev) != 0 {
+		t.Fatalf("expected no events after first tick, got %d", len(ev))
+	}
+
+	if resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(second)); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("second POST: err=%v status=%v", err, resp)
+	} else {
+		resp.Body.Close()
+	}
+	if got := engine.TickCount(); got != 2 {
+		t.Fatalf("tick count after second = %d, want 2", got)
+	}
+
+	resp, err := http.Get(server.URL + "/api/events")
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
+	}
+	defer resp.Body.Close()
+	var events []analytics.Event
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if !containsEvent(events, analytics.EventHeroDeath) {
+		t.Fatalf("expected hero_death event, got %#v", events)
+	}
+
+	// Invalid snapshots must not advance analytics state.
+	resp, err = http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"provider":`))
+	if err != nil {
+		t.Fatalf("invalid POST: %v", err)
+	}
+	resp.Body.Close()
+	if got := engine.TickCount(); got != 2 {
+		t.Fatalf("tick count after invalid = %d, want 2", got)
+	}
+
+	// Analytics summary files are materialized under the session dir.
+	if _, err := os.Stat(filepath.Join(root, "analytics-live", "analytics_summary.md")); err != nil {
+		t.Fatalf("analytics summary not written: %v", err)
+	}
+}
+
+func containsEvent(events []analytics.Event, ty string) bool {
+	for _, e := range events {
+		if e.Type == ty {
 			return true
 		}
 	}
