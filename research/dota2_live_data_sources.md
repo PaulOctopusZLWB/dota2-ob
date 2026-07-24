@@ -12,6 +12,31 @@ Replay/demo parsing is excellent for post-match truth and model training, but no
 
 ## Source Classes
 
+### 0. Dota Labs / Plugin API Check
+
+Checked on 2026-07-24.
+
+Valve Dota Labs is an in-client experimental feature bucket, not a documented external API or plugin platform. Official announcements describe it as disabled-by-default settings under the Dota Labs tab, with examples such as Overlay Map, Modifier Key Filter Bindings, High-Visibility Local Hero Healthbar, Dota Plus pre-match analytics, and later Labs UI/overlay-map updates. Recent 2026 patch notes still mention Dota Labs Overlay Map bug fixes, so the feature bucket still exists, but there is no evidence of a public Dota Labs API, webhook, SDK, plugin hook, or data export surface.
+
+Usability for this project:
+
+- Not a primary data source for live spectator analytics.
+- Not a stable integration surface; features can graduate, change, or be retired.
+- Possible indirect UI aid only: Overlay Map, Dynamic Health Bar Focus, and Persistent Range Indicators may improve human observation or CV target visibility, but they do not expose structured telemetry.
+- Pre-Match Analytics is Dota Plus-gated and intentionally coarse; it is not a reliable source for match/player telemetry.
+
+Related but separate plugin/API surfaces:
+
+- Dota 2 Workshop Tools provide official addon/custom-game tooling and Lua/Panorama scripting APIs, but they apply to custom games/addons, not normal DotaTV/live public match observation. The tools are not a path to instrument normal matches.
+- Overwolf has a Dota 2 Game Events Provider API and public Dota 2 apps such as DotaPlus. Its documented Dota 2 event surface includes game state, match state, clock time, ward purchase cooldown, kills/deaths/assists, gold/GPM/XPM, hero health/mana/status, abilities, items, roster, and damage. It requires Dota 2 `-gamestateintegration`, and therefore appears to wrap or depend on the same low-risk GSI channel we can consume directly. Overwolf Native is Windows-only, which does not fit the PaulPC4090 Linux MVP.
+
+Recommendation:
+
+- Do not build around Dota Labs.
+- Keep Dota Labs as a manual/CV observation aid candidate only.
+- Treat Overwolf's Dota 2 event list as useful field-discovery evidence, but implement our own Linux local GSI collector rather than depending on Overwolf.
+- Use Workshop Tools only for custom-game experiments, not the live spectator product.
+
 ### 1. Steam Web API
 
 Confirmed interfaces of interest:
@@ -163,3 +188,10 @@ Use a layered ingestion model:
 - TF2 Wiki Dota 2 WebAPI pages: https://wiki.teamfortress.com/wiki/WebAPI/GetLiveLeagueGames and https://wiki.teamfortress.com/wiki/WebAPI/GetMatchDetails
 - Clarity replay parser: https://github.com/skadistats/clarity
 - OpenDota parser: https://github.com/odota/parser
+- Valve Dota Labs initial announcement: https://store.steampowered.com/news/posts/?appids=620%2C550%2C80822%2C240%2C80788%2C80762%2C80752%2C80747%2C80739%2C220%2C80633%2C80923%2C70%2C400%2C440%2C420%2C10%2C500%2C380%2C5739%2C300%2C4000%2C30%2C219%2C80%2C5952%2C410%2C360%2C340%2C320%2C280%2C130%2C40%2C60%2C50%2C20%2C5489%2C5268%2C630%2C570%2C5724%2C922%2C5260%2C5149%2C5150%2C997%2C987%2C5734%2C985%2C5073%2C5051%2C937%2C936%2C934%2C933%2C932%2C931%2C930%2C916%2C923%2C915%2C914%2C913%2C912%2C905%2C904%2C5032%2C960%2C5141%2C5139%2C5138%2C918%2C917%2C901%2C5825%2C5722%2C995%2C906%2C1003&enddate=1711476873&feed=steam_community_announcements
+- Valve Dota Labs update: https://store.steampowered.com/news/posts/?appids=570&enddate=1717798601
+- Valve Dota 2 7.36 patch notes: https://www.dota2.com/patches/7.36
+- Dota 2 official announcements, 7.41d Dota Labs Overlay Map fix: https://steamcommunity.com/app/570/announcements/
+- Valve Developer Community Dota 2 Workshop Tools: https://developer.valvesoftware.com/wiki/Dota_2_Workshop_Tools
+- Overwolf Dota 2 Game Events Provider: https://dev.overwolf.com/ow-native/live-game-data-gep/supported-games/dota-2/
+- Overwolf platform OS limitations: https://dev.overwolf.com/ow-native/guides/dev-tools/non-windows-dev/
