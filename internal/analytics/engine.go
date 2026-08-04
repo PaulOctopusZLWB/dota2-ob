@@ -79,6 +79,10 @@ type Event struct {
 type Engine struct {
 	mu                       sync.Mutex
 	prev                     *NormalizedTick
+	// latestPlayerTick is the most recent tick that observed at least one
+	// player/hero. It backs the per-player economy summary, so a trailing
+	// post-game tick with an empty player block does not wipe the summary.
+	latestPlayerTick         *NormalizedTick
 	events                   []Event
 	tickCount                uint64
 	completeTenPlayerFrames  uint64
@@ -122,6 +126,12 @@ func (e *Engine) Observe(tick NormalizedTick) []Event {
 	// Advance state. Keep a copy so callers cannot mutate retained state.
 	next := tick
 	e.prev = &next
+	// Retain the most recent tick that observed players so the economy
+	// summary survives trailing post-game ticks with an empty player block.
+	if len(tick.Players) > 0 {
+		playerCopy := tick
+		e.latestPlayerTick = &playerCopy
+	}
 	return derived
 }
 
@@ -587,16 +597,19 @@ func (e *Engine) deriveItemRelocations(ctx eventContext, p PlayerTick, cur, prev
 		if from == "" || to == "" || from == to {
 			continue
 		}
+		// Full traceable source paths, consistent with itemEvent below, so a
+		// relocation can be traced back to a raw player item path.
+		prefix := "items." + p.TeamKey + "." + p.Slot + "."
 		out = append(out, Event{
 			ReceivedAt: ctx.receivedAt,
 			Type:        EventItemSlotChanged,
 			Team:        p.TeamName,
 			TeamKey:     p.TeamKey,
 			Player:      p.Slot,
-			Field:       "items." + from + "->" + to,
+			Field:       prefix + from + "->" + to,
 			Before:      from,
 			After:       to,
-			SourcePaths: []string{"items." + from + ".name", "items." + to + ".name"},
+			SourcePaths: []string{prefix + from + ".name", prefix + to + ".name"},
 			Confidence:  ConfidenceObserved,
 			MatchID:     ctx.matchID,
 			MapClockTime: ctx.clockTime,

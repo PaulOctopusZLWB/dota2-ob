@@ -23,6 +23,30 @@ type Snapshot struct {
 	BuildingDestroyed        []Event        `json:"building_destroyed,omitempty"`
 	WardObservations         []Event        `json:"ward_observations,omitempty"`
 	WardCoordinateConclusion  string         `json:"ward_coordinate_conclusion"`
+	LatestPlayerEconomy      []PlayerEconomy `json:"latest_player_economy,omitempty"`
+}
+
+// PlayerEconomy is the latest observed per-player economy projection used by
+// the summary economy section. Only observed values are populated; missing
+// fields stay nil so the summary never fabricates unobserved state.
+type PlayerEconomy struct {
+	Slot           string   `json:"slot"`
+	TeamKey        string   `json:"team_key,omitempty"`
+	TeamName       string   `json:"team_name,omitempty"`
+	PlayerName     string   `json:"player_name,omitempty"`
+	HeroName       string   `json:"hero_name,omitempty"`
+	HeroID         *int64   `json:"hero_id,omitempty"`
+	NetWorth       *float64 `json:"net_worth,omitempty"`
+	Gold           *float64 `json:"gold,omitempty"`
+	GoldReliable   *float64 `json:"gold_reliable,omitempty"`
+	GoldUnreliable *float64 `json:"gold_unreliable,omitempty"`
+	GPM            *int64   `json:"gpm,omitempty"`
+	XPM            *int64   `json:"xpm,omitempty"`
+	LastHits       *int64   `json:"last_hits,omitempty"`
+	Denies         *int64   `json:"denies,omitempty"`
+	Kills          *int64   `json:"kills,omitempty"`
+	Deaths         *int64   `json:"deaths,omitempty"`
+	Assists        *int64   `json:"assists,omitempty"`
 }
 
 // Snapshot returns the bounded analytics state for the API.
@@ -41,6 +65,7 @@ func (e *Engine) Snapshot(sessionID string) Snapshot {
 		BuildingDestroyed:       e.buildingDestroyedSnapshot(),
 		WardObservations:        e.wardObservationsSnapshot(),
 		WardCoordinateConclusion: WardCoordinateConclusion,
+		LatestPlayerEconomy:     economyFromTick(e.latestPlayerTick),
 	}
 	if e.tickCount > 0 {
 		snap.Status = "ok"
@@ -118,18 +143,28 @@ type SummaryJSON struct {
 	BuildingObservations     []Event        `json:"building_observations,omitempty"`
 	WardObservations         []Event        `json:"ward_observations,omitempty"`
 	WardCoordinateConclusion string         `json:"ward_coordinate_conclusion"`
+	LatestPlayerEconomy      []PlayerEconomy `json:"latest_player_economy,omitempty"`
 }
 
 func buildSummaryJSON(sessionID string, ticks []NormalizedTick, events []Event, snap Snapshot) SummaryJSON {
+	// TickCount is authoritative from the live engine snapshot. The live
+	// WriteSummaryFiles path passes nil ticks (it does not re-read raw.jsonl),
+	// so len(ticks) would always report 0 there; snap.TickCount reflects the
+	// actual number of accepted live ticks. For the offline path the two agree.
+	tickCount := int(snap.TickCount)
+	if tickCount == 0 && len(ticks) > 0 {
+		tickCount = len(ticks)
+	}
 	s := SummaryJSON{
 		SessionID:                sessionID,
-		TickCount:                len(ticks),
+		TickCount:                tickCount,
 		CompleteTenPlayerFrames:  int(snap.CompleteTenPlayerFrames),
 		EventCounts:              snap.EventCounts,
 		RoshanObservations:       snap.RoshanObservations,
 		BuildingObservations:     snap.BuildingDestroyed,
 		WardObservations:         snap.WardObservations,
 		WardCoordinateConclusion: WardCoordinateConclusion,
+		LatestPlayerEconomy:      snap.LatestPlayerEconomy,
 	}
 	if snap.StartedAt != nil {
 		st := *snap.StartedAt
@@ -178,6 +213,8 @@ func RenderSummary(s SummaryJSON) string {
 	}
 	b.WriteString(fmt.Sprintf("- total: %d\n", s.EventTotal))
 
+	b.WriteString(renderEconomySummary(s.LatestPlayerEconomy))
+
 	b.WriteString("\n## Objective / Roshan / Building Observations\n\n")
 	if len(s.RoshanObservations) == 0 && len(s.BuildingObservations) == 0 {
 		b.WriteString("- none observed\n")
@@ -224,6 +261,134 @@ func sortedEventTypes(counts map[string]int) []string {
 		}
 	}
 	return out
+}
+
+// economyFromTick builds the latest per-player economy projection from a
+// normalized tick. It never fabricates values: only fields observed in the
+// latest tick are reported. Returns nil if the tick has no players.
+func economyFromTick(tick *NormalizedTick) []PlayerEconomy {
+	if tick == nil || len(tick.Players) == 0 {
+		return nil
+	}
+	out := make([]PlayerEconomy, 0, len(tick.Players))
+	for _, p := range tick.Players {
+		out = append(out, PlayerEconomy{
+			Slot:           p.Slot,
+			TeamKey:        p.TeamKey,
+			TeamName:       p.TeamName,
+			PlayerName:     p.Name,
+			HeroName:       p.HeroName,
+			HeroID:         p.HeroID,
+			NetWorth:       p.NetWorth,
+			Gold:           p.Gold,
+			GoldReliable:   p.GoldReliable,
+			GoldUnreliable: p.GoldUnreliable,
+			GPM:            p.GPM,
+			XPM:            p.XPM,
+			LastHits:       p.LastHits,
+			Denies:         p.Denies,
+			Kills:          p.Kills,
+			Deaths:         p.Deaths,
+			Assists:        p.Assists,
+		})
+	}
+	return out
+}
+
+// renderEconomySummary produces the per-team/per-player economy summary section.
+// It groups players by their observed team, rolling up team net worth / gold, and
+// lists each player's latest observed economy. Only observed values are shown; a
+// missing value renders as `-` so the summary never fabricates state.
+func renderEconomySummary(players []PlayerEconomy) string {
+	if len(players) == 0 {
+		return "\n## Economy Summary\n\n- none observed\n"
+	}
+	// Group players by team while preserving observed team order.
+	teamOrder := make([]string, 0, 2)
+	teams := make(map[string][]PlayerEconomy)
+	for _, p := range players {
+		team := p.TeamName
+		if team == "" {
+			team = p.TeamKey
+		}
+		if team == "" {
+			team = "(unknown)"
+		}
+		if _, ok := teams[team]; !ok {
+			teamOrder = append(teamOrder, team)
+		}
+		teams[team] = append(teams[team], p)
+	}
+
+	var b strings.Builder
+	b.WriteString("\n## Economy Summary\n\n")
+	b.WriteString("Latest observed per-player economy, grouped by team.\n\n")
+	for _, team := range teamOrder {
+		roster := teams[team]
+		b.WriteString(fmt.Sprintf("### %s\n\n", team))
+		// Team roll-up of observed net worth / gold.
+		var teamNetWorth, teamGold *float64
+		for _, p := range roster {
+			if p.NetWorth != nil {
+				v := ptrVal(p.NetWorth)
+				teamNetWorth = addFloat(teamNetWorth, v)
+			}
+			if p.Gold != nil {
+				v := ptrVal(p.Gold)
+				teamGold = addFloat(teamGold, v)
+			}
+		}
+		b.WriteString(fmt.Sprintf("- Team net worth: %s\n", fmtFloatPtr(teamNetWorth)))
+		b.WriteString(fmt.Sprintf("- Team gold: %s\n", fmtFloatPtr(teamGold)))
+		for _, p := range roster {
+			label := p.Slot
+			if p.PlayerName != "" {
+				label = fmt.Sprintf("%s (%s)", p.Slot, p.PlayerName)
+			}
+			if p.HeroName != "" {
+				label = fmt.Sprintf("%s — %s", label, p.HeroName)
+			}
+			b.WriteString(fmt.Sprintf("  - %s: net worth %s, gold %s (reliable %s, unreliable %s), gpm %s, xpm %s, LH %s, denies %s, K/D/A %s/%s/%s\n",
+				label,
+				fmtFloatPtr(p.NetWorth), fmtFloatPtr(p.Gold),
+				fmtFloatPtr(p.GoldReliable), fmtFloatPtr(p.GoldUnreliable),
+				fmtIntPtr(p.GPM), fmtIntPtr(p.XPM),
+				fmtIntPtr(p.LastHits), fmtIntPtr(p.Denies),
+				fmtIntPtr(p.Kills), fmtIntPtr(p.Deaths), fmtIntPtr(p.Assists),
+			))
+		}
+	}
+	return b.String()
+}
+
+func ptrVal(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func addFloat(acc *float64, v float64) *float64 {
+	if acc == nil {
+		x := v
+		return &x
+	}
+	x := *acc + v
+	return &x
+}
+
+func fmtFloatPtr(p *float64) string {
+	if p == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f", *p)
+}
+
+func fmtIntPtr(p *int64) string {
+	if p == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", *p)
 }
 
 // ---- file writers -------------------------------------------------------------

@@ -26,15 +26,21 @@ func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
 
 	engine := NewEngine()
 	ticks := make([]NormalizedTick, 0, len(records))
+	// Collect every derived event from Observe's per-tick return value so the
+	// offline derived_events.jsonl artifact is complete for long sessions. The
+	// live engine retains only a bounded ring for /api/events, but offline
+	// artifact generation must not silently drop older events.
+	events := make([]Event, 0)
 	for i, rec := range records {
 		tick := Normalize(rec.ReceivedAt, rec.Payload)
 		tick.TickIndex = int64(i)
-		engine.Observe(tick)
+		derived := engine.Observe(tick)
 		ticks = append(ticks, tick)
+		events = append(events, derived...)
 	}
 
 	snap := engine.Snapshot(sessionID)
-	if err := WriteArtifacts(sessionDir, sessionID, ticks, engine.AllEvents(), snap); err != nil {
+	if err := WriteArtifacts(sessionDir, sessionID, ticks, events, snap); err != nil {
 		return snap, err
 	}
 	return snap, nil

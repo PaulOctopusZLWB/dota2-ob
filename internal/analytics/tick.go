@@ -108,11 +108,15 @@ type PlayerTick struct {
 	SteamID   string `json:"steam_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 
-	Gold         *float64 `json:"gold,omitempty"`
-	NetWorth     *float64 `json:"net_worth,omitempty"`
-	GPM          *int64   `json:"gpm,omitempty"`
-	XPM          *int64   `json:"xpm,omitempty"`
-	GoldReliable *float64 `json:"gold_reliable,omitempty"`
+	HeroName string `json:"hero_name,omitempty"`
+	HeroID   *int64  `json:"hero_id,omitempty"`
+
+	Gold          *float64 `json:"gold,omitempty"`
+	NetWorth      *float64 `json:"net_worth,omitempty"`
+	GPM           *int64   `json:"gpm,omitempty"`
+	XPM           *int64   `json:"xpm,omitempty"`
+	GoldReliable  *float64 `json:"gold_reliable,omitempty"`
+	GoldUnreliable *float64 `json:"gold_unreliable,omitempty"`
 
 	Kills   *int64 `json:"kills,omitempty"`
 	Deaths  *int64 `json:"deaths,omitempty"`
@@ -135,6 +139,9 @@ type PlayerTick struct {
 	RespawnSeconds *float64 `json:"respawn_seconds,omitempty"`
 	Level          *int64   `json:"level,omitempty"`
 	XP             *float64 `json:"xp,omitempty"`
+
+	BuybackCost      *float64 `json:"buyback_cost,omitempty"`
+	BuybackCooldown  *float64 `json:"buyback_cooldown,omitempty"`
 
 	Stunned      *bool `json:"stunned,omitempty"`
 	Silenced     *bool `json:"silenced,omitempty"`
@@ -328,6 +335,7 @@ func fillPlayerSection(pt *PlayerTick, m map[string]any, obs *fieldFootprint) {
 	pt.GPM = intP(m["gpm"])
 	pt.XPM = intP(m["xpm"])
 	pt.GoldReliable = numP(m["gold_reliable"])
+	pt.GoldUnreliable = numP(m["gold_unreliable"])
 
 	pt.Kills = intP(m["kills"])
 	pt.Deaths = intP(m["deaths"])
@@ -342,7 +350,7 @@ func fillPlayerSection(pt *PlayerTick, m map[string]any, obs *fieldFootprint) {
 
 	for _, key := range []string{
 		"accountid", "steamid", "name", "team_name", "player_slot",
-		"gold", "net_worth", "gpm", "xpm", "gold_reliable",
+		"gold", "net_worth", "gpm", "xpm", "gold_reliable", "gold_unreliable",
 		"kills", "deaths", "assists", "last_hits", "denies",
 		"wards_placed", "wards_destroyed", "wards_purchased",
 	} {
@@ -356,6 +364,9 @@ func fillHeroSection(pt *PlayerTick, m map[string]any, obs *fieldFootprint) {
 	if m == nil {
 		return
 	}
+	pt.HeroName = str(m["name"])
+	pt.HeroID = intP(m["id"])
+
 	pt.XPos = numP(m["xpos"])
 	pt.YPos = numP(m["ypos"])
 
@@ -371,6 +382,9 @@ func fillHeroSection(pt *PlayerTick, m map[string]any, obs *fieldFootprint) {
 	pt.Level = intP(m["level"])
 	pt.XP = numP(m["xp"])
 
+	pt.BuybackCost = numP(m["buyback_cost"])
+	pt.BuybackCooldown = numP(m["buyback_cooldown"])
+
 	pt.Stunned = boolP(m["stunned"])
 	pt.Silenced = boolP(m["silenced"])
 	pt.Disarmed = boolP(m["disarmed"])
@@ -382,9 +396,11 @@ func fillHeroSection(pt *PlayerTick, m map[string]any, obs *fieldFootprint) {
 	pt.Smoked = boolP(m["smoked"])
 
 	for _, key := range []string{
+		"name", "id",
 		"xpos", "ypos", "health", "max_health", "health_percent",
 		"mana", "max_mana", "mana_percent", "alive", "respawn_seconds",
-		"level", "xp", "stunned", "silenced", "disarmed", "hexed",
+		"level", "xp", "buyback_cost", "buyback_cooldown",
+		"stunned", "silenced", "disarmed", "hexed",
 		"muted", "break", "has_debuff", "magicimmune", "smoked",
 	} {
 		if _, ok := m[key]; ok {

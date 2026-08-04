@@ -262,8 +262,8 @@ func miniSnapshot(item string, abilityLevel int, abilityCooldown float64) string
 		"provider":{"name":"Dota 2","appid":570,"version":48,"timestamp":1783435861},
 		"league":{"league_id":0,"match_id":"8885589324"},
 		"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100,"game_time":200,"radiant_score":14,"dire_score":13,"radiant_ward_purchase_cooldown":0,"dire_ward_purchase_cooldown":0,"roshan_state":"alive","roshan_state_end_seconds":0},
-		"hero":{"team2":{"player0":{"alive":true,"level":6,"xpos":-100,"ypos":-100,"health":1000,"max_health":1000,"mana":300,"max_mana":600}}},
-		"player":{"team2":{"player0":{"name":"A","team_name":"radiant","player_slot":0,"steamid":"76561198","accountid":"123","kills":0,"deaths":0,"assists":0,"gold":500,"net_worth":5000,"gpm":700,"xpm":800,"last_hits":10,"denies":1,"wards_placed":2,"wards_destroyed":0,"wards_purchased":3}}},
+		"hero":{"team2":{"player0":{"name":"npc_dota_hero_axe","id":42,"alive":true,"level":6,"xpos":-100,"ypos":-100,"health":1000,"max_health":1000,"mana":300,"max_mana":600,"buyback_cost":1500,"buyback_cooldown":0}}},
+		"player":{"team2":{"player0":{"name":"A","team_name":"radiant","player_slot":0,"steamid":"76561198","accountid":"123","kills":0,"deaths":0,"assists":0,"gold":500,"net_worth":5000,"gpm":700,"xpm":800,"gold_reliable":200,"gold_unreliable":300,"last_hits":10,"denies":1,"wards_placed":2,"wards_destroyed":0,"wards_purchased":3}}},
 		"items":{"team2":{"player0":{"slot0":{"name":"%s","item_level":1,"cooldown":0,"max_cooldown":10,"can_cast":true}}}},
 		"abilities":{"team2":{"player0":{"ability0":{"name":"axe_berserkers_call","level":%d,"cooldown":%s,"max_cooldown":12,"can_cast":true}}}},
 		"buildings":{"radiant":{"dota_goodguys_fort":{"health":4500,"max_health":4500}}}
@@ -303,3 +303,212 @@ func keys(m map[string]bool) []string {
 func boolPtr(b bool) *bool      { return &b }
 func numPtr(f float64) *float64 { return &f }
 func intPtr(i int64) *int64     { return &i }
+
+// Normalized tick includes spec-required hero identity, buyback, and
+// unreliable gold when present in raw GSI.
+func TestNormalizeIncludesSpecRequiredFields(t *testing.T) {
+	ts := mustParseTime(t, "2026-07-07T14:51:01.877Z")
+	tick := Normalize(ts, payloadFromJSON(t, miniSnapshot("item_boots", 1, 0)))
+	if len(tick.Players) != 1 {
+		t.Fatalf("players = %d, want 1", len(tick.Players))
+	}
+	p := tick.Players[0]
+	if p.HeroName != "npc_dota_hero_axe" {
+		t.Fatalf("hero_name = %q, want npc_dota_hero_axe", p.HeroName)
+	}
+	if p.HeroID == nil || *p.HeroID != 42 {
+		t.Fatalf("hero_id = %+v, want 42", p.HeroID)
+	}
+	if p.BuybackCost == nil || *p.BuybackCost != 1500 {
+		t.Fatalf("buyback_cost = %+v, want 1500", p.BuybackCost)
+	}
+	if p.BuybackCooldown == nil || *p.BuybackCooldown != 0 {
+		t.Fatalf("buyback_cooldown = %+v, want 0", p.BuybackCooldown)
+	}
+	if p.GoldUnreliable == nil || *p.GoldUnreliable != 300 {
+		t.Fatalf("gold_unreliable = %+v, want 300", p.GoldUnreliable)
+	}
+	if p.GoldReliable == nil || *p.GoldReliable != 200 {
+		t.Fatalf("gold_reliable = %+v, want 200", p.GoldReliable)
+	}
+	// Observed-field footprint records the new hero/player fields.
+	obs := strings.Join(p.ObservedFields, ",")
+	for _, want := range []string{"hero.team2.player0.name", "hero.team2.player0.id", "hero.team2.player0.buyback_cost", "hero.team2.player0.buyback_cooldown", "player.team2.player0.gold_unreliable"} {
+		if !strings.Contains(obs, want) {
+			t.Fatalf("observed fields missing %q: %s", want, obs)
+		}
+	}
+}
+
+// item_slot_changed events use full traceable source paths with team/player.
+func TestItemSlotChangedSourcePathsIncludeIdentity(t *testing.T) {
+	// tick1: item in slot0; tick2: same item relocated to stash0, slot0 emptied.
+	mk := func(slot string) string {
+		return `{
+			"provider":{"name":"Dota 2","appid":570},
+			"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},
+			"hero":{"team2":{"player0":{"name":"npc_dota_hero_axe","id":42,"alive":true,"level":6,"xpos":-100,"ypos":-100}}},
+			"player":{"team2":{"player0":{"name":"A","team_name":"radiant","net_worth":5000,"gold":500}}},
+			"items":{"team2":{"player0":{` + slot + `}}}
+		}`
+	}
+	engine := NewEngine()
+	engine.Observe(Normalize(time.Now(), payloadFromJSON(t, mk(`"slot0":{"name":"item_boots"}`))))
+	// Relocate: keep slot0 holding a different item name is not relocation.
+	// Put the same item name into stash0 and empty slot0 to trigger relocation.
+	t2 := Normalize(time.Now(), payloadFromJSON(t, mk(`"stash0":{"name":"item_boots"}`)))
+	derived := engine.Observe(t2)
+
+	var reloc *Event
+	for i := range derived {
+		if derived[i].Type == EventItemSlotChanged {
+			reloc = &derived[i]
+			break
+		}
+	}
+	if reloc == nil {
+		t.Fatalf("no item_slot_changed event emitted; got %v", eventTypes(derived))
+	}
+	if reloc.TeamKey != "team2" || reloc.Player != "player0" {
+		t.Fatalf("relocation identity = %+v", reloc)
+	}
+	if reloc.Field != "items.team2.player0.slot0->stash0" {
+		t.Fatalf("field = %q, want items.team2.player0.slot0->stash0", reloc.Field)
+	}
+	wantPaths := map[string]bool{"items.team2.player0.slot0.name": true, "items.team2.player0.stash0.name": true}
+	for _, p := range reloc.SourcePaths {
+		if !wantPaths[p] {
+			t.Fatalf("unexpected source path %q; field=%s", p, reloc.Field)
+		}
+		delete(wantPaths, p)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("missing source paths %v for field=%s", wantPaths, reloc.Field)
+	}
+}
+
+// Live WriteSummaryFiles reports the actual accepted live tick count, not 0.
+func TestWriteSummaryFilesTickCountMatchesLive(t *testing.T) {
+	dir := t.TempDir()
+	engine := NewEngine()
+	engine.Observe(Normalize(mustParseTime(t, "2026-07-07T14:51:01Z"), payloadFromJSON(t, miniSnapshot("item_boots", 1, 0))))
+	engine.Observe(Normalize(mustParseTime(t, "2026-07-07T14:51:02Z"), payloadFromJSON(t, miniSnapshot("item_boots", 1, 0))))
+	if err := WriteSummaryFiles(dir, "live-session", engine); err != nil {
+		t.Fatalf("WriteSummaryFiles: %v", err)
+	}
+	var s SummaryJSON
+	b, err := os.ReadFile(filepath.Join(dir, "analytics_summary.json"))
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("parse summary: %v", err)
+	}
+	if s.TickCount != 2 {
+		t.Fatalf("live summary tick_count = %d, want 2", s.TickCount)
+	}
+	if len(s.LatestPlayerEconomy) != 1 {
+		t.Fatalf("live summary latest_player_economy = %d players, want 1", len(s.LatestPlayerEconomy))
+	}
+	if s.LatestPlayerEconomy[0].HeroName != "npc_dota_hero_axe" {
+		t.Fatalf("live economy hero_name = %q", s.LatestPlayerEconomy[0].HeroName)
+	}
+	md, err := os.ReadFile(filepath.Join(dir, "analytics_summary.md"))
+	if err != nil {
+		t.Fatalf("read summary md: %v", err)
+	}
+	if !strings.Contains(string(md), "## Economy Summary") {
+		t.Fatalf("summary md missing economy section:\n%s", md)
+	}
+}
+
+// Offline derived_events.jsonl is complete even when the live ring buffer cap
+// would drop older events.
+func TestOfflineDerivedEventsCompleterThanRingCap(t *testing.T) {
+	dir := t.TempDir()
+	// Each tick advances gold for all ten players by >= meaningfulGoldDelta, so
+	// every consecutive tick pair yields ten gold_changed events. We use enough
+	// ticks that total events exceed maxEvents, proving offline artifact
+	// generation does not silently lose older events the way the live ring would.
+	const ticks = maxEvents/10 + 20
+	mk := func(gold float64) string {
+		players := goldPlayersJSON(gold)
+		return fmt.Sprintf(`{
+			"provider":{"name":"Dota 2","appid":570},
+			"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},
+			"player":{%s}
+		}`, players)
+	}
+	var raw strings.Builder
+	for i := 0; i < ticks; i++ {
+		gold := 500 + float64(i)*meaningfulGoldDelta
+		fmt.Fprintf(&raw, `{"received_at":"2026-07-07T14:51:00Z","payload":%s}`+"\n", mk(gold))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw.String()), 0o644); err != nil {
+		t.Fatalf("write raw: %v", err)
+	}
+	if _, err := AnalyzeSession(dir, "long-session"); err != nil {
+		t.Fatalf("AnalyzeSession: %v", err)
+	}
+	f, err := os.Open(filepath.Join(dir, "derived_events.jsonl"))
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	defer f.Close()
+	count := 0
+	dec := json.NewDecoder(f)
+	for {
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			t.Fatalf("decode event: %v", err)
+		}
+		count++
+	}
+	// Ten players × (ticks-1) deltas = total gold_changed events, all of which
+	// must be present in the offline artifact, exceeding the live ring cap.
+	want := 10 * (ticks - 1)
+	if count != want {
+		t.Fatalf("offline derived_events.jsonl count = %d, want %d (all events; ring cap %d)", count, want, maxEvents)
+	}
+	if want <= maxEvents {
+		t.Fatalf("test fixture produced %d events, expected to exceed ring cap %d", want, maxEvents)
+	}
+}
+
+// goldPlayersJSON returns a ten-player player-section JSON snippet where every
+// player's gold is set to the same value, spanning team2 player0-4 and team3
+// player5-9.
+func goldPlayersJSON(gold float64) string {
+	teams := []string{"team2", "team3"}
+	perTeam := 5
+	var b strings.Builder
+	for ti, team := range teams {
+		if ti > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`"` + team + `":{`)
+		for i := 0; i < perTeam; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			slot := fmt.Sprintf("player%d", ti*perTeam+i)
+			b.WriteString(fmt.Sprintf(`"%s":{"name":"P%d","team_name":"%s","net_worth":5000,"gold":%s}`, slot, ti*perTeam+i, teamFromKey(team), fmtFloat(gold)))
+		}
+		b.WriteString("}")
+	}
+	return b.String()
+}
+
+func teamFromKey(teamKey string) string {
+	switch teamKey {
+	case "team2":
+		return "radiant"
+	case "team3":
+		return "dire"
+	default:
+		return ""
+	}
+}
