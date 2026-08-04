@@ -15,6 +15,8 @@
       --accent: #9bcf53;
       --gold: #d4a845;
       --danger: #cf5f53;
+      --radiant: #5bcf83;
+      --dire: #cf6f53;
       --void: #0d0f0c;
     }
 
@@ -67,7 +69,8 @@
     }
 
     .metric,
-    .slot {
+    .slot,
+    .panel {
       border: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)), var(--panel);
       border-radius: 8px;
@@ -96,6 +99,12 @@
       display: grid;
       gap: 14px;
       margin-top: 18px;
+    }
+
+    .metrics-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
     }
 
     .lanes {
@@ -183,9 +192,165 @@
       color: var(--gold);
     }
 
+    .panels {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .panel {
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .panel h2 .count {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .panel-body {
+      max-height: 320px;
+      overflow: auto;
+      display: grid;
+      gap: 6px;
+    }
+
+    .empty-note {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 4px 0;
+    }
+
+    .feed-item {
+      display: grid;
+      grid-template-columns: 70px 1fr auto;
+      gap: 8px;
+      align-items: baseline;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--panel-2);
+      font-size: 12px;
+    }
+
+    .feed-item time {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .feed-type {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(155, 207, 83, 0.12);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: lowercase;
+    }
+
+    .feed-type.bad {
+      background: rgba(207, 95, 83, 0.16);
+      color: var(--danger);
+    }
+
+    .feed-type.gold {
+      background: rgba(212, 168, 69, 0.16);
+      color: var(--gold);
+    }
+
+    .feed-type.bld {
+      background: rgba(91, 207, 131, 0.14);
+      color: var(--radiant);
+    }
+
+    .feed-type.ward {
+      background: rgba(155, 207, 83, 0.10);
+      color: var(--ink);
+    }
+
+    .feed-meta {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .feed-delta {
+      font-size: 11px;
+      color: var(--ink);
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .feed-delta .conf {
+      color: var(--muted);
+      font-size: 10px;
+      margin-left: 4px;
+    }
+
+    .team-radiant { color: var(--radiant); }
+    .team-dire { color: var(--dire); }
+
+    .econ-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--panel-2);
+      font-size: 12px;
+      align-items: baseline;
+    }
+
+    .econ-row .who {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .econ-row .delta {
+      color: var(--gold);
+      font-weight: 700;
+    }
+
+    .econ-row .net {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .conclusion {
+      font-size: 12px;
+      color: var(--ink);
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--panel-2);
+    }
+
+    .conclusion .label-inline {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
     @media (max-width: 980px) {
       header,
-      .lanes {
+      .lanes,
+      .panels {
         grid-template-columns: 1fr;
       }
 
@@ -199,6 +364,15 @@
 
       .slot .cell:nth-child(n+5) {
         display: none;
+      }
+
+      .feed-item {
+        grid-template-columns: 64px 1fr;
+      }
+
+      .feed-delta {
+        grid-column: 1 / -1;
+        text-align: left;
       }
     }
 
@@ -230,7 +404,34 @@
       </section>
     </header>
     <main>
+      <section class="metrics-row" aria-label="Data freshness and counts">
+        <div class="metric"><span class="label">Snapshots</span><span class="value" id="snapshots">0</span></div>
+        <div class="metric"><span class="label">Ticks</span><span class="value" id="ticks">0</span></div>
+        <div class="metric"><span class="label">Ten-Player Frames</span><span class="value" id="frames">0</span></div>
+        <div class="metric"><span class="label">Events</span><span class="value" id="event-total">0</span></div>
+        <div class="metric"><span class="label">Freshness</span><span class="value" id="freshness">-</span></div>
+        <div class="metric"><span class="label">Time Range</span><span class="value" id="range">-</span></div>
+      </section>
       <section class="lanes" id="lanes"></section>
+      <section class="panels" aria-label="Analytics panels">
+        <article class="panel">
+          <h2>Recent Derived Events <span class="count" id="events-count"></span></h2>
+          <div class="panel-body" id="events-feed"></div>
+        </article>
+        <article class="panel">
+          <h2>Economy Deltas <span class="count" id="economy-count"></span></h2>
+          <div class="panel-body" id="economy"></div>
+        </article>
+        <article class="panel">
+          <h2>Objectives / Roshan / Buildings <span class="count" id="objectives-count"></span></h2>
+          <div class="panel-body" id="objectives"></div>
+        </article>
+        <article class="panel">
+          <h2>Ward Observations <span class="count" id="ward-count"></span></h2>
+          <div class="panel-body" id="wards"></div>
+          <div class="conclusion" id="ward-conclusion"></div>
+        </article>
+      </section>
     </main>
   </div>
 
@@ -240,6 +441,15 @@
       { key: "team2", name: "Radiant", start: 0 },
       { key: "team3", name: "Dire", start: 5 }
     ];
+
+    const ECON_TYPES = new Set(["gold_changed", "net_worth_changed"]);
+    const OBJECTIVE_TYPES = new Set([
+      "building_health_loss", "building_destroyed",
+      "roshan_state_changed", "tormentor_state_changed"
+    ]);
+    const WARD_TYPES = new Set([
+      "ward_counter_changed", "ward_purchase_cooldown_changed", "ward_purchase_started"
+    ]);
 
     function get(obj, path) {
       return path.reduce((acc, key) => acc && acc[key] !== undefined ? acc[key] : undefined, obj);
@@ -262,6 +472,223 @@
     function pct(current, max) {
       if (current === undefined || max === undefined || Number(max) === 0) return "-";
       return `${current}/${max}`;
+    }
+
+    function num(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function clamp(value, digits = 0) {
+      const n = num(value);
+      if (n === null) return fmt(value);
+      return Number.isInteger(n) ? String(n) : n.toFixed(digits);
+    }
+
+    function timeAgo(iso, now) {
+      if (!iso) return "-";
+      const t = Date.parse(iso);
+      if (!Number.isFinite(t)) return fmt(iso);
+      const secs = Math.max(0, Math.round((now - t) / 1000));
+      if (secs < 2) return "now";
+      if (secs < 60) return `${secs}s ago`;
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return `${mins}m ago`;
+      const hrs = Math.floor(mins / 60);
+      return `${hrs}h ago`;
+    }
+
+    function shortTime(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return String(iso);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+
+    function durationSeconds(startISO, endISO) {
+      const a = Date.parse(startISO), b = Date.parse(endISO);
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return null;
+      return Math.round((b - a) / 1000);
+    }
+
+    function eventTotal(counts) {
+      let total = 0;
+      for (const k in counts) total += Number(counts[k]) || 0;
+      return total;
+    }
+
+    function eventTypeClass(type) {
+      if (OBJECTIVE_TYPES.has(type)) return "bld";
+      if (ECON_TYPES.has(type)) return "gold";
+      if (WARD_TYPES.has(type)) return "ward";
+      if (type === "hero_death" || type === "death_counter" || type === "building_destroyed") return "bad";
+      return "";
+    }
+
+    function teamClass(team) {
+      if (!team) return "";
+      return team === "radiant" || team === "Radiant" ? "team-radiant" : "team-dire";
+    }
+
+    function eventWho(ev) {
+      const team = html(fmt(ev.team, ""));
+      const player = html(fmt(ev.player, ""));
+      if (team && player) return `${team}/${player}`;
+      if (team) return team;
+      if (player) return player;
+      return "";
+    }
+
+    function eventField(ev) {
+      return html(fmt(ev.field, ""));
+    }
+
+    function eventDelta(ev) {
+      const before = ev.before;
+      const after = ev.after;
+      if (before === undefined && after === undefined) return "";
+      return `${html(clamp(before))} → ${html(clamp(after))}`;
+    }
+
+    function renderEventItem(ev) {
+      const who = eventWho(ev);
+      const meta = [
+        who ? `<span class="${teamClass(ev.team)}">${who}</span>` : "",
+        eventField(ev)
+      ].filter(Boolean).join(" · ");
+      const delta = eventDelta(ev);
+      const conf = html(fmt(ev.confidence, ""));
+      return `<div class="feed-item">
+        <time>${html(shortTime(ev.received_at))}</time>
+        <span><span class="feed-type ${eventTypeClass(ev.type)}">${html(ev.type)}</span>${meta ? ` <span class="feed-meta">${meta}</span>` : ""}</span>
+        <span class="feed-delta">${delta}${conf ? `<span class="conf">${conf}</span>` : ""}</span>
+      </div>`;
+    }
+
+    function renderFeed(container, events, emptyNote = "none observed") {
+      if (!Array.isArray(events) || events.length === 0) {
+        container.innerHTML = `<div class="empty-note">${emptyNote}</div>`;
+        return;
+      }
+      const ordered = events.slice().reverse();
+      container.innerHTML = ordered.slice(0, 60).map(renderEventItem).join("");
+    }
+
+    function renderEconomy(container, events, latest) {
+      const econ = (Array.isArray(events) ? events : []).filter(ev => ECON_TYPES.has(ev.type));
+      const totals = new Map();
+      for (const ev of econ) {
+        const key = `${ev.team || ""}|${ev.player || ""}`;
+        const before = num(ev.before);
+        const after = num(ev.after);
+        const delta = before !== null && after !== null ? after - before : null;
+        const entry = totals.get(key) || { team: ev.team, player: ev.player, count: 0, delta: 0 };
+        entry.count++;
+        if (delta !== null) entry.delta += delta;
+        totals.set(key, entry);
+      }
+
+      const currentByPlayer = new Map();
+      for (const team of teams) {
+        const players = get(latest, ["player", team.key]) || {};
+        for (const playerKey of Object.keys(players || {})) {
+          const p = players[playerKey] || {};
+          const gold = num(p.gold);
+          const net = num(p.net_worth);
+          if (gold === null && net === null) continue;
+          currentByPlayer.set(`${team.name}|${playerKey}`, { gold, net });
+        }
+      }
+
+      if (econ.length === 0 && currentByPlayer.size === 0) {
+        container.innerHTML = `<div class="empty-note">no economy deltas observed</div>`;
+        return;
+      }
+
+      const teamTotals = { Radiant: 0, Dire: 0 };
+      const rows = [...totals.values()].sort((a, b) => b.count - a.count).slice(0, 20).map(entry => {
+        if (entry.team) teamTotals[entry.team] = (teamTotals[entry.team] || 0) + entry.delta;
+        const who = html(fmt(entry.player, ""));
+        const teamName = entry.team === "radiant" ? "Radiant" : entry.team === "dire" ? "Dire" : fmt(entry.team, "");
+        const cur = currentByPlayer.get(`${teamName}|${entry.player}`) || {};
+        const curNet = cur.net !== null && cur.net !== undefined ? `${clamp(cur.net)}` : "";
+        return `<div class="econ-row">
+          <span class="who"><span class="${teamClass(entry.team)}">${html(teamName)}</span> ${who}</span>
+          <span class="delta">${entry.delta > 0 ? "+" : ""}${clamp(entry.delta)} (${entry.count}×)</span>
+          <span class="net">net ${curNet || "-"}</span>
+        </div>`;
+      });
+
+      const summary = `<div class="empty-note">team deltas — Radiant ${clamp(teamTotals.Radiant)} · Dire ${clamp(teamTotals.Dire)}</div>`;
+      container.innerHTML = summary + rows.join("");
+    }
+
+    function renderObjectives(container, events, analytics) {
+      const objectiveEvents = (Array.isArray(events) ? events : []).filter(ev => OBJECTIVE_TYPES.has(ev.type));
+      const roshan = Array.isArray(analytics.roshan_observations) ? analytics.roshan_observations : [];
+      const buildings = Array.isArray(analytics.building_destroyed) ? analytics.building_destroyed : [];
+      const roshanTotal = num(analytics.roshan_observations_total) ?? roshan.length;
+      const buildingsTotal = num(analytics.building_destroyed_total) ?? buildings.length;
+
+      if (objectiveEvents.length === 0 && roshanTotal === 0 && buildingsTotal === 0) {
+        container.innerHTML = `<div class="empty-note">none observed</div>`;
+        return;
+      }
+
+      const ordered = objectiveEvents.slice().reverse().slice(0, 60).map(renderEventItem);
+      const staticRows = [];
+      if (roshanTotal > 0) {
+        staticRows.push(`<div class="empty-note">Roshan state changes: ${clamp(roshanTotal)}</div>`);
+      }
+      if (buildingsTotal > 0) {
+        staticRows.push(`<div class="empty-note">Buildings destroyed: ${clamp(buildingsTotal)}</div>`);
+      }
+      container.innerHTML = staticRows.join("") + ordered.join("");
+    }
+
+    function renderWards(container, events, analytics) {
+      const wardEvents = (Array.isArray(events) ? events : []).filter(ev => WARD_TYPES.has(ev.type));
+      const observations = Array.isArray(analytics.ward_observations) ? analytics.ward_observations : [];
+      const wardTotal = num(analytics.ward_observations_total) ?? (observations.length || wardEvents.length);
+      const conclusion = html(fmt(analytics.ward_coordinate_conclusion, ""));
+
+      if (wardEvents.length === 0 && observations.length === 0 && !conclusion) {
+        container.innerHTML = `<div class="empty-note">none observed</div>`;
+        return;
+      }
+
+      const ordered = wardEvents.slice().reverse().slice(0, 60).map(renderEventItem);
+      const header = `<div class="empty-note">ward-related events: ${clamp(wardTotal)}</div>`;
+      container.innerHTML = header + ordered.join("");
+
+      const conclusionEl = document.querySelector("#ward-conclusion");
+      if (conclusionEl) {
+        conclusionEl.innerHTML = `<span class="label-inline">Exact ward coordinates</span><br>${conclusion || "not observed"}`;
+      }
+    }
+
+    function renderCounts(latest, analytics, profile, events) {
+      const snapshots = num(latest && latest.snapshot_count) || num(profile && profile.snapshot_count) || 0;
+      const ticks = num(analytics && analytics.tick_count) || 0;
+      const frames = num(analytics && analytics.complete_ten_player_frames) || 0;
+      const total = analytics && analytics.event_counts ? eventTotal(analytics.event_counts) : 0;
+      document.querySelector("#snapshots").textContent = clamp(snapshots);
+      document.querySelector("#ticks").textContent = clamp(ticks);
+      document.querySelector("#frames").textContent = clamp(frames);
+      document.querySelector("#event-total").textContent = clamp(total);
+      document.querySelector("#events-count").textContent = Array.isArray(events) ? `${events.length} recent` : "";
+
+      const now = Date.now();
+      const freshness = (latest && latest.received_at) || (analytics && analytics.last_seen_at) || (profile && profile.last_seen_at);
+      document.querySelector("#freshness").textContent = freshness ? timeAgo(freshness, now) : "-";
+
+      const start = (analytics && analytics.started_at) || (profile && profile.started_at);
+      const end = (analytics && analytics.last_seen_at) || (profile && profile.last_seen_at);
+      const dur = start && end ? durationSeconds(start, end) : null;
+      document.querySelector("#range").textContent = dur !== null ? `${dur}s` : "-";
     }
 
     function render(snapshot) {
@@ -296,16 +723,38 @@
       </article>`;
     }
 
-    async function refresh() {
-      try {
-        const response = await fetch("/api/latest", { cache: "no-store" });
-        render(await response.json());
-      } catch (error) {
-        render({ status: "offline", session_id: "-", map: {} });
-      }
+    async function fetchJSON(path) {
+      const response = await fetch(path, { cache: "no-store" });
+      if (!response.ok) return null;
+      return await response.json();
     }
 
-    refresh();
+    async function refresh() {
+      const tasks = [
+        fetchJSON("/api/latest"),
+        fetchJSON("/api/analytics"),
+        fetchJSON("/api/events"),
+        fetchJSON("/api/profile")
+      ];
+      const [latest, analytics, events, profile] = await Promise.allSettled(tasks);
+
+      const latestVal = latest.status === "fulfilled" && latest.value ? latest.value : { status: "offline", session_id: "-", map: {} };
+      const analyticsVal = analytics.status === "fulfilled" && analytics.value ? analytics.value : { event_counts: {}, recent_events: [], roshan_observations: [], roshan_observations_total: 0, building_destroyed: [], building_destroyed_total: 0, ward_observations: [], ward_observations_total: 0, ward_coordinate_conclusion: "" };
+      const eventsVal = events.status === "fulfilled" && Array.isArray(events.value) ? events.value : [];
+      const profileVal = profile.status === "fulfilled" && profile.value ? profile.value : { fields: [] };
+
+      render(latestVal);
+      renderCounts(latestVal, analyticsVal, profileVal, eventsVal);
+      renderFeed(document.querySelector("#events-feed"), eventsVal, "none observed");
+      renderEconomy(document.querySelector("#economy"), eventsVal, latestVal);
+      renderObjectives(document.querySelector("#objectives"), eventsVal, analyticsVal);
+      renderWards(document.querySelector("#wards"), eventsVal, analyticsVal);
+      document.querySelector("#economy-count").textContent = eventsVal.filter(ev => ECON_TYPES.has(ev.type)).length ? `${eventsVal.filter(ev => ECON_TYPES.has(ev.type)).length} deltas` : "";
+      document.querySelector("#objectives-count").textContent = eventsVal.filter(ev => OBJECTIVE_TYPES.has(ev.type)).length ? `${eventsVal.filter(ev => OBJECTIVE_TYPES.has(ev.type)).length} changes` : "";
+      document.querySelector("#ward-count").textContent = eventsVal.filter(ev => WARD_TYPES.has(ev.type)).length ? `${eventsVal.filter(ev => WARD_TYPES.has(ev.type)).length} events` : "";
+    }
+
+    refresh().catch(() => render({ status: "offline", session_id: "-", map: {} }));
     setInterval(refresh, 1000);
   </script>
 </body>
