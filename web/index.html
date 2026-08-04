@@ -630,19 +630,21 @@
       const objectiveEvents = (Array.isArray(events) ? events : []).filter(ev => OBJECTIVE_TYPES.has(ev.type));
       const roshan = Array.isArray(analytics.roshan_observations) ? analytics.roshan_observations : [];
       const buildings = Array.isArray(analytics.building_destroyed) ? analytics.building_destroyed : [];
+      const roshanTotal = num(analytics.roshan_observations_total) ?? roshan.length;
+      const buildingsTotal = num(analytics.building_destroyed_total) ?? buildings.length;
 
-      if (objectiveEvents.length === 0 && roshan.length === 0 && buildings.length === 0) {
+      if (objectiveEvents.length === 0 && roshanTotal === 0 && buildingsTotal === 0) {
         container.innerHTML = `<div class="empty-note">none observed</div>`;
         return;
       }
 
       const ordered = objectiveEvents.slice().reverse().slice(0, 60).map(renderEventItem);
       const staticRows = [];
-      if (roshan.length > 0) {
-        staticRows.push(`<div class="empty-note">Roshan state changes: ${roshan.length}</div>`);
+      if (roshanTotal > 0) {
+        staticRows.push(`<div class="empty-note">Roshan state changes: ${clamp(roshanTotal)}</div>`);
       }
-      if (buildings.length > 0) {
-        staticRows.push(`<div class="empty-note">Buildings destroyed: ${buildings.length}</div>`);
+      if (buildingsTotal > 0) {
+        staticRows.push(`<div class="empty-note">Buildings destroyed: ${clamp(buildingsTotal)}</div>`);
       }
       container.innerHTML = staticRows.join("") + ordered.join("");
     }
@@ -650,6 +652,7 @@
     function renderWards(container, events, analytics) {
       const wardEvents = (Array.isArray(events) ? events : []).filter(ev => WARD_TYPES.has(ev.type));
       const observations = Array.isArray(analytics.ward_observations) ? analytics.ward_observations : [];
+      const wardTotal = num(analytics.ward_observations_total) ?? (observations.length || wardEvents.length);
       const conclusion = html(fmt(analytics.ward_coordinate_conclusion, ""));
 
       if (wardEvents.length === 0 && observations.length === 0 && !conclusion) {
@@ -658,7 +661,7 @@
       }
 
       const ordered = wardEvents.slice().reverse().slice(0, 60).map(renderEventItem);
-      const header = `<div class="empty-note">ward-related events: ${observations.length || wardEvents.length}</div>`;
+      const header = `<div class="empty-note">ward-related events: ${clamp(wardTotal)}</div>`;
       container.innerHTML = header + ordered.join("");
 
       const conclusionEl = document.querySelector("#ward-conclusion");
@@ -736,7 +739,7 @@
       const [latest, analytics, events, profile] = await Promise.allSettled(tasks);
 
       const latestVal = latest.status === "fulfilled" && latest.value ? latest.value : { status: "offline", session_id: "-", map: {} };
-      const analyticsVal = analytics.status === "fulfilled" && analytics.value ? analytics.value : { event_counts: {}, recent_events: [], roshan_observations: [], building_destroyed: [], ward_observations: [], ward_coordinate_conclusion: "" };
+      const analyticsVal = analytics.status === "fulfilled" && analytics.value ? analytics.value : { event_counts: {}, recent_events: [], roshan_observations: [], roshan_observations_total: 0, building_destroyed: [], building_destroyed_total: 0, ward_observations: [], ward_observations_total: 0, ward_coordinate_conclusion: "" };
       const eventsVal = events.status === "fulfilled" && Array.isArray(events.value) ? events.value : [];
       const profileVal = profile.status === "fulfilled" && profile.value ? profile.value : { fields: [] };
 

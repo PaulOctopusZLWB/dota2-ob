@@ -13,25 +13,25 @@ const (
 
 // Baseline event type identifiers.
 const (
-	EventHeroDeath            = "hero_death"
-	EventHeroRespawn          = "hero_respawn"
-	EventKillCounter          = "kill_counter"
-	EventDeathCounter         = "death_counter"
-	EventAssistCounter        = "assist_counter"
-	EventGoldChanged          = "gold_changed"
-	EventNetWorthChanged      = "net_worth_changed"
-	EventItemAcquired         = "item_acquired"
-	EventItemRemoved          = "item_removed"
-	EventItemReplaced         = "item_replaced"
-	EventItemSlotChanged      = "item_slot_changed"
-	EventAbilityLevelChanged  = "ability_level_changed"
-	EventAbilityCooldownState = "ability_cooldown_state"
-	EventBuildingHealthLoss   = "building_health_loss"
-	EventBuildingDestroyed    = "building_destroyed"
+	EventHeroDeath             = "hero_death"
+	EventHeroRespawn           = "hero_respawn"
+	EventKillCounter           = "kill_counter"
+	EventDeathCounter          = "death_counter"
+	EventAssistCounter         = "assist_counter"
+	EventGoldChanged           = "gold_changed"
+	EventNetWorthChanged       = "net_worth_changed"
+	EventItemAcquired          = "item_acquired"
+	EventItemRemoved           = "item_removed"
+	EventItemReplaced          = "item_replaced"
+	EventItemSlotChanged       = "item_slot_changed"
+	EventAbilityLevelChanged   = "ability_level_changed"
+	EventAbilityCooldownState  = "ability_cooldown_state"
+	EventBuildingHealthLoss    = "building_health_loss"
+	EventBuildingDestroyed     = "building_destroyed"
 	EventRoshanStateChanged    = "roshan_state_changed"
 	EventTormentorStateChanged = "tormentor_state_changed"
-	EventWardCounterChanged   = "ward_counter_changed"
-	EventWardPurchaseCooldown = "ward_purchase_cooldown_changed"
+	EventWardCounterChanged    = "ward_counter_changed"
+	EventWardPurchaseCooldown  = "ward_purchase_cooldown_changed"
 	EventWardPurchaseStarted   = "ward_purchase_started"
 )
 
@@ -56,6 +56,14 @@ const maxEvents = 10000
 // recentEventsAPI bounds the /api/events and summary recent-feed surface.
 const recentEventsAPI = 200
 
+// maxObservationsAPI bounds the per-type observation arrays (Roshan, building,
+// ward) retained by the engine and returned in the live /api/analytics
+// snapshot. The most recent observations are kept; the snapshot also reports
+// the total count and a truncation flag so traceability is preserved without
+// growing the live response for long sessions. Offline derived_events.jsonl is
+// written from the full derived-event list and stays complete.
+const maxObservationsAPI = 200
+
 // Event is one delta-derived observation. It only ever references fields that
 // were observed in two consecutive ticks.
 type Event struct {
@@ -77,21 +85,24 @@ type Event struct {
 // deltas between consecutive normalized ticks. It never fabricates state that
 // was not present in the raw payload.
 type Engine struct {
-	mu                       sync.Mutex
-	prev                     *NormalizedTick
+	mu   sync.Mutex
+	prev *NormalizedTick
 	// latestPlayerTick is the most recent tick that observed at least one
 	// player/hero. It backs the per-player economy summary, so a trailing
 	// post-game tick with an empty player block does not wipe the summary.
-	latestPlayerTick         *NormalizedTick
-	events                   []Event
-	tickCount                uint64
-	completeTenPlayerFrames  uint64
-	startedAt                time.Time
-	lastSeenAt               time.Time
-	eventCounts              map[string]int
-	roshanObservations       []Event
-	buildingDestroyedEvents  []Event
-	wardObservations         []Event
+	latestPlayerTick        *NormalizedTick
+	events                  []Event
+	tickCount               uint64
+	completeTenPlayerFrames uint64
+	startedAt               time.Time
+	lastSeenAt              time.Time
+	eventCounts             map[string]int
+	roshanObservations      []Event
+	roshanObservationsTotal int
+	buildingDestroyedEvents []Event
+	buildingDestroyedTotal  int
+	wardObservations        []Event
+	wardObservationsTotal   int
 }
 
 // NewEngine returns a fresh analytics engine.
@@ -149,11 +160,14 @@ func (e *Engine) recordEvent(ev Event) {
 	e.eventCounts[ev.Type]++
 	switch ev.Type {
 	case EventRoshanStateChanged:
-		e.roshanObservations = append(e.roshanObservations, ev)
+		e.roshanObservationsTotal++
+		e.roshanObservations = appendBounded(e.roshanObservations, ev, maxObservationsAPI)
 	case EventBuildingDestroyed:
-		e.buildingDestroyedEvents = append(e.buildingDestroyedEvents, ev)
+		e.buildingDestroyedTotal++
+		e.buildingDestroyedEvents = appendBounded(e.buildingDestroyedEvents, ev, maxObservationsAPI)
 	case EventWardCounterChanged, EventWardPurchaseCooldown, EventWardPurchaseStarted:
-		e.wardObservations = append(e.wardObservations, ev)
+		e.wardObservationsTotal++
+		e.wardObservations = appendBounded(e.wardObservations, ev, maxObservationsAPI)
 	}
 }
 
@@ -200,16 +214,16 @@ func (e *Engine) eventCountsSnapshot() map[string]int {
 	return out
 }
 
-func (e *Engine) roshanObservationsSnapshot() []Event {
-	return cloneEvents(e.roshanObservations)
-}
-
-func (e *Engine) buildingDestroyedSnapshot() []Event {
-	return cloneEvents(e.buildingDestroyedEvents)
-}
-
-func (e *Engine) wardObservationsSnapshot() []Event {
-	return cloneEvents(e.wardObservations)
+// appendBounded appends ev to in, then trims the oldest entries so the slice
+// never exceeds limit. The most recent observations are retained; the running
+// total counter tracked by the caller preserves the full count for the API
+// even though only the tail is retained in memory.
+func appendBounded(in []Event, ev Event, limit int) []Event {
+	in = append(in, ev)
+	if len(in) > limit {
+		in = append([]Event(nil), in[len(in)-limit:]...)
+	}
+	return in
 }
 
 func cloneEvents(in []Event) []Event {
@@ -601,17 +615,17 @@ func (e *Engine) deriveItemRelocations(ctx eventContext, p PlayerTick, cur, prev
 		// relocation can be traced back to a raw player item path.
 		prefix := "items." + p.TeamKey + "." + p.Slot + "."
 		out = append(out, Event{
-			ReceivedAt: ctx.receivedAt,
-			Type:        EventItemSlotChanged,
-			Team:        p.TeamName,
-			TeamKey:     p.TeamKey,
-			Player:      p.Slot,
-			Field:       prefix + from + "->" + to,
-			Before:      from,
-			After:       to,
-			SourcePaths: []string{prefix + from + ".name", prefix + to + ".name"},
-			Confidence:  ConfidenceObserved,
-			MatchID:     ctx.matchID,
+			ReceivedAt:   ctx.receivedAt,
+			Type:         EventItemSlotChanged,
+			Team:         p.TeamName,
+			TeamKey:      p.TeamKey,
+			Player:       p.Slot,
+			Field:        prefix + from + "->" + to,
+			Before:       from,
+			After:        to,
+			SourcePaths:  []string{prefix + from + ".name", prefix + to + ".name"},
+			Confidence:   ConfidenceObserved,
+			MatchID:      ctx.matchID,
 			MapClockTime: ctx.clockTime,
 		})
 	}
@@ -621,17 +635,17 @@ func (e *Engine) deriveItemRelocations(ctx eventContext, p PlayerTick, cur, prev
 func (e *Engine) itemEvent(ctx eventContext, p PlayerTick, evType, slot string, before, after ItemSlot) Event {
 	path := "items." + p.TeamKey + "." + p.Slot + "." + slot + ".name"
 	return Event{
-		ReceivedAt: ctx.receivedAt,
-		Type:       evType,
-		Team:       p.TeamName,
-		TeamKey:    p.TeamKey,
-		Player:     p.Slot,
-		Field:      path,
-		Before:     itemNameOrEmpty(before),
-		After:      itemNameOrEmpty(after),
-		SourcePaths: []string{path},
-		Confidence: ConfidenceObserved,
-		MatchID:    ctx.matchID,
+		ReceivedAt:   ctx.receivedAt,
+		Type:         evType,
+		Team:         p.TeamName,
+		TeamKey:      p.TeamKey,
+		Player:       p.Slot,
+		Field:        path,
+		Before:       itemNameOrEmpty(before),
+		After:        itemNameOrEmpty(after),
+		SourcePaths:  []string{path},
+		Confidence:   ConfidenceObserved,
+		MatchID:      ctx.matchID,
 		MapClockTime: ctx.clockTime,
 	}
 }
@@ -650,17 +664,17 @@ func (e *Engine) deriveAbilities(ctx eventContext, cur, prev PlayerTick) []Event
 		if curOK && prevOK && curL > prevL {
 			path := "abilities." + cur.TeamKey + "." + cur.Slot + "." + a.Slot + ".level"
 			out = append(out, Event{
-				ReceivedAt: ctx.receivedAt,
-				Type:        EventAbilityLevelChanged,
-				Team:        cur.TeamName,
-				TeamKey:     cur.TeamKey,
-				Player:      cur.Slot,
-				Field:       path,
-				Before:      prevL,
-				After:       curL,
-				SourcePaths: []string{path},
-				Confidence:  ConfidenceObserved,
-				MatchID:     ctx.matchID,
+				ReceivedAt:   ctx.receivedAt,
+				Type:         EventAbilityLevelChanged,
+				Team:         cur.TeamName,
+				TeamKey:      cur.TeamKey,
+				Player:       cur.Slot,
+				Field:        path,
+				Before:       prevL,
+				After:        curL,
+				SourcePaths:  []string{path},
+				Confidence:   ConfidenceObserved,
+				MatchID:      ctx.matchID,
 				MapClockTime: ctx.clockTime,
 			})
 		}
@@ -673,17 +687,17 @@ func (e *Engine) deriveAbilities(ctx eventContext, cur, prev PlayerTick) []Event
 			if wasReady != nowReady {
 				path := "abilities." + cur.TeamKey + "." + cur.Slot + "." + a.Slot + ".cooldown"
 				out = append(out, Event{
-					ReceivedAt: ctx.receivedAt,
-					Type:        EventAbilityCooldownState,
-					Team:        cur.TeamName,
-					TeamKey:     cur.TeamKey,
-					Player:      cur.Slot,
-					Field:       path,
-					Before:      prevCD,
-					After:       curCD,
-					SourcePaths: []string{path},
-					Confidence:  ConfidenceObserved,
-					MatchID:     ctx.matchID,
+					ReceivedAt:   ctx.receivedAt,
+					Type:         EventAbilityCooldownState,
+					Team:         cur.TeamName,
+					TeamKey:      cur.TeamKey,
+					Player:       cur.Slot,
+					Field:        path,
+					Before:       prevCD,
+					After:        curCD,
+					SourcePaths:  []string{path},
+					Confidence:   ConfidenceObserved,
+					MatchID:      ctx.matchID,
 					MapClockTime: ctx.clockTime,
 				})
 			}

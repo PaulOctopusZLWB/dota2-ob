@@ -11,18 +11,22 @@ import (
 
 // Snapshot is the bounded live API response for /api/analytics.
 type Snapshot struct {
-	Status                   string         `json:"status"`
-	SessionID                string         `json:"session_id,omitempty"`
-	TickCount                uint64         `json:"tick_count"`
-	StartedAt                *time.Time     `json:"started_at,omitempty"`
-	LastSeenAt               *time.Time     `json:"last_seen_at,omitempty"`
-	CompleteTenPlayerFrames  uint64         `json:"complete_ten_player_frames"`
-	EventCounts              map[string]int `json:"event_counts"`
-	RecentEvents             []Event        `json:"recent_events"`
-	RoshanObservations       []Event        `json:"roshan_observations,omitempty"`
-	BuildingDestroyed        []Event        `json:"building_destroyed,omitempty"`
-	WardObservations         []Event        `json:"ward_observations,omitempty"`
-	WardCoordinateConclusion  string         `json:"ward_coordinate_conclusion"`
+	Status                   string          `json:"status"`
+	SessionID                string          `json:"session_id,omitempty"`
+	TickCount                uint64          `json:"tick_count"`
+	StartedAt                *time.Time      `json:"started_at,omitempty"`
+	LastSeenAt               *time.Time      `json:"last_seen_at,omitempty"`
+	CompleteTenPlayerFrames  uint64          `json:"complete_ten_player_frames"`
+	EventCounts              map[string]int  `json:"event_counts"`
+	RecentEvents             []Event         `json:"recent_events"`
+	RoshanObservations       []Event         `json:"roshan_observations,omitempty"`
+	RoshanObservationsTotal  int             `json:"roshan_observations_total"`
+	BuildingDestroyed        []Event         `json:"building_destroyed,omitempty"`
+	BuildingDestroyedTotal   int             `json:"building_destroyed_total"`
+	WardObservations         []Event         `json:"ward_observations,omitempty"`
+	WardObservationsTotal    int             `json:"ward_observations_total"`
+	ObservationsTruncated    bool            `json:"observations_truncated,omitempty"`
+	WardCoordinateConclusion string          `json:"ward_coordinate_conclusion"`
 	LatestPlayerEconomy      []PlayerEconomy `json:"latest_player_economy,omitempty"`
 }
 
@@ -54,6 +58,14 @@ func (e *Engine) Snapshot(sessionID string) Snapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// Observation arrays are bounded by the engine (most recent entries
+	// retained). The *_total counters and ObservationsTruncated flag preserve
+	// traceability so /api/analytics stays bounded for long sessions even
+	// though the full count is reported.
+	roshan := cloneEvents(e.roshanObservations)
+	buildings := cloneEvents(e.buildingDestroyedEvents)
+	wards := cloneEvents(e.wardObservations)
+
 	snap := Snapshot{
 		Status:                  "empty",
 		SessionID:               sessionID,
@@ -61,11 +73,17 @@ func (e *Engine) Snapshot(sessionID string) Snapshot {
 		CompleteTenPlayerFrames: e.completeTenPlayerFrames,
 		EventCounts:             e.eventCountsSnapshot(),
 		RecentEvents:            recentEventSlice(e.events),
-		RoshanObservations:      e.roshanObservationsSnapshot(),
-		BuildingDestroyed:       e.buildingDestroyedSnapshot(),
-		WardObservations:        e.wardObservationsSnapshot(),
+		RoshanObservations:      roshan,
+		RoshanObservationsTotal: e.roshanObservationsTotal,
+		BuildingDestroyed:       buildings,
+		BuildingDestroyedTotal:  e.buildingDestroyedTotal,
+		WardObservations:        wards,
+		WardObservationsTotal:   e.wardObservationsTotal,
+		ObservationsTruncated: e.roshanObservationsTotal > len(roshan) ||
+			e.buildingDestroyedTotal > len(buildings) ||
+			e.wardObservationsTotal > len(wards),
 		WardCoordinateConclusion: WardCoordinateConclusion,
-		LatestPlayerEconomy:     economyFromTick(e.latestPlayerTick),
+		LatestPlayerEconomy:      economyFromTick(e.latestPlayerTick),
 	}
 	if e.tickCount > 0 {
 		snap.Status = "ok"
@@ -131,19 +149,23 @@ func WriteArtifacts(sessionDir, sessionID string, ticks []NormalizedTick, events
 }
 
 type SummaryJSON struct {
-	SessionID                string         `json:"session_id"`
-	TickCount                int            `json:"tick_count"`
-	StartedAt                *time.Time     `json:"started_at,omitempty"`
-	LastSeenAt               *time.Time     `json:"last_seen_at,omitempty"`
-	ObservedDurationSeconds  float64        `json:"observed_duration_seconds,omitempty"`
-	CompleteTenPlayerFrames  int            `json:"complete_ten_player_frames"`
-	EventCounts              map[string]int `json:"event_counts"`
-	EventTotal               int            `json:"event_total"`
-	RoshanObservations       []Event        `json:"roshan_observations,omitempty"`
-	BuildingObservations     []Event        `json:"building_observations,omitempty"`
-	WardObservations         []Event        `json:"ward_observations,omitempty"`
-	WardCoordinateConclusion string         `json:"ward_coordinate_conclusion"`
-	LatestPlayerEconomy      []PlayerEconomy `json:"latest_player_economy,omitempty"`
+	SessionID                 string          `json:"session_id"`
+	TickCount                 int             `json:"tick_count"`
+	StartedAt                 *time.Time      `json:"started_at,omitempty"`
+	LastSeenAt                *time.Time      `json:"last_seen_at,omitempty"`
+	ObservedDurationSeconds   float64         `json:"observed_duration_seconds,omitempty"`
+	CompleteTenPlayerFrames   int             `json:"complete_ten_player_frames"`
+	EventCounts               map[string]int  `json:"event_counts"`
+	EventTotal                int             `json:"event_total"`
+	RoshanObservations        []Event         `json:"roshan_observations,omitempty"`
+	RoshanObservationsTotal   int             `json:"roshan_observations_total"`
+	BuildingObservations      []Event         `json:"building_observations,omitempty"`
+	BuildingObservationsTotal int             `json:"building_observations_total"`
+	WardObservations          []Event         `json:"ward_observations,omitempty"`
+	WardObservationsTotal     int             `json:"ward_observations_total"`
+	ObservationsTruncated     bool            `json:"observations_truncated,omitempty"`
+	WardCoordinateConclusion  string          `json:"ward_coordinate_conclusion"`
+	LatestPlayerEconomy       []PlayerEconomy `json:"latest_player_economy,omitempty"`
 }
 
 func buildSummaryJSON(sessionID string, ticks []NormalizedTick, events []Event, snap Snapshot) SummaryJSON {
@@ -155,16 +177,40 @@ func buildSummaryJSON(sessionID string, ticks []NormalizedTick, events []Event, 
 	if tickCount == 0 && len(ticks) > 0 {
 		tickCount = len(ticks)
 	}
+	// Observation arrays: the live path (WriteSummaryFiles, events == nil)
+	// carries the bounded snapshot tail plus its totals/truncation flag so the
+	// persisted live summary stays bounded like /api/analytics. The offline
+	// path (WriteArtifacts, events != nil) reconstructs the full observation
+	// slices from the complete derived-event list so analytics_summary.json
+	// stays complete for long sessions; derived_events.jsonl is also complete.
+	roshan := snap.RoshanObservations
+	buildings := snap.BuildingDestroyed
+	wards := snap.WardObservations
+	roshanTotal := snap.RoshanObservationsTotal
+	buildingsTotal := snap.BuildingDestroyedTotal
+	wardsTotal := snap.WardObservationsTotal
+	truncated := snap.ObservationsTruncated
+	if events != nil {
+		roshan, buildings, wards = observationEvents(events)
+		roshanTotal = len(roshan)
+		buildingsTotal = len(buildings)
+		wardsTotal = len(wards)
+		truncated = false
+	}
 	s := SummaryJSON{
-		SessionID:                sessionID,
-		TickCount:                tickCount,
-		CompleteTenPlayerFrames:  int(snap.CompleteTenPlayerFrames),
-		EventCounts:              snap.EventCounts,
-		RoshanObservations:       snap.RoshanObservations,
-		BuildingObservations:     snap.BuildingDestroyed,
-		WardObservations:         snap.WardObservations,
-		WardCoordinateConclusion: WardCoordinateConclusion,
-		LatestPlayerEconomy:      snap.LatestPlayerEconomy,
+		SessionID:                 sessionID,
+		TickCount:                 tickCount,
+		CompleteTenPlayerFrames:   int(snap.CompleteTenPlayerFrames),
+		EventCounts:               snap.EventCounts,
+		RoshanObservations:        roshan,
+		RoshanObservationsTotal:   roshanTotal,
+		BuildingObservations:      buildings,
+		BuildingObservationsTotal: buildingsTotal,
+		WardObservations:          wards,
+		WardObservationsTotal:     wardsTotal,
+		ObservationsTruncated:     truncated,
+		WardCoordinateConclusion:  WardCoordinateConclusion,
+		LatestPlayerEconomy:       snap.LatestPlayerEconomy,
 	}
 	if snap.StartedAt != nil {
 		st := *snap.StartedAt
@@ -184,6 +230,24 @@ func buildSummaryJSON(sessionID string, ticks []NormalizedTick, events []Event, 
 		s.EventCounts = map[string]int{}
 	}
 	return s
+}
+
+// observationEvents partitions a complete derived-event list into the three
+// observation categories the summary tracks. Used by the offline summary path
+// so analytics_summary.json stays complete for long sessions even though the
+// live /api/analytics snapshot bounds the same arrays.
+func observationEvents(events []Event) (roshan, buildings, wards []Event) {
+	for _, ev := range events {
+		switch ev.Type {
+		case EventRoshanStateChanged:
+			roshan = append(roshan, ev)
+		case EventBuildingDestroyed:
+			buildings = append(buildings, ev)
+		case EventWardCounterChanged, EventWardPurchaseCooldown, EventWardPurchaseStarted:
+			wards = append(wards, ev)
+		}
+	}
+	return roshan, buildings, wards
 }
 
 // RenderSummary produces the markdown analytics summary required by the spec.
@@ -216,15 +280,15 @@ func RenderSummary(s SummaryJSON) string {
 	b.WriteString(renderEconomySummary(s.LatestPlayerEconomy))
 
 	b.WriteString("\n## Objective / Roshan / Building Observations\n\n")
-	if len(s.RoshanObservations) == 0 && len(s.BuildingObservations) == 0 {
+	if s.RoshanObservationsTotal == 0 && s.BuildingObservationsTotal == 0 {
 		b.WriteString("- none observed\n")
 	} else {
-		if n := len(s.RoshanObservations); n > 0 {
+		if n := s.RoshanObservationsTotal; n > 0 {
 			b.WriteString(fmt.Sprintf("- Roshan state changes: %d\n", n))
 		} else {
 			b.WriteString("- Roshan state changes: 0 (state remained stable after first observation)\n")
 		}
-		if n := len(s.BuildingObservations); n > 0 {
+		if n := s.BuildingObservationsTotal; n > 0 {
 			b.WriteString(fmt.Sprintf("- Building destroyed observations: %d\n", n))
 		} else {
 			b.WriteString("- Building destroyed observations: 0\n")
@@ -232,12 +296,15 @@ func RenderSummary(s SummaryJSON) string {
 	}
 
 	b.WriteString("\n## Ward Observations\n\n")
-	if len(s.WardObservations) == 0 {
+	if s.WardObservationsTotal == 0 {
 		b.WriteString("- Ward counter / purchase-cooldown changes: 0\n")
 	} else {
-		b.WriteString(fmt.Sprintf("- Ward-related events: %d\n", len(s.WardObservations)))
+		b.WriteString(fmt.Sprintf("- Ward-related events: %d\n", s.WardObservationsTotal))
 	}
 	b.WriteString(fmt.Sprintf("- Exact ward coordinates: %s\n", s.WardCoordinateConclusion))
+	if s.ObservationsTruncated {
+		b.WriteString("\n_Note: live observation arrays are truncated to the most recent entries; totals above reflect the full count. Regenerate offline via `--analyze-session` for the complete record._\n")
+	}
 
 	return b.String()
 }

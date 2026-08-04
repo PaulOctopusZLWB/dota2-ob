@@ -123,7 +123,7 @@ func TestEngineDerivesDeltaEvents(t *testing.T) {
 		EventItemReplaced:         true,
 		EventAbilityCooldownState: true,
 		EventBuildingHealthLoss:   true,
-		EventWardPurchaseStarted:   true,
+		EventWardPurchaseStarted:  true,
 	}
 	for ty := range want {
 		if !types[ty] {
@@ -180,10 +180,10 @@ func TestWardPurchaseCooldownTransitionsOnly(t *testing.T) {
 	mk := func(cd float64) NormalizedTick {
 		return Normalize(time.Now(), payloadFromJSON(t, `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","radiant_ward_purchase_cooldown":`+fmtFloat(cd)+`}}`))
 	}
-	engine.Observe(mk(0))        // baseline ready
+	engine.Observe(mk(0))         // baseline ready
 	d1 := engine.Observe(mk(120)) // start
 	d2 := engine.Observe(mk(119)) // decrement
-	d3 := engine.Observe(mk(0))    // cleared
+	d3 := engine.Observe(mk(0))   // cleared
 
 	if !hasType(d1, EventWardPurchaseStarted) {
 		t.Fatalf("start transition not emitted: %v", eventTypes(d1))
@@ -510,5 +510,114 @@ func teamFromKey(teamKey string) string {
 		return "dire"
 	default:
 		return ""
+	}
+}
+
+// The live /api/analytics snapshot bounds per-type observation arrays so a long
+// session cannot grow the response linearly; the total count and truncation
+// flag preserve traceability while the engine retains only the recent tail.
+func TestSnapshotBoundsObservationArrays(t *testing.T) {
+	engine := NewEngine()
+	// Each tick increments one player's wards_placed counter, producing one
+	// ward_counter_changed observation per consecutive tick pair.
+	mk := func(wards int64) NormalizedTick {
+		return Normalize(time.Now(), payloadFromJSON(t, fmt.Sprintf(`{
+			"provider":{"name":"Dota 2","appid":570},
+			"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},
+			"player":{"team2":{"player0":{"name":"A","team_name":"radiant","wards_placed":%d}}}
+		}`, wards)))
+	}
+	const ticks = maxObservationsAPI + 50
+	for i := int64(0); i < ticks; i++ {
+		engine.Observe(mk(i))
+	}
+	snap := engine.Snapshot("bound-session")
+	if got := len(snap.WardObservations); got > maxObservationsAPI {
+		t.Fatalf("live snapshot ward_observations = %d, want <= %d", got, maxObservationsAPI)
+	}
+	if got := len(snap.WardObservations); got != maxObservationsAPI {
+		t.Fatalf("retained ward_observations = %d, want exactly %d (most recent)", got, maxObservationsAPI)
+	}
+	wantTotal := int(ticks - 1)
+	if snap.WardObservationsTotal != wantTotal {
+		t.Fatalf("ward_observations_total = %d, want %d", snap.WardObservationsTotal, wantTotal)
+	}
+	if !snap.ObservationsTruncated {
+		t.Fatalf("observations_truncated = false, want true (wards exceeded cap)")
+	}
+	// Roshan/buildings were not observed: zero totals, no truncation contribution.
+	if snap.RoshanObservationsTotal != 0 || snap.BuildingDestroyedTotal != 0 {
+		t.Fatalf("roshan/building totals = %d/%d, want 0/0", snap.RoshanObservationsTotal, snap.BuildingDestroyedTotal)
+	}
+}
+
+// Offline analytics_summary.json keeps observation arrays complete even when the
+// live /api/analytics snapshot would cap them; derived_events.jsonl stays
+// complete too.
+func TestOfflineSummaryObservationsComplete(t *testing.T) {
+	dir := t.TempDir()
+	const ticks = maxObservationsAPI + 50
+	var raw strings.Builder
+	for i := 0; i < ticks; i++ {
+		fmt.Fprintf(&raw, `{"received_at":"2026-07-07T14:51:00Z","payload":{"provider":{"name":"Dota 2","appid":570},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"player":{"team2":{"player0":{"name":"A","team_name":"radiant","wards_placed":%d}}}}}`+"\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw.String()), 0o644); err != nil {
+		t.Fatalf("write raw: %v", err)
+	}
+	if _, err := AnalyzeSession(dir, "long-wards"); err != nil {
+		t.Fatalf("AnalyzeSession: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "analytics_summary.json"))
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	var s SummaryJSON
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("parse summary: %v", err)
+	}
+	wantTotal := ticks - 1
+	if s.WardObservationsTotal != wantTotal {
+		t.Fatalf("offline ward_observations_total = %d, want %d", s.WardObservationsTotal, wantTotal)
+	}
+	if len(s.WardObservations) != wantTotal {
+		t.Fatalf("offline ward_observations array = %d, want full %d (offline must not cap)", len(s.WardObservations), wantTotal)
+	}
+	if s.ObservationsTruncated {
+		t.Fatalf("offline summary marked truncated, want complete")
+	}
+	// derived_events.jsonl is also complete.
+	f, err := os.Open(filepath.Join(dir, "derived_events.jsonl"))
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	defer f.Close()
+	count := 0
+	dec := json.NewDecoder(f)
+	for {
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			t.Fatalf("decode event: %v", err)
+		}
+		count++
+	}
+	if count != wantTotal {
+		t.Fatalf("offline derived_events.jsonl = %d, want %d", count, wantTotal)
+	}
+	// The live snapshot for the same engine state WOULD cap, proving the bound
+	// is enforced for /api/analytics while the offline artifact stays complete.
+	engine := NewEngine()
+	for i := int64(0); i < ticks; i++ {
+		engine.Observe(Normalize(time.Now(), payloadFromJSON(t, fmt.Sprintf(`{
+			"provider":{"name":"Dota 2","appid":570},
+			"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},
+			"player":{"team2":{"player0":{"name":"A","team_name":"radiant","wards_placed":%d}}}
+		}`, i))))
+	}
+	liveSnap := engine.Snapshot("bound-session")
+	if len(liveSnap.WardObservations) > maxObservationsAPI {
+		t.Fatalf("live snapshot ward_observations = %d, want <= %d", len(liveSnap.WardObservations), maxObservationsAPI)
 	}
 }
