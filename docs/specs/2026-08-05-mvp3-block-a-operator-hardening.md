@@ -76,6 +76,31 @@ Steam metadata, replay parsing, evidence packaging, or Dota automation.
 - Offline `--analyze-session` remains the deterministic recovery path for
   derived artifacts.
 
+### Process Lifecycle And Manual Stop
+
+Normal server mode must use an explicit lifecycle runner rather than the
+uninterruptible `http.ListenAndServe`/`log.Fatalf` baseline.
+
+- `SIGINT` and `SIGTERM` are the supported manual-stop signals. The first signal
+  starts one orderly shutdown; repeated stop notifications must not start a
+  parallel teardown or close the session appender more than once.
+- Orderly shutdown has this strict order: stop accepting new requests; drain and
+  finish every in-flight request that entered accepted-record processing,
+  including its projection attempts and HTTP response; close the HTTP
+  server/listener; then close the session appender exactly once. The appender
+  must never close while accepted-record processing can still use it.
+- An appender created by normal mode is closed exactly once on every subsequent
+  exit path, including an unexpected serve failure. A successful operator stop
+  exits successfully only after server shutdown and appender close both finish.
+- A shutdown/drain failure is reported with stable safe code
+  `server_shutdown_failed`. A final appender close failure is reported with
+  `raw_close_failed` and makes shutdown unsuccessful, but neither failure can
+  revise any HTTP acceptance already returned.
+- Signal delivery, server serve/shutdown, in-flight work, and appender close must
+  have injectable boundaries. Deterministic tests trigger synthetic `SIGINT` and
+  `SIGTERM` notifications and use barriers/blocking doubles; they must not send a
+  real process signal or sleep.
+
 ### Accepted Record And Raw Compatibility
 
 Persist every accepted Block A record as raw-envelope schema version `2`:
@@ -118,6 +143,15 @@ fixed order:
 2. `profile` (observe, then write the profile summary),
 3. `analytics` (normalize, observe, then write analytics summaries).
 
+- In the synchronous Block A design, one application serialization boundary
+  spans raw sequence allocation/append and all projection-group attempts for a
+  valid request. Validation may happen before that boundary, but only one valid
+  request may execute the capture-plus-projection boundary at a time.
+- If sequence `N` commits, every configured projection attempt for `N` must
+  finish before sequence `N+1` can commit or invoke a projection. Live projection
+  invocation order is therefore strictly increasing committed sequence order
+  and matches an offline raw-file rebuild. Block A introduces no asynchronous
+  queue.
 - Continue to later groups when an earlier group fails. Within a group, do not
   run steps that depend on a failed earlier step.
 - Record active failure independently for each group. A complete later success
@@ -140,11 +174,18 @@ Required top-level states:
 
 - `waiting`: process is ready but no valid snapshot has been accepted.
 - `receiving`: a valid snapshot was accepted within the stale threshold and no
-  active post-processing failure exists.
+  active failure exists.
 - `stale`: at least one valid snapshot was accepted, but none within the stale
-  threshold, and no active post-processing failure exists.
-- `degraded`: raw capture is unavailable/sealed, or a tracked required
-  projection group has an active failure.
+  threshold, and no active failure exists.
+- `degraded`: the `raw`, `latest`, `profile`, or `analytics` subsystem has any
+  active failure, including a rolled-back transient append failure or a sealed
+  raw store.
+
+State precedence is deterministic: any active failure yields `degraded` even if
+no record has yet been accepted or the last accepted record is stale. Otherwise,
+zero accepted records yields `waiting`; with at least one accepted record,
+`now - last_accepted_time >= stale_threshold` yields `stale`, and a smaller age
+yields `receiving`.
 
 The snapshot must include:
 
@@ -152,6 +193,7 @@ The snapshot must include:
 - session id,
 - stale threshold seconds,
 - last request time,
+- first accepted time,
 - last accepted time,
 - last analytics success time when analytics is configured,
 - `request_count`, `accepted_count`, `rejected_count`,
@@ -164,6 +206,18 @@ The snapshot must include:
 successful raw commits; `rejected_count` counts validation/body-limit failures;
 and `raw_write_failure_count` counts valid requests that fail before acceptance.
 `post_processing_failure_count` has the per-group-attempt meaning defined above.
+
+A valid append failure whose partial write is verified as rolled back sets the
+active `raw` failure to `raw_append_failed` and therefore yields `degraded` while
+leaving the store available for retry. The next successful raw commit clears
+that transient `raw` failure before its projection attempts begin. A rollback
+failure replaces it with active code `raw_store_sealed`; that failure cannot
+clear in-process, and later requests return HTTP 503 without a write attempt.
+Validation/body-limit rejection does not create or clear an active raw failure.
+Raw and projection failures recover independently: successful raw append cannot
+clear a projection failure, and projection success cannot clear a raw failure.
+`first_accepted_time` is set exactly once by the first raw commit; failed or
+rejected requests never set or change it.
 
 Error history must have a fixed maximum length. Messages must not contain the
 raw request body, API keys, Steam credentials, cookies, or arbitrary filesystem
@@ -203,6 +257,12 @@ Required checks:
 
 Listen and URI rules are explicit:
 
+- Doctor and normal server startup must call one shared listen-address parser,
+  validator, and normalizer immediately after flag parsing. Normal mode must
+  reject an invalid, wildcard, or non-loopback address with a stable safe error
+  before creating a data/session directory, opening an appender, binding a
+  listener, or starting a long-running server. Both modes pass only the returned
+  normalized address to listener creation and URI comparison.
 - Accept only host `127.0.0.1`, literal `localhost`, or IPv6 loopback `::1`, with
   an explicit port in `1..65535`. Normalize `localhost` to `127.0.0.1` before
   binding and comparison.
@@ -284,8 +344,10 @@ Update `docs/manual_test_gsi.md` to cover:
   fragment recovery behind an injectable `internal/session` boundary. Do not
   expose filesystem operations to `internal/gsi`.
 - The application processor may coordinate latest state, profiler, analytics,
-  and summary writers. It must consume an already accepted versioned session
-  record and preserve the fixed group ordering and continue-on-error rules.
+  and summary writers. Its application serialization boundary must encompass
+  append acceptance and all projections for each valid request so concurrent
+  requests cannot project out of committed sequence order. It preserves the
+  fixed within-sequence group ordering and continue-on-error rules.
 - Prefer consumer-owned narrow interfaces over a generic plugin/event system.
 - `internal/operator` should own status/counter/error state and time-based state
   calculation.
@@ -296,6 +358,9 @@ Update `docs/manual_test_gsi.md` to cover:
   paths. Do not use sleep-based tests.
 - A preflight port check is point-in-time only; the startup path must still
   handle a later bind failure normally.
+- Put signal registration and the normal server lifecycle in a small injectable
+  `cmd/dota2-ob` runner. Process wiring owns orderly stop order; transport and
+  session packages must not import OS signal concerns.
 
 ## Non-Goals
 
@@ -323,6 +388,10 @@ Update `docs/manual_test_gsi.md` to cover:
 - Doctor accepts the defined IPv4/`localhost` and IPv6 forms, rejects wildcard
   and non-loopback addresses, and enforces normalized URI host, exact port, and
   exact `/gsi` path equivalence.
+- Normal server startup uses the same address validator. Deterministic
+  normal-mode tests prove accepted IPv4/`localhost`/IPv6 normalization and prove
+  wildcard, non-loopback, empty-host, and port-zero rejection before any session
+  directory, appender, listener, or long-running server is created.
 - `/api/status` returns valid bounded JSON for all four operator states.
 - A valid POST creates exactly one version 2 raw JSONL record, returns HTTP 200
   `ok\n`, and increments accepted count once.
@@ -334,10 +403,18 @@ Update `docs/manual_test_gsi.md` to cover:
   writing, and startup recovery removes only the unterminated tail.
 - Orderly close failure cannot reverse an accepted response and is reported with
   stable code `raw_close_failed`; no per-record sync/close is required.
+- Injected-lifecycle tests prove both `SIGINT` and `SIGTERM` stop new accepts,
+  wait for a barrier-blocked accepted request and its projections/response,
+  close the server, then close the appender exactly once. Close and shutdown
+  failures use stable safe codes, return an unsuccessful process result, and do
+  not revise earlier HTTP 200 responses; no real signals or sleeps are used.
 - Version 1 and version 2 fixtures both rebuild, while an unknown explicit
   version and an invalid terminated record fail with bounded errors.
 - Concurrent valid POSTs persist unique, strictly increasing sequences in file
-  order with no duplicate or consumed failed sequence.
+  order with no duplicate or consumed failed sequence. A no-sleep overlap test
+  with barriers/blocking projection doubles proves the complete invocation order
+  `seq1 latest/profile/analytics`, then `seq2 latest/profile/analytics`, including
+  continue-on-error behavior when one `seq1` group fails.
 - A forced `latest`, `profile`, or `analytics` group failure after append retains
   the raw record, returns HTTP 200 `ok\n`, increments the failure counter once
   per failed group attempt, continues to later independent groups, and exposes
@@ -348,6 +425,11 @@ Update `docs/manual_test_gsi.md` to cover:
   sequence and historical counters never decreased.
 - Waiting-to-receiving-to-stale transitions are deterministic under an injected
   clock.
+- Injected-clock state tests prove a verified rolled-back append failure is
+  degraded until the next raw commit, a sealed store remains degraded, a raw
+  recovery cannot clear an active projection failure, overlapping raw/projection
+  failures clear only through their own subsystem success, and first accepted
+  time is immutable.
 - Existing APIs, offline analysis, analytics output, and dashboard tests still
   pass.
 - Runbook reflects the actual implemented flags and output.
@@ -386,15 +468,18 @@ Expected result shape:
 Implementer must also report exact focused test names covering:
 
 - full and short writes, verified rollback, rollback failure/store sealing,
-  trailing-fragment recovery, and close failure at shutdown,
+  trailing-fragment recovery, signal-driven drain order, once-only close, and
+  close failure at shutdown,
 - version 1/version 2 reads, unknown versions, semantic raw preservation, and
-  concurrent sequence order,
+  concurrent sequence plus cross-request projection order,
 - every projection-group failure plus the overlapping A/B recovery scenario,
   exact invocation counts/order, HTTP 200 after acceptance, and monotonic
   per-group-attempt failure counts,
-- waiting/receiving/stale/degraded transitions and bounded errors,
+- waiting/receiving/stale/degraded transitions, first accepted time, transient
+  raw failure/recovery, sealed raw state, overlapping subsystem failures, and
+  bounded errors,
 - invalid, occupied, wildcard, non-loopback, IPv4/`localhost`, and IPv6 listener
-  cases,
+  cases in both doctor and normal startup,
 - unwritable data root, missing dashboard, explicit invalid config, discovered
   config absence, URI mismatch, ordered doctor JSON, exit codes, listener close,
   and absence of outbound network or Steam/Dota mutation.
@@ -412,10 +497,12 @@ Steam paths, credentials, or internet access.
   raw appends.
 - Degraded-state recovery is based on subsystem success, not merely time or a
   new request.
-- Persisted version 2 identity, concurrent sequence order, and MVP2 replay
-  compatibility match the raw-envelope contract.
+- Persisted version 2 identity, concurrent raw/projection sequence order, and
+  MVP2 replay compatibility match the raw-envelope contract.
 - Status data is race-safe, bounded, and free of raw/secrets/path leakage.
-- Doctor checks are deterministic, loopback-only, and side-effect limited.
+- Doctor and normal startup share deterministic loopback enforcement, and doctor
+  remains side-effect limited.
+- Manual stop drains accepted work before a once-only appender close.
 - No sleep-based flaky tests.
 - No regression in existing analytics or offline rebuild behavior.
 - No automation or source-policy violation.

@@ -143,6 +143,13 @@ materialization after raw append marks the process degraded and is reported by
 operator status, but must not claim that the already-persisted GSI request was
 rejected.
 
+Block A keeps capture and live projection synchronous. One application
+serialization boundary spans sequence allocation, raw append, and every
+projection-group attempt for a valid request. If sequence `N` commits, all live
+projection attempts for `N` finish before sequence `N+1` can commit or project.
+Concurrent HTTP handling therefore cannot make live stateful analytics observe a
+different accepted-record order from the raw-file rebuild.
+
 ### 2. Operator Boundary
 
 Responsibility:
@@ -158,6 +165,14 @@ Responsibility:
   successful analytics update time.
 - Expose stable error codes and concise messages without secrets or raw payloads.
 
+Any active failure in `raw`, `latest`, `profile`, or `analytics` takes state
+precedence and reports `degraded`. This includes a transient append failure after
+verified rollback; its next successful raw commit clears only the raw failure. A
+sealed raw store cannot recover in-process. Without an active failure, zero
+accepted records is `waiting`, a recent accepted record is `receiving`, and an
+accepted record whose age meets or exceeds the stale threshold is `stale`.
+Subsystem successes clear only their own failures.
+
 The initial operator surface is manual:
 
 - a preflight/doctor command,
@@ -169,6 +184,12 @@ The initial operator surface is manual:
 Preflight may inspect local configuration, port availability, data-directory
 writability, and required web assets. It must not launch or control Steam or
 Dota 2.
+
+Normal mode supports manual stop through `SIGINT` and `SIGTERM`. The lifecycle
+stops accepting new requests, drains in-flight accepted-record processing and
+responses, closes the HTTP server/listener, and then closes the session appender
+exactly once. Shutdown or final-close failure is reported safely without
+retroactively changing an accepted response.
 
 ### 3. Normalized Telemetry Boundary
 
@@ -327,6 +348,12 @@ attempts, not requests. Every request whose raw append is accepted returns the
 existing HTTP 200 `ok\n` response, even when one or more projection groups fail;
 degradation details are exposed through operator status and safe logs.
 
+The synchronous application serialization boundary also orders concurrent
+requests: the complete group invocation order for sequence `N` precedes every
+projection invocation for sequence `N+1`. A group failure does not relax that
+cross-request order. Validation may occur outside the boundary, but append plus
+projection processing for valid requests is one-at-a-time in Block A.
+
 Metadata cache entries and replay reports are separate derived products. They
 must be safe to delete and regenerate without modifying raw evidence.
 
@@ -335,7 +362,9 @@ must be safe to delete and regenerate without modifying raw evidence.
 MVP3 may process accepted records synchronously, but the boundary must make
 post-processing failure distinct from capture failure. Queueing or asynchronous
 workers are not required until measurements show that processing latency causes
-GSI loss.
+GSI loss. Block A deliberately chooses the serial capture-plus-projection
+boundary above; a later queue design would require a new ordering, backpressure,
+and shutdown contract.
 
 ### Compatibility
 
@@ -378,6 +407,11 @@ POST receives a unique sequence and that raw-file order is strictly increasing.
   forms are `127.0.0.1`, `localhost` (normalized to `127.0.0.1`), and `::1`;
   configuration URI comparison uses the same normalization, exact port, and
   exact `/gsi` path.
+- Use the same listen-address parser/validator/normalizer in doctor and normal
+  server startup. Normal startup rejects an invalid address before creating the
+  session directory/appender or binding/starting a server.
+- Support orderly manual `SIGINT`/`SIGTERM` stop with drain-before-close ordering
+  and an exactly-once appender close.
 - Keep Steam metadata and replay validation behind the contracts above; they are
   not required to make manual GSI capture succeed.
 
@@ -420,6 +454,9 @@ Contract tests must prove:
 - MVP2 and version 2 raw envelopes both rebuild successfully,
 - concurrent accepted POSTs produce unique, monotonically increasing sequences
   in raw-file order,
+- a barrier-driven no-sleep concurrency test proves raw order and the complete
+  live invocation order `seq1 latest/profile/analytics`, then
+  `seq2 latest/profile/analytics`, including a continue-on-error group failure,
 - a forced downstream failure leaves the raw record intact and changes status
   to degraded,
 - projection groups continue in fixed order after an independent group failure,
@@ -428,6 +465,15 @@ Contract tests must prove:
 - no-post state is waiting,
 - recent accepted traffic is receiving,
 - elapsed traffic becomes stale using an injected clock,
+- a verified rolled-back raw append failure is degraded until the next raw
+  commit, a sealed store stays degraded, overlapping raw/projection failures
+  clear independently, and first accepted time is immutable,
+- normal startup and doctor share loopback validation; invalid/wildcard/
+  non-loopback addresses are rejected before normal startup creates session or
+  listener side effects,
+- injected `SIGINT` and `SIGTERM` lifecycle tests stop accepts, drain a
+  barrier-blocked accepted request, close the server, and then close the appender
+  exactly once without real signals or sleeps,
 - counters and status arrays remain bounded,
 - no operator response contains raw payloads or secrets.
 
