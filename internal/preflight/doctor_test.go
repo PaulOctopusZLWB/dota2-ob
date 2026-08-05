@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/preflight"
 )
@@ -79,4 +78,26 @@ func TestDoctorMissingDiscoveredConfigWarnsButRequiredFailuresFail(t *testing.T)
 	}
 }
 
-var _ = time.Time{}
+func TestDoctorExplicitInvalidConfigFailsAfterClosingAcquiredListener(t *testing.T) {
+	root := t.TempDir()
+	dashboard := filepath.Join(root, "index.html")
+	config := filepath.Join(root, "invalid.cfg")
+	if err := os.WriteFile(dashboard, []byte("dashboard"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte(`"cfg" { "uri" "http://127.0.0.1:9999/wrong" }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listener := &fakeListener{}
+	doctor := preflight.NewDoctor(preflight.Dependencies{
+		Listen:   func(string, string) (net.Listener, error) { return listener, nil },
+		ReadFile: os.ReadFile, MkdirAll: os.MkdirAll, CreateTemp: os.CreateTemp, Remove: os.Remove,
+	})
+	result := doctor.Run(preflight.DoctorConfig{Address: "127.0.0.1:43210", DataRoot: filepath.Join(root, "data"), DashboardPath: dashboard, GSIConfig: config})
+	if result.OK || result.Checks[4].ID != "gsi_config" || result.Checks[4].Status != preflight.Fail {
+		t.Fatalf("result=%#v", result)
+	}
+	if !listener.closed {
+		t.Fatal("listener was not closed after later doctor failure")
+	}
+}

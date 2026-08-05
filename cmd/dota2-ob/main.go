@@ -28,7 +28,27 @@ import (
 
 func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
 
+type runDependencies struct {
+	newStore     func(string) (*session.Store, error)
+	listen       func(string, string) (net.Listener, error)
+	runLifecycle func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
+	runDoctor    func(preflight.DoctorConfig) preflight.Result
+}
+
+func defaultRunDependencies() runDependencies {
+	return runDependencies{
+		newStore:     func(root string) (*session.Store, error) { return session.NewStore(root) },
+		listen:       net.Listen,
+		runLifecycle: lifecycle.Run,
+		runDoctor:    preflight.NewDoctor(preflight.Dependencies{}).Run,
+	}
+}
+
 func run(args []string, output io.Writer) int {
+	return runWithDependencies(args, output, defaultRunDependencies())
+}
+
+func runWithDependencies(args []string, output io.Writer, deps runDependencies) int {
 	flags := flag.NewFlagSet("dota2-ob", flag.ContinueOnError)
 	flags.SetOutput(output)
 	addr := flags.String("addr", "127.0.0.1:43210", "HTTP listen address")
@@ -50,7 +70,7 @@ func run(args []string, output io.Writer) int {
 	}
 
 	if *doctorMode {
-		result := preflight.NewDoctor(preflight.Dependencies{}).Run(preflight.DoctorConfig{
+		result := deps.runDoctor(preflight.DoctorConfig{
 			Address: *addr, DataRoot: *dataDir, DashboardPath: filepath.Join("web", "index.html"),
 			GSIConfig: *gsiConfig, KnownConfigs: knownGSIConfigs(),
 		})
@@ -70,12 +90,12 @@ func run(args []string, output io.Writer) int {
 		return 1
 	}
 
-	store, err := session.NewStore(*dataDir)
+	store, err := deps.newStore(*dataDir)
 	if err != nil {
 		logger.Printf("raw_store_create_failed")
 		return 1
 	}
-	listener, err := net.Listen("tcp", normalized)
+	listener, err := deps.listen("tcp", normalized)
 	if err != nil {
 		_ = store.Close()
 		logger.Printf("server_listen_failed")
@@ -93,7 +113,7 @@ func run(args []string, output io.Writer) int {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	err = lifecycle.Run(server, listener, store, handler, signals, func() (context.Context, context.CancelFunc) {
+	err = deps.runLifecycle(server, listener, store, handler, signals, func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), 10*time.Second)
 	})
 	if err != nil {

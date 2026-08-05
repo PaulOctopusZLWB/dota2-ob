@@ -32,6 +32,30 @@ type barrierProjection struct{ entered, release chan struct{} }
 
 func (p barrierProjection) Apply(*session.Record) error { close(p.entered); <-p.release; return nil }
 
+type countingProjection struct{ calls int }
+
+func (p *countingProjection) Apply(*session.Record) error { p.calls++; return nil }
+
+type sealingRawFile struct {
+	writes int
+	offset int64
+}
+
+func (f *sealingRawFile) Write([]byte) (int, error) {
+	f.writes++
+	f.offset++
+	return 1, io.ErrShortWrite
+}
+func (f *sealingRawFile) Seek(offset int64, whence int) (int64, error) {
+	if whence == io.SeekStart {
+		f.offset = offset
+	}
+	return f.offset, nil
+}
+func (f *sealingRawFile) Truncate(int64) error       { return errors.New("rollback failed") }
+func (f *sealingRawFile) Stat() (os.FileInfo, error) { return nil, errors.New("unused") }
+func (f *sealingRawFile) Close() error               { return nil }
+
 func TestHealthzReturnsOK(t *testing.T) {
 	store, err := session.NewStore(t.TempDir(), session.WithSessionID("health"))
 	if err != nil {
@@ -194,6 +218,117 @@ func TestGSIPostRejectsMalformedJSONWithoutPersisting(t *testing.T) {
 	rawPath := filepath.Join(root, "invalid-gsi", "raw.jsonl")
 	if _, err := os.Stat(rawPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("raw file stat error = %v, want not exist", err)
+	}
+}
+
+func TestGSIPostRejectsOversizedBodyWithoutRawOrProjection(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("oversized"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
+	projection := &countingProjection{}
+	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	defer server.Close()
+	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(strings.Repeat("x", (10<<20)+1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if projection.calls != 0 {
+		t.Fatalf("projection calls=%d", projection.calls)
+	}
+	if _, err := os.Stat(store.RawPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("raw file exists: %v", err)
+	}
+	snap := tracker.Snapshot()
+	if snap.RequestCount != 1 || snap.RejectedCount != 1 || snap.AcceptedCount != 0 {
+		t.Fatalf("status=%#v", snap)
+	}
+}
+
+func TestRepeatedPostsAfterSealedFailureReturn503WithoutWritesOrProjections(t *testing.T) {
+	rawFile := &sealingRawFile{}
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("sealed-http"), session.WithRawFile(func(string) (session.RawFile, error) { return rawFile, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
+	projection := &countingProjection{}
+	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection), capture.WithFailureLogger(func(string, string) {}))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	defer server.Close()
+	for i := 0; i < 3; i++ {
+		resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"attempt":1}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("attempt %d status=%d", i+1, resp.StatusCode)
+		}
+	}
+	if rawFile.writes != 1 {
+		t.Fatalf("raw write attempts=%d, want 1", rawFile.writes)
+	}
+	if projection.calls != 0 {
+		t.Fatalf("projection calls=%d", projection.calls)
+	}
+	snap := tracker.Snapshot()
+	if snap.State != operator.StateDegraded || snap.ActiveFailures[operator.SubsystemRaw].Code != "raw_store_sealed" || snap.AcceptedCount != 0 || snap.RawWriteFailureCount != 3 {
+		t.Fatalf("status=%#v", snap)
+	}
+}
+
+func TestStatusHTTPWaitingReceivingStaleAndBoundedErrors(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("status-states"), session.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := operator.NewTracker(store.SessionID(), now, 10*time.Second, func() time.Time { return now })
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker)))
+	defer server.Close()
+	getStatus := func() (operator.Snapshot, int) {
+		t.Helper()
+		resp, err := http.Get(server.URL + "/api/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var snap operator.Snapshot
+		if err := json.Unmarshal(body, &snap); err != nil {
+			t.Fatalf("decode status: %v body=%q", err, body)
+		}
+		return snap, len(body)
+	}
+	if snap, _ := getStatus(); snap.State != operator.StateWaiting {
+		t.Fatalf("waiting status=%#v", snap)
+	}
+	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if snap, _ := getStatus(); snap.State != operator.StateReceiving || snap.AcceptedCount != 1 {
+		t.Fatalf("receiving status=%#v", snap)
+	}
+	for i := 0; i < 50; i++ {
+		tracker.Failure(operator.SubsystemProfile, "profile_failed", strings.Repeat("safe", 80))
+		tracker.Success(operator.SubsystemProfile)
+	}
+	now = now.Add(10 * time.Second)
+	snap, size := getStatus()
+	if snap.State != operator.StateStale || len(snap.Errors) != operator.MaxErrors || size > 8192 {
+		t.Fatalf("stale/bounded status=%#v size=%d", snap, size)
 	}
 }
 

@@ -22,6 +22,7 @@ func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, s
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 	var codes []string
+	waited := false
 	select {
 	case err := <-serveDone:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -30,6 +31,10 @@ func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, s
 		ctx, cancel := shutdownContext()
 		if shutdownErr := server.Shutdown(ctx); shutdownErr != nil {
 			codes = append(codes, "server_shutdown_failed")
+			if waiter != nil {
+				waiter.Wait()
+				waited = true
+			}
 			_ = server.Close()
 		}
 		cancel()
@@ -39,6 +44,10 @@ func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, s
 		cancel()
 		if err != nil {
 			codes = append(codes, "server_shutdown_failed")
+			if waiter != nil {
+				waiter.Wait()
+				waited = true
+			}
 			_ = server.Close()
 		}
 		serveErr := <-serveDone
@@ -46,7 +55,7 @@ func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, s
 			codes = append(codes, "server_serve_failed")
 		}
 	}
-	if waiter != nil {
+	if waiter != nil && !waited {
 		waiter.Wait()
 	}
 	if err := appender.Close(); err != nil {

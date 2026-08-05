@@ -75,6 +75,35 @@ type observedServer struct {
 	shutdownStarted chan struct{}
 }
 
+type failingHTTPServer struct {
+	*http.Server
+	shutdownReturned chan struct{}
+	closeAttempt     chan struct{}
+}
+
+func (s failingHTTPServer) Shutdown(context.Context) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := s.Server.Shutdown(ctx)
+	close(s.shutdownReturned)
+	return err
+}
+
+func (s failingHTTPServer) Close() error {
+	s.closeAttempt <- struct{}{}
+	return s.Server.Close()
+}
+
+type signalingWaiter struct {
+	waiter  lifecycle.Waiter
+	entered chan struct{}
+}
+
+func (w signalingWaiter) Wait() {
+	close(w.entered)
+	w.waiter.Wait()
+}
+
 func (s observedServer) Shutdown(ctx context.Context) error {
 	close(s.shutdownStarted)
 	return s.Server.Shutdown(ctx)
@@ -202,5 +231,78 @@ func TestRunnerSignalsDrainBarrierBlockedAcceptedResponseBeforeOnceOnlyClose(t *
 				t.Fatalf("close calls=%d", appender.calls)
 			}
 		})
+	}
+}
+
+func TestRunnerShutdownFailureDrainsRawCommittedResponseBeforeForceClose(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("shutdown-failure"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appender := &trackedAppender{store: store, closed: make(chan struct{})}
+	now := time.Now().UTC()
+	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
+	projectionEntered, releaseProjection := make(chan struct{}), make(chan struct{})
+	processor := capture.NewProcessor(appender, tracker, capture.WithLatest(requestBarrier{projectionEntered, releaseProjection}))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdownReturned := make(chan struct{})
+	closeAttempt := make(chan struct{}, 1)
+	server := failingHTTPServer{Server: &http.Server{Handler: handler}, shutdownReturned: shutdownReturned, closeAttempt: closeAttempt}
+	waitEntered := make(chan struct{})
+	waiter := signalingWaiter{waiter: handler, entered: waitEntered}
+	signals := make(chan os.Signal, 1)
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- lifecycle.Run(server, listener, appender, waiter, signals, func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		})
+	}()
+	type httpResult struct {
+		status int
+		body   string
+		err    error
+	}
+	response := make(chan httpResult, 1)
+	go func() {
+		resp, err := http.Post("http://"+listener.Addr().String()+"/gsi", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			response <- httpResult{err: err}
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		response <- httpResult{status: resp.StatusCode, body: string(body)}
+	}()
+	<-projectionEntered
+	raw, err := os.ReadFile(store.RawPath())
+	if err != nil || len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		t.Fatalf("raw append was not committed before projection: data=%q err=%v", raw, err)
+	}
+	signals <- syscall.SIGTERM
+	<-shutdownReturned
+	prematureClose := false
+	select {
+	case <-waitEntered:
+	case <-closeAttempt:
+		prematureClose = true
+	}
+	close(releaseProjection)
+	got := <-response
+	runErr := <-runResult
+	if prematureClose {
+		t.Fatal("server force-close started before accepted handler drain")
+	}
+	if got.err != nil || got.status != http.StatusOK || got.body != "ok\n" {
+		t.Fatalf("accepted response status=%d body=%q err=%v", got.status, got.body, got.err)
+	}
+	if runErr == nil || !strings.Contains(runErr.Error(), "server_shutdown_failed") {
+		t.Fatalf("Run error=%v, want server_shutdown_failed", runErr)
+	}
+	if appender.calls != 1 {
+		t.Fatalf("appender close calls=%d, want 1", appender.calls)
 	}
 }
