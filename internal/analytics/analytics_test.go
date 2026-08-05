@@ -199,9 +199,8 @@ func TestWardPurchaseCooldownTransitionsOnly(t *testing.T) {
 // AnalyzeSession writes the four required artifacts and parses as JSON/JSONL.
 func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
 	dir := t.TempDir()
-	raw := `{"received_at":"2026-07-07T14:51:01Z","payload":` + miniSnapshot("item_boots", 1, 0) + `}
-{"received_at":"2026-07-07T14:51:02Z","payload":` + miniSnapshot("item_power_treads", 1, 12) + `}
-`
+	p1, p2 := miniSnapshot("item_boots", 1, 0), miniSnapshot("item_power_treads", 1, 12)
+	raw := fmt.Sprintf("{\"received_at\":\"2026-07-07T14:51:01Z\",\"payload\":%s,\"raw\":%s}\n{\"received_at\":\"2026-07-07T14:51:02Z\",\"payload\":%s,\"raw\":%s}\n", p1, p1, p2, p2)
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
 		t.Fatalf("write raw: %v", err)
 	}
@@ -252,6 +251,67 @@ func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
 		if !strings.Contains(string(summary), want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
+	}
+}
+
+func TestAnalyzeSessionReadsVersion2AndIgnoresUnterminatedTail(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":2,"session_id":"v2-session","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{"map":{"game_time":1}},"raw":{"map":{"game_time":1}}}` + "\n" + `{"unterminated"`
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := AnalyzeSession(dir, "v2-session")
+	if err != nil {
+		t.Fatalf("AnalyzeSession: %v", err)
+	}
+	if snap.TickCount != 1 {
+		t.Fatalf("tick count = %d, want 1", snap.TickCount)
+	}
+}
+
+func TestAnalyzeSessionRejectsUnknownVersionAndTerminatedCorruption(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"unknown-version", `{"schema_version":99,"received_at":"2026-08-05T12:00:00Z","payload":{}}` + "\n"},
+		{"null-version", `{"schema_version":null,"received_at":"2026-08-05T12:00:00Z","payload":{},"raw":{}}` + "\n"},
+		{"terminated-corruption", "not-json\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(tc.raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := AnalyzeSession(dir, "session"); err == nil {
+				t.Fatal("AnalyzeSession succeeded")
+			} else if len(err.Error()) > 240 {
+				t.Fatalf("error is unbounded: %d bytes", len(err.Error()))
+			}
+		})
+	}
+}
+
+func TestAnalyzeSessionRejectsTwoValuesOnOneTerminatedLine(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"received_at":"2026-08-05T12:00:00Z","payload":{},"raw":{}}{"received_at":"2026-08-05T12:00:01Z","payload":{},"raw":{}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AnalyzeSession(dir, "session"); err == nil {
+		t.Fatal("AnalyzeSession accepted two values on one JSONL line")
+	}
+}
+
+func TestAnalyzeSessionRebuildsAcceptedNullPayload(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":2,"session_id":"null-session","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":null,"raw":null}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := AnalyzeSession(dir, "null-session")
+	if err != nil {
+		t.Fatalf("AnalyzeSession: %v", err)
+	}
+	if snap.TickCount != 1 {
+		t.Fatalf("tick count=%d", snap.TickCount)
 	}
 }
 
@@ -442,7 +502,8 @@ func TestOfflineDerivedEventsCompleterThanRingCap(t *testing.T) {
 	var raw strings.Builder
 	for i := 0; i < ticks; i++ {
 		gold := 500 + float64(i)*meaningfulGoldDelta
-		fmt.Fprintf(&raw, `{"received_at":"2026-07-07T14:51:00Z","payload":%s}`+"\n", mk(gold))
+		payload := mk(gold)
+		fmt.Fprintf(&raw, `{"received_at":"2026-07-07T14:51:00Z","payload":%s,"raw":%s}`+"\n", payload, payload)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw.String()), 0o644); err != nil {
 		t.Fatalf("write raw: %v", err)
@@ -559,7 +620,8 @@ func TestOfflineSummaryObservationsComplete(t *testing.T) {
 	const ticks = maxObservationsAPI + 50
 	var raw strings.Builder
 	for i := 0; i < ticks; i++ {
-		fmt.Fprintf(&raw, `{"received_at":"2026-07-07T14:51:00Z","payload":{"provider":{"name":"Dota 2","appid":570},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"player":{"team2":{"player0":{"name":"A","team_name":"radiant","wards_placed":%d}}}}}`+"\n", i)
+		payload := fmt.Sprintf(`{"provider":{"name":"Dota 2","appid":570},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"player":{"team2":{"player0":{"name":"A","team_name":"radiant","wards_placed":%d}}}}`, i)
+		fmt.Fprintf(&raw, `{"received_at":"2026-07-07T14:51:00Z","payload":%s,"raw":%s}`+"\n", payload, payload)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw.String()), 0o644); err != nil {
 		t.Fatalf("write raw: %v", err)

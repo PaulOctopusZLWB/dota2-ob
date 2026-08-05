@@ -1,57 +1,138 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/preflight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
 )
 
-func main() {
-	addr := flag.String("addr", "127.0.0.1:43210", "HTTP listen address")
-	dataDir := flag.String("data-dir", "./data/sessions", "directory for captured session data")
-	analyzeSession := flag.String("analyze-session", "", "offline: analyze a session directory and write analytics artifacts, then exit")
-	flag.Parse()
+func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
 
-	if strings.TrimSpace(*analyzeSession) != "" {
-		if err := runAnalyze(*analyzeSession); err != nil {
-			log.Fatalf("analyze session: %v", err)
-		}
-		return
-	}
+type runDependencies struct {
+	newStore     func(string) (*session.Store, error)
+	listen       func(string, string) (net.Listener, error)
+	runLifecycle func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
+	runDoctor    func(preflight.DoctorConfig) preflight.Result
+}
 
-	store, err := session.NewStore(*dataDir)
-	if err != nil {
-		log.Fatalf("create session store: %v", err)
-	}
-	latest := state.NewLatest()
-	profiler := profile.NewProfiler()
-	engine := analytics.NewEngine()
-
-	log.Printf("dota2-ob listening on http://%s", *addr)
-	log.Printf("capturing raw GSI snapshots under %s/%s", *dataDir, store.SessionID())
-	if err := http.ListenAndServe(*addr, gsi.NewServer(
-		store,
-		gsi.WithLatest(latest),
-		gsi.WithProfiler(profiler),
-		gsi.WithAnalytics(engine),
-		gsi.WithDashboard(http.FileServer(http.Dir("web"))),
-	)); err != nil {
-		log.Fatalf("server stopped: %v", err)
+func defaultRunDependencies() runDependencies {
+	return runDependencies{
+		newStore:     func(root string) (*session.Store, error) { return session.NewStore(root) },
+		listen:       net.Listen,
+		runLifecycle: lifecycle.Run,
+		runDoctor:    preflight.NewDoctor(preflight.Dependencies{}).Run,
 	}
 }
 
-// runAnalyze resolves the session directory and identifier from a CLI path and
-// runs the offline analysis pipeline.
+func run(args []string, output io.Writer) int {
+	return runWithDependencies(args, output, defaultRunDependencies())
+}
+
+func runWithDependencies(args []string, output io.Writer, deps runDependencies) int {
+	flags := flag.NewFlagSet("dota2-ob", flag.ContinueOnError)
+	flags.SetOutput(output)
+	addr := flags.String("addr", "127.0.0.1:43210", "HTTP listen address")
+	dataDir := flags.String("data-dir", "./data/sessions", "directory for captured session data")
+	analyzeSession := flags.String("analyze-session", "", "offline: analyze a session directory and exit")
+	doctorMode := flags.Bool("doctor", false, "run one-shot operator readiness checks and exit")
+	gsiConfig := flags.String("gsi-config", "", "explicit Dota 2 GSI config path for doctor mode")
+	staleThreshold := flags.Duration("stale-threshold", 15*time.Second, "duration without accepted GSI before status becomes stale")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	logger := log.New(output, "", log.LstdFlags)
+	if strings.TrimSpace(*analyzeSession) != "" {
+		if err := runAnalyze(*analyzeSession); err != nil {
+			logger.Printf("analyze_session_failed")
+			return 1
+		}
+		return 0
+	}
+
+	if *doctorMode {
+		result := deps.runDoctor(preflight.DoctorConfig{
+			Address: *addr, DataRoot: *dataDir, DashboardPath: filepath.Join("web", "index.html"),
+			GSIConfig: *gsiConfig, KnownConfigs: knownGSIConfigs(),
+		})
+		_ = json.NewEncoder(output).Encode(result)
+		if result.OK {
+			return 0
+		}
+		return 1
+	}
+	normalized, err := preflight.NormalizeListenAddress(*addr)
+	if err != nil {
+		fmt.Fprintln(output, err.Error())
+		return 1
+	}
+	if *staleThreshold <= 0 {
+		fmt.Fprintln(output, "stale_threshold_invalid")
+		return 1
+	}
+
+	store, err := deps.newStore(*dataDir)
+	if err != nil {
+		logger.Printf("raw_store_create_failed")
+		return 1
+	}
+	listener, err := deps.listen("tcp", normalized)
+	if err != nil {
+		_ = store.Close()
+		logger.Printf("server_listen_failed")
+		return 1
+	}
+	now := time.Now().UTC()
+	tracker := operator.NewTracker(store.SessionID(), now, *staleThreshold, time.Now)
+	handler := gsi.NewServer(store,
+		gsi.WithLatest(state.NewLatest()), gsi.WithProfiler(profile.NewProfiler()),
+		gsi.WithAnalytics(analytics.NewEngine()), gsi.WithTracker(tracker),
+		gsi.WithDashboard(http.FileServer(http.Dir("web"))),
+	)
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	logger.Printf("server_started addr=%s session_id=%s capture_target=%s", normalized, store.SessionID(), filepath.Join(store.SessionID(), "raw.jsonl"))
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	err = deps.runLifecycle(server, listener, store, handler, signals, func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 10*time.Second)
+	})
+	if err != nil {
+		logger.Printf("server_exit_failed codes=%s", err)
+		return 1
+	}
+	logger.Printf("server_stopped")
+	return 0
+}
+
+func knownGSIConfigs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	rel := filepath.Join("steamapps", "common", "dota 2 beta", "game", "dota", "cfg", "gamestate_integration", "gamestate_integration_dota2_ob.cfg")
+	return []string{filepath.Join(home, ".local", "share", "Steam", rel), filepath.Join(home, ".steam", "steam", rel)}
+}
+
 func runAnalyze(sessionPath string) error {
 	abs, err := filepath.Abs(sessionPath)
 	if err != nil {
@@ -62,13 +143,8 @@ func runAnalyze(sessionPath string) error {
 		return err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("analyze-session path is not a directory: %s", abs)
+		return fmt.Errorf("analyze-session path is not a directory")
 	}
-	sessionID := filepath.Base(abs)
-	log.Printf("analyzing session %s at %s", sessionID, abs)
-	if _, err := analytics.AnalyzeSession(abs, sessionID); err != nil {
-		return err
-	}
-	log.Printf("analysis complete for session %s", sessionID)
-	return nil
+	_, err = analytics.AnalyzeSession(abs, filepath.Base(abs))
+	return err
 }

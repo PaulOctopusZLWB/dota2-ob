@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
@@ -17,12 +20,18 @@ import (
 const maxSnapshotBytes = 10 << 20
 
 type Server struct {
-	store     *session.Store
-	latest    *state.Latest
-	profiler  *profile.Profiler
-	engine    *analytics.Engine
-	dashboard http.Handler
-	mux       *http.ServeMux
+	store        *session.Store
+	latest       *state.Latest
+	profiler     *profile.Profiler
+	engine       *analytics.Engine
+	processor    *capture.Processor
+	tracker      *operator.Tracker
+	dashboard    http.Handler
+	mux          *http.ServeMux
+	inflightMu   sync.Mutex
+	inflightCond *sync.Cond
+	inflight     int
+	stopping     bool
 }
 
 type Option func(*Server)
@@ -51,20 +60,68 @@ func WithAnalytics(engine *analytics.Engine) Option {
 	}
 }
 
-func NewServer(store *session.Store, opts ...Option) http.Handler {
+func WithProcessor(processor *capture.Processor) Option {
+	return func(server *Server) { server.processor = processor }
+}
+func WithTracker(tracker *operator.Tracker) Option {
+	return func(server *Server) { server.tracker = tracker }
+}
+
+func NewServer(store *session.Store, opts ...Option) *Server {
 	server := &Server{
 		store: store,
 		mux:   http.NewServeMux(),
 	}
+	server.inflightCond = sync.NewCond(&server.inflightMu)
 	for _, opt := range opts {
 		opt(server)
+	}
+	if server.tracker == nil {
+		now := time.Now().UTC()
+		server.tracker = operator.NewTracker(store.SessionID(), now, 15*time.Second, time.Now)
+	}
+	if server.processor == nil {
+		var processorOpts []capture.Option
+		if server.latest != nil {
+			processorOpts = append(processorOpts, capture.WithLatest(capture.NewLatestProjection(server.latest)))
+		}
+		if server.profiler != nil {
+			processorOpts = append(processorOpts, capture.WithProfile(capture.NewProfileProjection(server.profiler, store.SessionDir())))
+		}
+		if server.engine != nil {
+			processorOpts = append(processorOpts, capture.WithAnalytics(capture.NewAnalyticsProjection(server.engine, store.SessionDir(), store.SessionID())))
+		}
+		server.processor = capture.NewProcessor(store, server.tracker, processorOpts...)
 	}
 	server.routes()
 	return server
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.inflightMu.Lock()
+	if s.stopping {
+		s.inflightMu.Unlock()
+		http.Error(w, "server stopping", http.StatusServiceUnavailable)
+		return
+	}
+	s.inflight++
+	s.inflightMu.Unlock()
+	defer func() {
+		s.inflightMu.Lock()
+		s.inflight--
+		s.inflightCond.Broadcast()
+		s.inflightMu.Unlock()
+	}()
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) Wait() {
+	s.inflightMu.Lock()
+	s.stopping = true
+	for s.inflight > 0 {
+		s.inflightCond.Wait()
+	}
+	s.inflightMu.Unlock()
 }
 
 func (s *Server) routes() {
@@ -73,6 +130,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/profile", s.handleProfile)
 	s.mux.HandleFunc("/api/analytics", s.handleAnalytics)
 	s.mux.HandleFunc("/api/events", s.handleEvents)
+	s.mux.HandleFunc("/api/status", s.handleStatus)
 	s.mux.HandleFunc("/gsi", s.handleGSI)
 	if s.dashboard != nil {
 		s.mux.Handle("/", s.dashboard)
@@ -89,6 +147,7 @@ func (s *Server) handleGSI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.tracker.Request()
 	if s.store == nil {
 		http.Error(w, "session store is not configured", http.StatusInternalServerError)
 		return
@@ -96,42 +155,39 @@ func (s *Server) handleGSI(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSnapshotBytes))
 	if err != nil {
+		s.tracker.Rejected()
 		http.Error(w, "request body is too large or unreadable", http.StatusRequestEntityTooLarge)
 		return
 	}
-	record, err := s.store.Append(body)
+	_, err = s.processor.Process(body)
 	if err != nil {
 		if errors.Is(err, session.ErrInvalidJSON) {
+			s.tracker.Rejected()
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		http.Error(w, "failed to persist snapshot", http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, session.ErrStoreSealed) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, "failed to persist snapshot", status)
 		return
-	}
-	if s.latest != nil {
-		s.latest.Update(record.ReceivedAt, record.Payload)
-	}
-	if s.profiler != nil {
-		s.profiler.Observe(record.ReceivedAt, record.Payload)
-		if err := profile.WriteSummary(filepath.Join(s.store.SessionDir(), "session_summary.md"), s.profiler.Snapshot()); err != nil {
-			http.Error(w, "failed to write session summary", http.StatusInternalServerError)
-			return
-		}
-	}
-	// Analytics state is updated only after the snapshot was accepted and
-	// persisted, preserving raw data before deriving events.
-	if s.engine != nil {
-		tick := analytics.Normalize(record.ReceivedAt, record.Payload)
-		s.engine.Observe(tick)
-		if err := analytics.WriteSummaryFiles(s.store.SessionDir(), s.store.SessionID(), s.engine); err != nil {
-			http.Error(w, "failed to write analytics summary", http.StatusInternalServerError)
-			return
-		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(s.tracker.Snapshot()); err != nil {
+		http.Error(w, "failed to encode status", http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleLatest(w http.ResponseWriter, _ *http.Request) {

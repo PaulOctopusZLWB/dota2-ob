@@ -95,6 +95,11 @@
       overflow-wrap: anywhere;
     }
 
+    .operator-waiting { color: var(--muted); }
+    .operator-receiving { color: var(--accent); }
+    .operator-stale { color: var(--gold); }
+    .operator-degraded { color: var(--danger); }
+
     main {
       display: grid;
       gap: 14px;
@@ -398,13 +403,16 @@
     <header>
       <h1>Dota2-OB</h1>
       <section class="meta" aria-label="Session state">
-        <div class="metric"><span class="label">Status</span><span class="value" id="status">empty</span></div>
+        <div class="metric"><span class="label">Capture</span><span class="value operator-waiting" id="operator-state">waiting</span></div>
         <div class="metric"><span class="label">Map Time</span><span class="value" id="map-time">-</span></div>
         <div class="metric"><span class="label">Session</span><span class="value" id="session">-</span></div>
       </section>
     </header>
     <main>
       <section class="metrics-row" aria-label="Data freshness and counts">
+        <div class="metric"><span class="label">Accepted</span><span class="value" id="accepted-count">0</span></div>
+        <div class="metric"><span class="label">Last Accepted</span><span class="value" id="last-accepted-age">-</span></div>
+        <div class="metric"><span class="label">Active Error</span><span class="value" id="active-error">none</span></div>
         <div class="metric"><span class="label">Snapshots</span><span class="value" id="snapshots">0</span></div>
         <div class="metric"><span class="label">Ticks</span><span class="value" id="ticks">0</span></div>
         <div class="metric"><span class="label">Ten-Player Frames</span><span class="value" id="frames">0</span></div>
@@ -692,7 +700,6 @@
     }
 
     function render(snapshot) {
-      document.querySelector("#status").textContent = fmt(snapshot.status);
       document.querySelector("#session").textContent = fmt(snapshot.session_id);
       document.querySelector("#map-time").textContent = fmt(get(snapshot, ["map", "game_time"]));
 
@@ -703,6 +710,19 @@
           ${slots.join("")}
         </section>`;
       }).join("");
+    }
+
+    function renderOperator(status) {
+      const state = ["waiting", "receiving", "stale", "degraded"].includes(status.state) ? status.state : "waiting";
+      const stateEl = document.querySelector("#operator-state");
+      stateEl.textContent = state;
+      stateEl.className = `value operator-${state}`;
+      document.querySelector("#accepted-count").textContent = clamp(status.accepted_count || 0);
+      document.querySelector("#last-accepted-age").textContent = timeAgo(status.last_accepted_time, Date.now());
+      const failures = status.active_failures || {};
+      const first = ["raw", "latest", "profile", "analytics"].map(key => failures[key]).find(Boolean);
+      document.querySelector("#active-error").textContent = first ? `${first.subsystem}: ${first.code}` : "none";
+      if (status.session_id) document.querySelector("#session").textContent = status.session_id;
     }
 
     function renderSlot(snapshot, team, player, index) {
@@ -731,19 +751,22 @@
 
     async function refresh() {
       const tasks = [
+        fetchJSON("/api/status"),
         fetchJSON("/api/latest"),
         fetchJSON("/api/analytics"),
         fetchJSON("/api/events"),
         fetchJSON("/api/profile")
       ];
-      const [latest, analytics, events, profile] = await Promise.allSettled(tasks);
+      const [operator, latest, analytics, events, profile] = await Promise.allSettled(tasks);
 
+      const operatorVal = operator.status === "fulfilled" && operator.value ? operator.value : { state: "waiting", accepted_count: 0, active_failures: {} };
       const latestVal = latest.status === "fulfilled" && latest.value ? latest.value : { status: "offline", session_id: "-", map: {} };
       const analyticsVal = analytics.status === "fulfilled" && analytics.value ? analytics.value : { event_counts: {}, recent_events: [], roshan_observations: [], roshan_observations_total: 0, building_destroyed: [], building_destroyed_total: 0, ward_observations: [], ward_observations_total: 0, ward_coordinate_conclusion: "" };
       const eventsVal = events.status === "fulfilled" && Array.isArray(events.value) ? events.value : [];
       const profileVal = profile.status === "fulfilled" && profile.value ? profile.value : { fields: [] };
 
       render(latestVal);
+      renderOperator(operatorVal);
       renderCounts(latestVal, analyticsVal, profileVal, eventsVal);
       renderFeed(document.querySelector("#events-feed"), eventsVal, "none observed");
       renderEconomy(document.querySelector("#economy"), eventsVal, latestVal);
