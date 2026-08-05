@@ -35,7 +35,9 @@ func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, s
 				waiter.Wait()
 				waited = true
 			}
-			_ = server.Close()
+			if retryErr := server.Shutdown(context.Background()); retryErr != nil {
+				_ = server.Close()
+			}
 		}
 		cancel()
 	case <-signals:
@@ -48,7 +50,9 @@ func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, s
 				waiter.Wait()
 				waited = true
 			}
-			_ = server.Close()
+			if retryErr := server.Shutdown(context.Background()); retryErr != nil {
+				_ = server.Close()
+			}
 		}
 		serveErr := <-serveDone
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) && err == nil {

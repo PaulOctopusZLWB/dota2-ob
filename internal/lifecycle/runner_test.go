@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -33,7 +34,11 @@ func (s *fakeServer) Serve(net.Listener) error {
 }
 func (s *fakeServer) Shutdown(context.Context) error {
 	*s.events = append(*s.events, "shutdown")
-	close(s.done)
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
 	return s.shutdownErr
 }
 func (s *fakeServer) Close() error {
@@ -77,19 +82,28 @@ type observedServer struct {
 
 type failingHTTPServer struct {
 	*http.Server
-	shutdownReturned chan struct{}
-	closeAttempt     chan struct{}
+	shutdownReturned     chan struct{}
+	retryShutdownStarted chan struct{}
+	retryShutdownDone    chan struct{}
+	closeAttempt         chan struct{}
+	shutdownCalls        atomic.Int32
 }
 
-func (s failingHTTPServer) Shutdown(context.Context) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+func (s *failingHTTPServer) Shutdown(ctx context.Context) error {
+	if s.shutdownCalls.Add(1) == 1 {
+		failedCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := s.Server.Shutdown(failedCtx)
+		close(s.shutdownReturned)
+		return err
+	}
+	close(s.retryShutdownStarted)
 	err := s.Server.Shutdown(ctx)
-	close(s.shutdownReturned)
+	close(s.retryShutdownDone)
 	return err
 }
 
-func (s failingHTTPServer) Close() error {
+func (s *failingHTTPServer) Close() error {
 	s.closeAttempt <- struct{}{}
 	return s.Server.Close()
 }
@@ -234,7 +248,7 @@ func TestRunnerSignalsDrainBarrierBlockedAcceptedResponseBeforeOnceOnlyClose(t *
 	}
 }
 
-func TestRunnerShutdownFailureDrainsRawCommittedResponseBeforeForceClose(t *testing.T) {
+func TestRunnerShutdownFailureGracefullyFlushesRawCommittedResponseBeforeForceClose(t *testing.T) {
 	store, err := session.NewStore(t.TempDir(), session.WithSessionID("shutdown-failure"))
 	if err != nil {
 		t.Fatal(err)
@@ -250,8 +264,16 @@ func TestRunnerShutdownFailureDrainsRawCommittedResponseBeforeForceClose(t *test
 		t.Fatal(err)
 	}
 	shutdownReturned := make(chan struct{})
+	retryShutdownStarted := make(chan struct{})
+	retryShutdownDone := make(chan struct{})
 	closeAttempt := make(chan struct{}, 1)
-	server := failingHTTPServer{Server: &http.Server{Handler: handler}, shutdownReturned: shutdownReturned, closeAttempt: closeAttempt}
+	server := &failingHTTPServer{
+		Server:               &http.Server{Handler: handler},
+		shutdownReturned:     shutdownReturned,
+		retryShutdownStarted: retryShutdownStarted,
+		retryShutdownDone:    retryShutdownDone,
+		closeAttempt:         closeAttempt,
+	}
 	waitEntered := make(chan struct{})
 	waiter := signalingWaiter{waiter: handler, entered: waitEntered}
 	signals := make(chan os.Signal, 1)
@@ -284,18 +306,25 @@ func TestRunnerShutdownFailureDrainsRawCommittedResponseBeforeForceClose(t *test
 	}
 	signals <- syscall.SIGTERM
 	<-shutdownReturned
-	prematureClose := false
 	select {
 	case <-waitEntered:
 	case <-closeAttempt:
-		prematureClose = true
-	}
-	close(releaseProjection)
-	got := <-response
-	runErr := <-runResult
-	if prematureClose {
+		close(releaseProjection)
+		<-response
+		<-runResult
 		t.Fatal("server force-close started before accepted handler drain")
 	}
+	close(releaseProjection)
+	select {
+	case <-retryShutdownStarted:
+	case <-closeAttempt:
+		<-response
+		<-runResult
+		t.Fatal("server force-close raced response finalization instead of retrying graceful shutdown")
+	}
+	got := <-response
+	<-retryShutdownDone
+	runErr := <-runResult
 	if got.err != nil || got.status != http.StatusOK || got.body != "ok\n" {
 		t.Fatalf("accepted response status=%d body=%q err=%v", got.status, got.body, got.err)
 	}
@@ -304,5 +333,10 @@ func TestRunnerShutdownFailureDrainsRawCommittedResponseBeforeForceClose(t *test
 	}
 	if appender.calls != 1 {
 		t.Fatalf("appender close calls=%d, want 1", appender.calls)
+	}
+	select {
+	case <-closeAttempt:
+		t.Fatal("server force-close was attempted after successful graceful retry")
+	default:
 	}
 }
