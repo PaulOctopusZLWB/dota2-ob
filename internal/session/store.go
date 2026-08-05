@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -234,24 +235,34 @@ func validatePersistedRecord(line []byte, sessionID string, sequence uint64) err
 		Source        string          `json:"source"`
 		ReceivedAt    time.Time       `json:"received_at"`
 		Payload       json.RawMessage `json:"payload"`
+		Raw           json.RawMessage `json:"raw"`
 	}
 	if err := json.Unmarshal(line, &header); err != nil {
 		return err
 	}
 	if header.SchemaVersion == nil {
-		if header.ReceivedAt.IsZero() || len(header.Payload) == 0 {
+		if header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 			return errors.New("invalid v1 record")
 		}
-		var envelope struct {
-			Raw json.RawMessage `json:"raw"`
-		}
-		if err := json.Unmarshal(line, &envelope); err != nil || len(envelope.Raw) == 0 {
-			return errors.New("invalid v1 record")
-		}
-		return nil
+		return validateSemanticRaw(header.Payload, header.Raw)
 	}
-	if *header.SchemaVersion != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 {
+	if *header.SchemaVersion != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 		return errors.New("invalid v2 record")
+	}
+	return validateSemanticRaw(header.Payload, header.Raw)
+}
+
+func validateSemanticRaw(payloadRaw, sourceRaw json.RawMessage) error {
+	payload, err := decodeJSON(payloadRaw)
+	if err != nil {
+		return err
+	}
+	source, err := decodeJSON(sourceRaw)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(payload, source) {
+		return errors.New("raw payload mismatch")
 	}
 	return nil
 }

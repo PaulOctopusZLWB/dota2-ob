@@ -262,6 +262,21 @@ func TestStoreRecoveryRejectsMissingVersionOneFields(t *testing.T) {
 	}
 }
 
+func TestStoreRecoveryRejectsInvalidVersionTwoRawEnvelope(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "bad-v2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := `{"schema_version":2,"session_id":"bad-v2","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{"ok":true}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(record), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.NewStore(root, session.WithSessionID("bad-v2")); err == nil {
+		t.Fatal("NewStore accepted v2 envelope without raw")
+	}
+}
+
 func TestStoreAppendRejectsMalformedJSONWithoutWriting(t *testing.T) {
 	root := t.TempDir()
 
