@@ -44,6 +44,20 @@ func (p projection) Apply(record *session.Record) error {
 	return nil
 }
 
+type blockingProjection struct {
+	calls            *[]string
+	entered, release chan struct{}
+}
+
+func (p blockingProjection) Apply(record *session.Record) error {
+	*p.calls = append(*p.calls, "latest:"+string(rune('0'+record.Sequence)))
+	if record.Sequence == 1 {
+		close(p.entered)
+		<-p.release
+	}
+	return nil
+}
+
 func TestProcessorOrdersGroupsAndContinuesAfterFailure(t *testing.T) {
 	now := time.Unix(0, 0).UTC()
 	tracker := operator.NewTracker("s", now, time.Minute, func() time.Time { return now })
@@ -102,5 +116,61 @@ func TestProcessorFailureLogUsesStableCodeWithoutInternalError(t *testing.T) {
 	_, _ = processor.Process([]byte(`{}`))
 	if !reflect.DeepEqual(logs, []string{"latest_failed:latest"}) {
 		t.Fatalf("logs=%v", logs)
+	}
+}
+
+func TestProcessorConcurrentRequestsKeepWholeProjectionOrder(t *testing.T) {
+	now := time.Unix(0, 0).UTC()
+	tracker := operator.NewTracker("s", now, time.Minute, func() time.Time { return now })
+	appender := &memoryAppender{}
+	var calls []string
+	entered, release := make(chan struct{}), make(chan struct{})
+	processor := capture.NewProcessor(appender, tracker,
+		capture.WithLatest(blockingProjection{&calls, entered, release}),
+		capture.WithProfile(projection{"profile", &calls, nil}),
+		capture.WithAnalytics(projection{"analytics", &calls, nil}),
+	)
+	results := make(chan error, 2)
+	go func() { _, err := processor.Process([]byte(`{"request":1}`)); results <- err }()
+	<-entered
+	secondStarted := make(chan struct{})
+	go func() { close(secondStarted); _, err := processor.Process([]byte(`{"request":2}`)); results <- err }()
+	<-secondStarted
+	close(release)
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"latest:1", "profile:1", "analytics:1", "latest:2", "profile:2", "analytics:2"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+}
+
+func TestProcessorOverlappingFailuresRecoverOnlyTheirOwnSubsystem(t *testing.T) {
+	now := time.Unix(0, 0).UTC()
+	tracker := operator.NewTracker("s", now, time.Minute, func() time.Time { return now })
+	appender := &memoryAppender{}
+	var calls []string
+	processor := capture.NewProcessor(appender, tracker,
+		capture.WithLatest(projection{"latest", &calls, map[uint64]bool{1: true}}),
+		capture.WithProfile(projection{"profile", &calls, map[uint64]bool{1: true}}),
+		capture.WithAnalytics(projection{"analytics", &calls, map[uint64]bool{2: true}}),
+		capture.WithFailureLogger(func(string, string) {}),
+	)
+	_, _ = processor.Process([]byte(`{}`))
+	if snap := tracker.Snapshot(); snap.PostProcessingFailureCount != 2 || snap.State != operator.StateDegraded {
+		t.Fatalf("after seq1: %#v", snap)
+	}
+	_, _ = processor.Process([]byte(`{}`))
+	snap := tracker.Snapshot()
+	if len(snap.ActiveFailures) != 1 || snap.ActiveFailures[operator.SubsystemAnalytics].Code != "analytics_failed" || snap.PostProcessingFailureCount != 3 {
+		t.Fatalf("after seq2: %#v", snap)
+	}
+	_, _ = processor.Process([]byte(`{}`))
+	if snap := tracker.Snapshot(); snap.State != operator.StateReceiving || snap.PostProcessingFailureCount != 3 {
+		t.Fatalf("after seq3: %#v", snap)
 	}
 }

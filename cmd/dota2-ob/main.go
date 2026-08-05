@@ -49,20 +49,20 @@ func run(args []string, output io.Writer) int {
 		return 0
 	}
 
-	normalized, err := preflight.NormalizeListenAddress(*addr)
-	if err != nil {
-		fmt.Fprintln(output, err.Error())
-		return 1
-	}
 	if *doctorMode {
 		result := preflight.NewDoctor(preflight.Dependencies{}).Run(preflight.DoctorConfig{
-			Address: normalized, DataRoot: *dataDir, DashboardPath: filepath.Join("web", "index.html"),
+			Address: *addr, DataRoot: *dataDir, DashboardPath: filepath.Join("web", "index.html"),
 			GSIConfig: *gsiConfig, KnownConfigs: knownGSIConfigs(),
 		})
 		_ = json.NewEncoder(output).Encode(result)
 		if result.OK {
 			return 0
 		}
+		return 1
+	}
+	normalized, err := preflight.NormalizeListenAddress(*addr)
+	if err != nil {
+		fmt.Fprintln(output, err.Error())
 		return 1
 	}
 	if *staleThreshold <= 0 {
@@ -93,7 +93,7 @@ func run(args []string, output io.Writer) int {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	err = lifecycle.Run(server, listener, store, signals, func() (context.Context, context.CancelFunc) {
+	err = lifecycle.Run(server, listener, store, handler, signals, func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), 10*time.Second)
 	})
 	if err != nil {

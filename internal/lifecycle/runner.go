@@ -15,9 +15,10 @@ type Server interface {
 	Close() error
 }
 type Closer interface{ Close() error }
+type Waiter interface{ Wait() }
 type ContextFactory func() (context.Context, context.CancelFunc)
 
-func Run(server Server, listener net.Listener, appender Closer, signals <-chan os.Signal, shutdownContext ContextFactory) error {
+func Run(server Server, listener net.Listener, appender Closer, waiter Waiter, signals <-chan os.Signal, shutdownContext ContextFactory) error {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 	var codes []string
@@ -26,6 +27,12 @@ func Run(server Server, listener net.Listener, appender Closer, signals <-chan o
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			codes = append(codes, "server_serve_failed")
 		}
+		ctx, cancel := shutdownContext()
+		if shutdownErr := server.Shutdown(ctx); shutdownErr != nil {
+			codes = append(codes, "server_shutdown_failed")
+			_ = server.Close()
+		}
+		cancel()
 	case <-signals:
 		ctx, cancel := shutdownContext()
 		err := server.Shutdown(ctx)
@@ -38,6 +45,9 @@ func Run(server Server, listener net.Listener, appender Closer, signals <-chan o
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) && err == nil {
 			codes = append(codes, "server_serve_failed")
 		}
+	}
+	if waiter != nil {
+		waiter.Wait()
 	}
 	if err := appender.Close(); err != nil {
 		codes = append(codes, "raw_close_failed")

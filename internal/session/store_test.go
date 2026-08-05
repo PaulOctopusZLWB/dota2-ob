@@ -15,12 +15,13 @@ import (
 )
 
 type fakeRawFile struct {
-	data        []byte
-	offset      int64
-	writeLimit  int
-	truncateErr error
-	closeErr    error
-	writeCalls  int
+	data         []byte
+	offset       int64
+	writeLimit   int
+	truncateErr  error
+	closeErr     error
+	writeCalls   int
+	seekMismatch bool
 }
 
 func (f *fakeRawFile) Write(p []byte) (int, error) {
@@ -49,6 +50,9 @@ func (f *fakeRawFile) Seek(offset int64, whence int) (int64, error) {
 		f.offset += offset
 	case io.SeekEnd:
 		f.offset = int64(len(f.data)) + offset
+	}
+	if f.seekMismatch && whence == io.SeekStart {
+		return f.offset + 1, nil
 	}
 	return f.offset, nil
 }
@@ -188,6 +192,17 @@ func TestStoreRollbackFailureSealsWithoutFurtherWrites(t *testing.T) {
 	}
 }
 
+func TestStoreRollbackSeekMismatchSeals(t *testing.T) {
+	f := &fakeRawFile{writeLimit: 4, seekMismatch: true}
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("seek-mismatch"), session.WithRawFile(func(string) (session.RawFile, error) { return f, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"ok":true}`)); !errors.Is(err, session.ErrStoreSealed) {
+		t.Fatalf("Append error=%v", err)
+	}
+}
+
 func TestStoreRecoveryRemovesOnlyUnterminatedTail(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "recover")
@@ -230,6 +245,20 @@ func TestStoreRecoveryRejectsTerminatedInvalidRecordWithoutMutation(t *testing.T
 	got, _ := os.ReadFile(path)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("corrupt file changed: %q", got)
+	}
+}
+
+func TestStoreRecoveryRejectsMissingVersionOneFields(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "bad-v1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.NewStore(root, session.WithSessionID("bad-v1")); err == nil {
+		t.Fatal("NewStore accepted invalid v1 envelope")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 )
 
@@ -19,7 +20,7 @@ func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
 		return Snapshot{}, errors.New("session directory is required")
 	}
 
-	records, err := readRawJSONL(filepath.Join(sessionDir, "raw.jsonl"))
+	records, err := readRawJSONL(filepath.Join(sessionDir, "raw.jsonl"), sessionID)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -48,15 +49,21 @@ func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
 
 // rawRecord is the on-disk shape written by the session store.
 type rawRecord struct {
-	SchemaVersion *int      `json:"schema_version"`
-	SessionID     string    `json:"session_id"`
-	Sequence      uint64    `json:"sequence"`
-	ReceivedAt    time.Time `json:"received_at"`
-	Source        string    `json:"source"`
-	Payload       any       `json:"payload"`
+	ReceivedAt time.Time `json:"received_at"`
+	Payload    any       `json:"payload"`
 }
 
-func readRawJSONL(path string) ([]rawRecord, error) {
+type diskRawRecord struct {
+	SchemaVersion *int            `json:"schema_version"`
+	SessionID     string          `json:"session_id"`
+	Sequence      uint64          `json:"sequence"`
+	ReceivedAt    time.Time       `json:"received_at"`
+	Source        string          `json:"source"`
+	Payload       json.RawMessage `json:"payload"`
+	Raw           json.RawMessage `json:"raw"`
+}
+
+func readRawJSONL(path, expectedSessionID string) ([]rawRecord, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open raw jsonl: %w", err)
@@ -73,24 +80,71 @@ func readRawJSONL(path string) ([]rawRecord, error) {
 	dec := json.NewDecoder(bytes.NewReader(committed))
 	dec.UseNumber()
 	var records []rawRecord
+	cursor := 0
 	for {
-		var rec rawRecord
-		if err := dec.Decode(&rec); errors.Is(err, io.EOF) {
+		for cursor < len(committed) && isJSONWhitespace(committed[cursor]) {
+			if committed[cursor] == '\n' {
+				return records, fmt.Errorf("blank raw record %d", len(records)+1)
+			}
+			cursor++
+		}
+		var disk diskRawRecord
+		if err := dec.Decode(&disk); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
 			return records, fmt.Errorf("decode raw record %d", len(records)+1)
 		}
+		end := int(dec.InputOffset())
+		separatorEnd := end
+		newlines := 0
+		for separatorEnd < len(committed) && isJSONWhitespace(committed[separatorEnd]) {
+			if committed[separatorEnd] == '\n' {
+				newlines++
+			}
+			separatorEnd++
+		}
+		if newlines != 1 {
+			return records, fmt.Errorf("invalid jsonl boundary at record %d", len(records)+1)
+		}
+		cursor = separatorEnd
 		sequence := uint64(len(records) + 1)
-		if rec.SchemaVersion == nil {
-			rec.SessionID = filepath.Base(filepath.Dir(path))
-			rec.Sequence = sequence
-			rec.Source = "gsi"
-		} else if *rec.SchemaVersion != 2 {
+		if len(disk.Payload) == 0 || len(disk.Raw) == 0 || disk.ReceivedAt.IsZero() {
+			return records, fmt.Errorf("invalid raw record %d", sequence)
+		}
+		if disk.SchemaVersion == nil {
+			// Version 1 derives identity from its session directory/order.
+		} else if *disk.SchemaVersion != 2 {
 			return records, fmt.Errorf("unsupported raw schema version at record %d", sequence)
-		} else if rec.Sequence != sequence || rec.SessionID == "" || rec.Source != "gsi" || rec.ReceivedAt.IsZero() || rec.Payload == nil {
+		} else if disk.Sequence != sequence || disk.SessionID != expectedSessionID || disk.Source != "gsi" {
 			return records, fmt.Errorf("invalid version 2 raw record %d", sequence)
 		}
-		records = append(records, rec)
+		payload, err := decodeRawValue(disk.Payload)
+		if err != nil {
+			return records, fmt.Errorf("invalid payload at raw record %d", sequence)
+		}
+		rawValue, err := decodeRawValue(disk.Raw)
+		if err != nil || !reflect.DeepEqual(payload, rawValue) {
+			return records, fmt.Errorf("raw payload mismatch at record %d", sequence)
+		}
+		records = append(records, rawRecord{ReceivedAt: disk.ReceivedAt, Payload: payload})
 	}
 	return records, nil
+}
+
+func decodeRawValue(raw json.RawMessage) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, errors.New("trailing data")
+	}
+	return value, nil
+}
+
+func isJSONWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }

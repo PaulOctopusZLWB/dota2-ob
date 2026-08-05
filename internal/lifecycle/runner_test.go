@@ -44,6 +44,13 @@ type fakeCloser struct {
 	calls  int
 }
 
+type fakeWaiter struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *fakeWaiter) Wait() { close(w.entered); <-w.release }
+
 func (c *fakeCloser) Close() error {
 	c.calls++
 	*c.events = append(*c.events, "store_close")
@@ -59,7 +66,7 @@ func TestRunnerHandlesINTAndTERMWithShutdownBeforeOnceOnlyStoreClose(t *testing.
 			signals := make(chan os.Signal, 2)
 			signals <- signal
 			signals <- signal
-			err := lifecycle.Run(server, nil, closer, signals, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) })
+			err := lifecycle.Run(server, nil, closer, nil, signals, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) })
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -80,8 +87,32 @@ func TestRunnerReportsStableShutdownAndCloseCodes(t *testing.T) {
 	closer := &fakeCloser{events: &events, err: errors.New("secret close")}
 	signals := make(chan os.Signal, 1)
 	signals <- os.Interrupt
-	err := lifecycle.Run(server, nil, closer, signals, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) })
+	err := lifecycle.Run(server, nil, closer, nil, signals, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) })
 	if err == nil || err.Error() != "server_shutdown_failed; raw_close_failed" {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRunnerWaitsForHandlersAfterShutdownFailureBeforeClosingAppender(t *testing.T) {
+	var events []string
+	server := &fakeServer{events: &events, done: make(chan struct{}), shutdownErr: errors.New("timeout")}
+	closer := &fakeCloser{events: &events}
+	waiter := &fakeWaiter{entered: make(chan struct{}), release: make(chan struct{})}
+	signals := make(chan os.Signal, 1)
+	signals <- os.Interrupt
+	result := make(chan error, 1)
+	go func() {
+		result <- lifecycle.Run(server, nil, closer, waiter, signals, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) })
+	}()
+	<-waiter.entered
+	if closer.calls != 0 {
+		t.Fatalf("appender closed before handlers drained")
+	}
+	close(waiter.release)
+	if err := <-result; err == nil {
+		t.Fatal("Run succeeded despite shutdown failure")
+	}
+	if closer.calls != 1 {
+		t.Fatalf("close calls=%d", closer.calls)
 	}
 }

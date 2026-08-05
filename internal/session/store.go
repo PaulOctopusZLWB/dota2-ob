@@ -158,8 +158,12 @@ func (s *Store) rollback(offset int64) error {
 	if err := s.file.Truncate(offset); err != nil {
 		return err
 	}
-	if _, err := s.file.Seek(offset, io.SeekStart); err != nil {
+	position, err := s.file.Seek(offset, io.SeekStart)
+	if err != nil {
 		return err
+	}
+	if position != offset {
+		return errors.New("rollback position mismatch")
 	}
 	info, err := s.file.Stat()
 	if err != nil {
@@ -201,9 +205,13 @@ func recoverRawFile(path, sessionID string) (uint64, error) {
 		}
 	}
 	sequence := uint64(0)
-	for _, line := range bytes.Split(data[:committed], []byte{'\n'}) {
+	lines := bytes.Split(data[:committed], []byte{'\n'})
+	for index, line := range lines {
 		if len(line) == 0 {
-			continue
+			if index == len(lines)-1 {
+				continue
+			}
+			return 0, fmt.Errorf("invalid committed raw record %d", sequence+1)
 		}
 		sequence++
 		if err := validatePersistedRecord(line, sessionID, sequence); err != nil {
@@ -231,6 +239,15 @@ func validatePersistedRecord(line []byte, sessionID string, sequence uint64) err
 		return err
 	}
 	if header.SchemaVersion == nil {
+		if header.ReceivedAt.IsZero() || len(header.Payload) == 0 {
+			return errors.New("invalid v1 record")
+		}
+		var envelope struct {
+			Raw json.RawMessage `json:"raw"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil || len(envelope.Raw) == 0 {
+			return errors.New("invalid v1 record")
+		}
 		return nil
 	}
 	if *header.SchemaVersion != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 {

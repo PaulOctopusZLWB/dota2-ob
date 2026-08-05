@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
@@ -19,14 +20,18 @@ import (
 const maxSnapshotBytes = 10 << 20
 
 type Server struct {
-	store     *session.Store
-	latest    *state.Latest
-	profiler  *profile.Profiler
-	engine    *analytics.Engine
-	processor *capture.Processor
-	tracker   *operator.Tracker
-	dashboard http.Handler
-	mux       *http.ServeMux
+	store        *session.Store
+	latest       *state.Latest
+	profiler     *profile.Profiler
+	engine       *analytics.Engine
+	processor    *capture.Processor
+	tracker      *operator.Tracker
+	dashboard    http.Handler
+	mux          *http.ServeMux
+	inflightMu   sync.Mutex
+	inflightCond *sync.Cond
+	inflight     int
+	stopping     bool
 }
 
 type Option func(*Server)
@@ -62,11 +67,12 @@ func WithTracker(tracker *operator.Tracker) Option {
 	return func(server *Server) { server.tracker = tracker }
 }
 
-func NewServer(store *session.Store, opts ...Option) http.Handler {
+func NewServer(store *session.Store, opts ...Option) *Server {
 	server := &Server{
 		store: store,
 		mux:   http.NewServeMux(),
 	}
+	server.inflightCond = sync.NewCond(&server.inflightMu)
 	for _, opt := range opts {
 		opt(server)
 	}
@@ -92,7 +98,30 @@ func NewServer(store *session.Store, opts ...Option) http.Handler {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.inflightMu.Lock()
+	if s.stopping {
+		s.inflightMu.Unlock()
+		http.Error(w, "server stopping", http.StatusServiceUnavailable)
+		return
+	}
+	s.inflight++
+	s.inflightMu.Unlock()
+	defer func() {
+		s.inflightMu.Lock()
+		s.inflight--
+		s.inflightCond.Broadcast()
+		s.inflightMu.Unlock()
+	}()
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) Wait() {
+	s.inflightMu.Lock()
+	s.stopping = true
+	for s.inflight > 0 {
+		s.inflightCond.Wait()
+	}
+	s.inflightMu.Unlock()
 }
 
 func (s *Server) routes() {

@@ -28,6 +28,10 @@ func (failingProjection) Apply(*session.Record) error {
 	return errors.New("do not expose this path /home/private")
 }
 
+type barrierProjection struct{ entered, release chan struct{} }
+
+func (p barrierProjection) Apply(*session.Record) error { close(p.entered); <-p.release; return nil }
+
 func TestHealthzReturnsOK(t *testing.T) {
 	store, err := session.NewStore(t.TempDir(), session.WithSessionID("health"))
 	if err != nil {
@@ -129,6 +133,41 @@ func TestStatusRejectsUnsupportedMethod(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d", rec.Code)
 	}
+}
+
+func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
+	store, _ := session.NewStore(t.TempDir(), session.WithSessionID("drain"))
+	now := time.Now().UTC()
+	tracker := operator.NewTracker("drain", now, time.Minute, time.Now)
+	entered, release := make(chan struct{}), make(chan struct{})
+	processor := capture.NewProcessor(store, tracker, capture.WithLatest(barrierProjection{entered, release}))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	response := make(chan string, 1)
+	go func() {
+		resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			response <- "error"
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		response <- string(body)
+	}()
+	<-entered
+	drained := make(chan struct{})
+	go func() { handler.Wait(); close(drained) }()
+	select {
+	case <-drained:
+		t.Fatal("Wait returned before projection/response")
+	default:
+	}
+	close(release)
+	if body := <-response; body != "ok\n" {
+		t.Fatalf("body=%q", body)
+	}
+	<-drained
 }
 
 func TestGSIPostRejectsMalformedJSONWithoutPersisting(t *testing.T) {
