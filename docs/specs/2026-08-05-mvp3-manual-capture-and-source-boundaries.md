@@ -117,17 +117,22 @@ Responsibility:
 - Accept one local GSI request.
 - Enforce method and body-size constraints.
 - Validate that the body is one JSON value.
-- Append the untouched payload to the active raw session.
+- Append a source-faithful JSON value to the active raw session. Block A
+  preserves JSON semantics, including number values, but does not promise the
+  request body's byte-for-byte whitespace or object-key layout.
 - Produce an accepted-record envelope only after the append succeeds.
 
-The accepted-record envelope owns only capture facts:
+The accepted-record envelope is persisted in `raw.jsonl` and owns only capture
+facts:
 
+- schema version,
 - session id,
-- monotonically increasing sequence within the process session,
+- sequence that is unique and monotonically increasing in raw-file order within
+  the process session,
 - receive timestamp,
 - source kind (`gsi`),
 - decoded payload,
-- original raw JSON.
+- source-faithful raw JSON value.
 
 It does not own normalized Dota fields, analytics events, Steam labels, or replay
 truth.
@@ -146,7 +151,9 @@ Responsibility:
 - Expose whether it is waiting, receiving, stale, or degraded.
 - Report the current session id and safe session location relative to the data
   root.
-- Report accepted/rejected/post-processing-failure counters.
+- Report request, accepted, rejected, raw-write-failure, and
+  post-processing-failure counters; the last counts failed projection-group
+  attempts rather than failed requests.
 - Report first accepted time, last request time, last accepted time, and last
   successful analytics update time.
 - Expose stable error codes and concise messages without secrets or raw payloads.
@@ -276,16 +283,49 @@ It is not a prerequisite for the first operator-hardening block.
 
 For each valid accepted GSI POST:
 
-1. exactly one raw record is durably appended,
+1. exactly one complete newline-terminated raw record is written to the active
+   session file,
 2. its sequence and receive timestamp identify downstream work,
 3. downstream outputs can be rebuilt from raw evidence,
 4. downstream failure never rewrites or deletes the raw record.
+
+The Block A acceptance guarantee is deliberately narrower than filesystem or
+power-loss durability: the operating system has accepted a complete record
+write to the session file. Block A does not call `fsync` per record and does not
+claim survival across a kernel crash, storage failure, or sudden power loss.
+Evidence-archive durability remains deferred to the empirical design gate.
+
+The session appender serializes sequence allocation and file writes. The final
+newline is the commit marker. A full write, including that newline, is accepted
+even if a later orderly-shutdown close reports an error; a close failure is
+reported separately and cannot retroactively turn an acknowledged request into
+a rejection. A short or partial write is not accepted. The appender must restore
+the file to its prior committed offset before returning a retryable 5xx. If it
+cannot verify that rollback, it seals the session against further appends and
+returns a stable non-accepted error; startup recovery removes only the
+unterminated tail before the session can accept more data. A terminated but
+invalid record is corruption and must fail recovery without rewriting earlier
+records.
+
+These guarantees are exactly-once only within one append call. GSI transport
+does not supply an idempotency key, so Block A does not claim deduplication of
+separate HTTP requests.
 
 ### Idempotency And Rebuild
 
 Live observation may update in-memory projections once per accepted record.
 Offline analysis is the recovery path and must deterministically rebuild
 normalized ticks, events, and summaries from `raw.jsonl`.
+
+The application invokes the configured projection groups once per accepted
+sequence in fixed order: `latest`, `profile` (observe plus profile summary), then
+`analytics` (normalize, observe, and analytics summaries). A group failure does
+not prevent later independent groups from running for that sequence. Each group
+has its own active-failure state; only a later complete success by that same
+group clears it. The post-processing failure counter counts failed group
+attempts, not requests. Every request whose raw append is accepted returns the
+existing HTTP 200 `ok\n` response, even when one or more projection groups fail;
+degradation details are exposed through operator status and safe logs.
 
 Metadata cache entries and replay reports are separate derived products. They
 must be safe to delete and regenerate without modifying raw evidence.
@@ -303,6 +343,21 @@ Public local APIs should remain backward compatible during package separation.
 New status fields may be added. Renaming or removing existing analytics fields
 requires a separate contract change and migration note.
 
+Block A introduces persisted raw-envelope schema version `2` with
+`schema_version`, `session_id`, `sequence`, `received_at`, `source`, `payload`,
+and `raw`. All capture identity fields are persisted rather than transient. A
+missing schema version denotes the accepted MVP2 schema (`version 1`), whose
+stored fields are `received_at`, `payload`, and `raw`. Offline readers must read
+both versions. For version 1 they derive session id from the session directory,
+derive sequence from valid newline-terminated file order starting at one, and
+set source to `gsi`. Unknown explicit schema versions fail with a bounded error;
+they are not guessed.
+
+The `raw` field promises semantic JSON preservation, not byte-for-byte request
+preservation. Offline compatibility tests must rebuild both an MVP2 fixture and
+a version 2 fixture. Concurrent append tests must prove that every successful
+POST receives a unique sequence and that raw-file order is strictly increasing.
+
 ## MVP3 Functional Requirements
 
 - Add a manual preflight command that checks, without changing Dota/Steam state:
@@ -319,6 +374,10 @@ requires a separate contract change and migration note.
 - Update `docs/manual_test_gsi.md` with exact preflight, start, observe, stop,
   inspect, and offline-analysis steps.
 - Keep the process bound to localhost by default.
+- Reject non-loopback and wildcard listen addresses in Block A. Accepted host
+  forms are `127.0.0.1`, `localhost` (normalized to `127.0.0.1`), and `::1`;
+  configuration URI comparison uses the same normalization, exact port, and
+  exact `/gsi` path.
 - Keep Steam metadata and replay validation behind the contracts above; they are
   not required to make manual GSI capture succeed.
 
@@ -353,8 +412,19 @@ Contract tests must prove:
 
 - invalid payload never creates a raw record,
 - accepted payload creates exactly one raw record,
+- full writes define acceptance without a per-record `fsync` requirement,
+- a short write is rolled back to the previous newline and preserves every
+  earlier record,
+- an unrollbackable partial tail seals the store and is removed by deterministic
+  startup recovery before another append,
+- MVP2 and version 2 raw envelopes both rebuild successfully,
+- concurrent accepted POSTs produce unique, monotonically increasing sequences
+  in raw-file order,
 - a forced downstream failure leaves the raw record intact and changes status
   to degraded,
+- projection groups continue in fixed order after an independent group failure,
+  run at most once per accepted sequence, and retain overlapping per-group
+  failures until each group recovers,
 - no-post state is waiting,
 - recent accepted traffic is receiving,
 - elapsed traffic becomes stale using an injected clock,

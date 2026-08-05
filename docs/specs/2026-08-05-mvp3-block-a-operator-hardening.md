@@ -43,22 +43,93 @@ Steam metadata, replay parsing, evidence packaging, or Dota automation.
 ### Raw-First Processing Semantics
 
 - Preserve body-size and single-JSON-value validation.
-- A valid GSI POST is accepted only after exactly one raw record is appended.
-- A raw append failure returns a 5xx response and does not update projections.
-- Latest state, field profiling, analytics, and derived summary materialization
-  run only after raw append succeeds.
-- If any post-processing step fails after raw append:
-  - retain the raw record,
-  - do not process the same record twice inside the request,
-  - record a bounded operator error with a stable code,
-  - mark operator state degraded,
-  - log the failure without raw payload or credentials,
-  - return a success-class response that reflects raw acceptance.
-- A later successful request may clear the active degraded condition only when
-  the failed subsystem has demonstrably recovered. Historical failure counters
-  remain monotonic.
+- A valid GSI POST is accepted only after exactly one complete,
+  newline-terminated raw record has been written to the active session file.
+- The Block A persistence guarantee is a successful full write accepted by the
+  operating system. It is intentionally OS-buffered: there is no per-record
+  `fsync`, and Block A does not claim survival across a kernel crash, storage
+  failure, or sudden power loss.
+- The appender serializes sequence allocation and file writes. The final newline
+  is the commit marker. A short/partial write must be rolled back to the prior
+  committed byte offset before the handler returns a retryable 5xx. If rollback
+  cannot be verified, seal the session against later writes and return a stable
+  non-accepted 5xx until startup recovery removes the unterminated tail.
+- Use a session-scoped file handle or an equivalent injectable append boundary
+  so per-record `Close` is not an ambiguous acceptance gate. A full write is
+  accepted even if orderly shutdown later reports a close error; log that close
+  error with stable code `raw_close_failed` without changing an earlier HTTP
+  result.
+- A terminated invalid JSONL record is corruption. Recovery must fail safely and
+  leave the file untouched; it may remove only bytes after the last committed
+  newline.
+- A raw append failure does not update projections. A rolled-back failure returns
+  HTTP 500; a sealed store returns HTTP 503 without attempting another write.
+- Use stable raw-store codes `raw_append_failed`, `raw_store_sealed`, and
+  `raw_close_failed`. A later accepted append may clear a transient active raw
+  failure; a sealed store cannot recover in-process.
+- Every accepted append returns exactly HTTP 200, content type
+  `text/plain; charset=utf-8`, and body `ok\n`, whether downstream processing
+  succeeds or fails. No post-append error may replace this with a non-2xx.
+- Exactly-once means one append and one projection attempt per accepted request
+  inside this process. Separate HTTP requests are not deduplicated because GSI
+  supplies no idempotency key.
 - Offline `--analyze-session` remains the deterministic recovery path for
   derived artifacts.
+
+### Accepted Record And Raw Compatibility
+
+Persist every accepted Block A record as raw-envelope schema version `2`:
+
+```json
+{
+  "schema_version": 2,
+  "session_id": "20260805T120000.000000000Z",
+  "sequence": 1,
+  "received_at": "2026-08-05T12:00:00Z",
+  "source": "gsi",
+  "payload": {},
+  "raw": {}
+}
+```
+
+- `session_id`, `sequence`, `received_at`, and `source` are persisted capture
+  facts; none is transient-only.
+- `sequence` starts at one and is unique and strictly increasing in committed
+  raw-file order. Allocation and append happen under the same serialization
+  boundary; failed appends do not consume a sequence.
+- `payload` is the decoded value used by projections. `raw` is a semantically
+  equivalent JSON value. Byte-for-byte whitespace, escape spelling, and object
+  key layout are not part of Block A's contract.
+- A missing `schema_version` denotes MVP2 schema version `1`, containing
+  `received_at`, `payload`, and `raw`. Offline readers derive its session id from
+  the directory, derive sequence from valid newline-terminated file order
+  starting at one, and set source to `gsi`.
+- Readers accept versions 1 and 2 and reject unknown explicit versions with a
+  bounded error. They ignore/recover only an unterminated final fragment; an
+  invalid newline-terminated record fails analysis without discarding earlier
+  evidence.
+
+### Projection Ordering And Recovery
+
+After append acceptance, invoke every configured projection group once in this
+fixed order:
+
+1. `latest`,
+2. `profile` (observe, then write the profile summary),
+3. `analytics` (normalize, observe, then write analytics summaries).
+
+- Continue to later groups when an earlier group fails. Within a group, do not
+  run steps that depend on a failed earlier step.
+- Record active failure independently for each group. A complete later success
+  by that same group clears only its own active failure; success by another group
+  cannot clear it.
+- Increment `post_processing_failure_count` once per failed group attempt. It
+  does not count failed requests or individual operations inside one group.
+- Keep active failures until all affected groups have demonstrated recovery.
+  Historical counters remain monotonic.
+- Log each failed group with a stable code and no raw payload, credential, or
+  arbitrary path content. Use `latest_failed`, `profile_failed`, and
+  `analytics_failed` for the three group-level failure codes.
 
 ### Operator State Model
 
@@ -72,8 +143,8 @@ Required top-level states:
   active post-processing failure exists.
 - `stale`: at least one valid snapshot was accepted, but none within the stale
   threshold, and no active post-processing failure exists.
-- `degraded`: raw capture may still be working, but a tracked required
-  post-processing subsystem has an active failure.
+- `degraded`: raw capture is unavailable/sealed, or a tracked required
+  projection group has an active failure.
 
 The snapshot must include:
 
@@ -83,9 +154,16 @@ The snapshot must include:
 - last request time,
 - last accepted time,
 - last analytics success time when analytics is configured,
-- request, accepted, rejected, raw-write-failure, and post-processing-failure
-  counters,
+- `request_count`, `accepted_count`, `rejected_count`,
+  `raw_write_failure_count`, and `post_processing_failure_count` counters,
+- active failures keyed by the bounded subsystem ids `raw`, `latest`, `profile`,
+  and `analytics`,
 - latest bounded error records with code, subsystem, safe message, and time.
+
+`request_count` counts POST attempts reaching `/gsi`; `accepted_count` counts
+successful raw commits; `rejected_count` counts validation/body-limit failures;
+and `raw_write_failure_count` counts valid requests that fail before acceptance.
+`post_processing_failure_count` has the per-group-attempt meaning defined above.
 
 Error history must have a fixed maximum length. Messages must not contain the
 raw request body, API keys, Steam credentials, cookies, or arbitrary filesystem
@@ -123,18 +201,50 @@ Required checks:
   inspected; absence is a clearly labelled warning rather than a failure on a
   development machine without Dota 2.
 
+Listen and URI rules are explicit:
+
+- Accept only host `127.0.0.1`, literal `localhost`, or IPv6 loopback `::1`, with
+  an explicit port in `1..65535`. Normalize `localhost` to `127.0.0.1` before
+  binding and comparison.
+- Reject an empty host, wildcard addresses (`0.0.0.0` and `::`), non-loopback
+  addresses, hostnames other than literal `localhost`, and port zero.
+- A configured GSI URI must use `http`, contain no user info, query, or fragment,
+  and have path exactly `/gsi`. Its normalized host and exact port must equal the
+  selected listener. IPv4/`localhost` and IPv6 are separate endpoint families;
+  `::1` is equivalent only to `[::1]`.
+- URI validation is syntactic and performs no DNS or outbound network request.
+
 Add a `--gsi-config` flag for an explicit config path. The implementation may
 add a focused config reader for the controlled Valve KeyValues shape used here,
 but must not attempt to build a general VDF framework.
 
 The doctor result must distinguish required failures, warnings, and successful
-checks. Exit non-zero when any required check fails. It must not:
+checks. Print one bounded JSON object with this stable check order:
+
+1. `listen_address`,
+2. `listen_available`,
+3. `data_root`,
+4. `dashboard_asset`,
+5. `gsi_config`.
+
+Each check has only `id`, `status` (`pass`, `warning`, or `fail`), and a bounded
+safe `message`. The top-level object has `ok` and `checks`. Exit `0` when no
+required check fails, `1` when one or more required checks fail, and retain the
+standard flag parser's exit `2` for invalid CLI syntax. Always close the
+point-in-time listener before exit, including after later failures. It must not:
 
 - launch or stop Steam/Dota 2,
 - copy or rewrite a Dota config,
 - join a match,
-- make network calls,
+- make outbound network calls,
 - read credentials.
+
+Doctor code must expose injected filesystem, listener, and config-location
+boundaries for tests. Negative tests use controlled fakes or temporary fixtures,
+not host permissions, real occupied ports, Steam installation state, DNS, or
+timing. A data-root probe may create the requested root and one uniquely named
+file inside it; it must close and remove the probe file. No test or doctor path
+may leave an HTTP server running or invoke a Steam/Dota process-control surface.
 
 ### Dashboard And Logs
 
@@ -170,8 +280,12 @@ Update `docs/manual_test_gsi.md` to cover:
 - Keep `internal/gsi` responsible for HTTP transport only. Introduce the
   smallest application-level processing abstraction needed to make raw
   acceptance and downstream failure isolation explicit.
+- Put sequence allocation, append commit/rollback, store sealing, and trailing
+  fragment recovery behind an injectable `internal/session` boundary. Do not
+  expose filesystem operations to `internal/gsi`.
 - The application processor may coordinate latest state, profiler, analytics,
-  and summary writers. It must consume an already accepted session record.
+  and summary writers. It must consume an already accepted versioned session
+  record and preserve the fixed group ordering and continue-on-error rules.
 - Prefer consumer-owned narrow interfaces over a generic plugin/event system.
 - `internal/operator` should own status/counter/error state and time-based state
   calculation.
@@ -200,20 +314,38 @@ Update `docs/manual_test_gsi.md` to cover:
 ## Acceptance Criteria
 
 - `--doctor` passes against repository assets and a writable temporary data
-  root without Steam, Dota 2, network, or credentials.
+  root without Steam, Dota 2, outbound network, or credentials.
 - `--doctor` fails clearly for an occupied/invalid listen address, unwritable
   data target, missing dashboard, and an explicitly invalid GSI config.
+- Doctor negative tests use injected boundaries or controlled fixtures and prove
+  exit code, stable ordered result shape, closed listener, no outbound network,
+  and no Steam/Dota mutation without sleeps or host-specific permissions.
+- Doctor accepts the defined IPv4/`localhost` and IPv6 forms, rejects wildcard
+  and non-loopback addresses, and enforces normalized URI host, exact port, and
+  exact `/gsi` path equivalence.
 - `/api/status` returns valid bounded JSON for all four operator states.
-- A valid POST creates exactly one raw JSONL record and increments accepted
-  count once.
+- A valid POST creates exactly one version 2 raw JSONL record, returns HTTP 200
+  `ok\n`, and increments accepted count once.
 - Invalid or oversized input creates no raw record and increments rejected
   count.
-- A forced raw-write failure returns 5xx and does not update projections.
-- A forced profiler/analytics/summary failure after append retains the raw
-  record, returns a success-class raw-acceptance response, increments the
-  post-processing failure count, and exposes degraded state.
-- A subsequent demonstrated subsystem recovery clears active degradation while
-  preserving historical counters.
+- A forced short write rolls back to the previous committed offset, preserves
+  all earlier records, returns HTTP 500, and does not update projections.
+- A forced rollback failure seals the store; later POSTs return HTTP 503 without
+  writing, and startup recovery removes only the unterminated tail.
+- Orderly close failure cannot reverse an accepted response and is reported with
+  stable code `raw_close_failed`; no per-record sync/close is required.
+- Version 1 and version 2 fixtures both rebuild, while an unknown explicit
+  version and an invalid terminated record fail with bounded errors.
+- Concurrent valid POSTs persist unique, strictly increasing sequences in file
+  order with no duplicate or consumed failed sequence.
+- A forced `latest`, `profile`, or `analytics` group failure after append retains
+  the raw record, returns HTTP 200 `ok\n`, increments the failure counter once
+  per failed group attempt, continues to later independent groups, and exposes
+  degraded state.
+- An overlapping recovery test proves: A fails; then B fails while A succeeds;
+  state remains degraded for B; only B's later success clears degradation. It
+  also proves each configured group ran at most once for every accepted
+  sequence and historical counters never decreased.
 - Waiting-to-receiving-to-stale transitions are deterministic under an injected
   clock.
 - Existing APIs, offline analysis, analytics output, and dashboard tests still
@@ -249,20 +381,41 @@ Expected result shape:
 - command exits 0,
 - required checks report pass,
 - no long-running server remains,
-- no network or Steam/Dota action occurs.
+- no outbound network or Steam/Dota action occurs.
 
-Implementer must also report exact focused test names covering raw-write failure,
-post-processing failure, recovery, state transitions, and bounded errors.
+Implementer must also report exact focused test names covering:
+
+- full and short writes, verified rollback, rollback failure/store sealing,
+  trailing-fragment recovery, and close failure at shutdown,
+- version 1/version 2 reads, unknown versions, semantic raw preservation, and
+  concurrent sequence order,
+- every projection-group failure plus the overlapping A/B recovery scenario,
+  exact invocation counts/order, HTTP 200 after acceptance, and monotonic
+  per-group-attempt failure counts,
+- waiting/receiving/stale/degraded transitions and bounded errors,
+- invalid, occupied, wildcard, non-loopback, IPv4/`localhost`, and IPv6 listener
+  cases,
+- unwritable data root, missing dashboard, explicit invalid config, discovered
+  config absence, URI mismatch, ordered doctor JSON, exit codes, listener close,
+  and absence of outbound network or Steam/Dota mutation.
+
+All focused tests use injected clocks and side-effect boundaries or controlled
+temporary fixtures. They must not use sleeps, host permission assumptions, real
+Steam paths, credentials, or internet access.
 
 ## Review Focus
 
 - HTTP success/failure semantics match the raw-first invariant.
+- Partial append recovery preserves prior records, and the OS-buffered
+  acceptance guarantee is not misrepresented as power-loss durability.
 - A post-processing error cannot erase evidence or invite accidental duplicate
   raw appends.
 - Degraded-state recovery is based on subsystem success, not merely time or a
   new request.
+- Persisted version 2 identity, concurrent sequence order, and MVP2 replay
+  compatibility match the raw-envelope contract.
 - Status data is race-safe, bounded, and free of raw/secrets/path leakage.
-- Doctor checks are deterministic, local-only, and side-effect limited.
+- Doctor checks are deterministic, loopback-only, and side-effect limited.
 - No sleep-based flaky tests.
 - No regression in existing analytics or offline rebuild behavior.
 - No automation or source-policy violation.
