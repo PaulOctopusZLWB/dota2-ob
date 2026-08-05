@@ -54,7 +54,7 @@ type rawRecord struct {
 }
 
 type diskRawRecord struct {
-	SchemaVersion *int            `json:"schema_version"`
+	SchemaVersion json.RawMessage `json:"schema_version"`
 	SessionID     string          `json:"session_id"`
 	Sequence      uint64          `json:"sequence"`
 	ReceivedAt    time.Time       `json:"received_at"`
@@ -111,9 +111,9 @@ func readRawJSONL(path, expectedSessionID string) ([]rawRecord, error) {
 		if len(disk.Payload) == 0 || len(disk.Raw) == 0 || disk.ReceivedAt.IsZero() {
 			return records, fmt.Errorf("invalid raw record %d", sequence)
 		}
-		if disk.SchemaVersion == nil {
+		if len(disk.SchemaVersion) == 0 {
 			// Version 1 derives identity from its session directory/order.
-		} else if *disk.SchemaVersion != 2 {
+		} else if version, err := explicitSchemaVersion(disk.SchemaVersion); err != nil || version != 2 {
 			return records, fmt.Errorf("unsupported raw schema version at record %d", sequence)
 		} else if disk.Sequence != sequence || disk.SessionID != expectedSessionID || disk.Source != "gsi" {
 			return records, fmt.Errorf("invalid version 2 raw record %d", sequence)
@@ -143,6 +143,17 @@ func decodeRawValue(raw json.RawMessage) (any, error) {
 		return nil, errors.New("trailing data")
 	}
 	return value, nil
+}
+
+func explicitSchemaVersion(raw json.RawMessage) (int, error) {
+	var version int
+	if string(raw) == "null" {
+		return 0, errors.New("null schema version")
+	}
+	if err := json.Unmarshal(raw, &version); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 func isJSONWhitespace(value byte) bool {

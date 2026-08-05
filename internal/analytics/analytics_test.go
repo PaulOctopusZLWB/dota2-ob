@@ -272,6 +272,7 @@ func TestAnalyzeSessionReadsVersion2AndIgnoresUnterminatedTail(t *testing.T) {
 func TestAnalyzeSessionRejectsUnknownVersionAndTerminatedCorruption(t *testing.T) {
 	for _, tc := range []struct{ name, raw string }{
 		{"unknown-version", `{"schema_version":99,"received_at":"2026-08-05T12:00:00Z","payload":{}}` + "\n"},
+		{"null-version", `{"schema_version":null,"received_at":"2026-08-05T12:00:00Z","payload":{},"raw":{}}` + "\n"},
 		{"terminated-corruption", "not-json\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

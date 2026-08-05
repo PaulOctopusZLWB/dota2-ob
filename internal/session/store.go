@@ -229,7 +229,7 @@ func recoverRawFile(path, sessionID string) (uint64, error) {
 
 func validatePersistedRecord(line []byte, sessionID string, sequence uint64) error {
 	var header struct {
-		SchemaVersion *int            `json:"schema_version"`
+		SchemaVersion json.RawMessage `json:"schema_version"`
 		SessionID     string          `json:"session_id"`
 		Sequence      uint64          `json:"sequence"`
 		Source        string          `json:"source"`
@@ -240,13 +240,14 @@ func validatePersistedRecord(line []byte, sessionID string, sequence uint64) err
 	if err := json.Unmarshal(line, &header); err != nil {
 		return err
 	}
-	if header.SchemaVersion == nil {
+	if len(header.SchemaVersion) == 0 {
 		if header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 			return errors.New("invalid v1 record")
 		}
 		return validateSemanticRaw(header.Payload, header.Raw)
 	}
-	if *header.SchemaVersion != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
+	var version int
+	if string(header.SchemaVersion) == "null" || json.Unmarshal(header.SchemaVersion, &version) != nil || version != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 		return errors.New("invalid v2 record")
 	}
 	return validateSemanticRaw(header.Payload, header.Raw)

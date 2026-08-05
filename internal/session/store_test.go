@@ -277,6 +277,21 @@ func TestStoreRecoveryRejectsInvalidVersionTwoRawEnvelope(t *testing.T) {
 	}
 }
 
+func TestStoreRecoveryRejectsExplicitNullSchemaVersion(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "null-version")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := `{"schema_version":null,"received_at":"2026-08-05T12:00:00Z","payload":{},"raw":{}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(record), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.NewStore(root, session.WithSessionID("null-version")); err == nil {
+		t.Fatal("NewStore accepted explicit null schema_version")
+	}
+}
+
 func TestStoreAppendRejectsMalformedJSONWithoutWriting(t *testing.T) {
 	root := t.TempDir()
 
