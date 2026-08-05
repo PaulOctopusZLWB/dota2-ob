@@ -14,6 +14,18 @@ Use a layered source model:
 4. Computer vision only for visible UI facts unavailable from stable data sources.
 5. Unofficial Game Coordinator, packet, or memory methods only after explicit approval.
 
+## Current MVP
+
+MVP3 starts with manual live-capture and operator hardening. Evidence packaging
+is deferred until multiple raw sessions have been measured. Steam Web API
+metadata and replay/demo validation remain optional, isolated adapters behind
+source-specific contracts.
+
+See:
+
+- `docs/specs/2026-08-05-mvp3-manual-capture-and-source-boundaries.md`
+- `docs/specs/2026-08-05-mvp3-block-a-operator-hardening.md`
+
 ## Workspace Flow
 
 Development follows:
