@@ -1,7 +1,7 @@
 package analytics
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,29 +48,47 @@ func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
 
 // rawRecord is the on-disk shape written by the session store.
 type rawRecord struct {
-	ReceivedAt time.Time `json:"received_at"`
-	Payload    any       `json:"payload"`
+	SchemaVersion *int      `json:"schema_version"`
+	SessionID     string    `json:"session_id"`
+	Sequence      uint64    `json:"sequence"`
+	ReceivedAt    time.Time `json:"received_at"`
+	Source        string    `json:"source"`
+	Payload       any       `json:"payload"`
 }
 
 func readRawJSONL(path string) ([]rawRecord, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open raw jsonl: %w", err)
 	}
-	defer f.Close()
-
-	reader := bufio.NewReaderSize(f, 1<<20)
-	dec := json.NewDecoder(reader)
+	committed := data
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		last := bytes.LastIndexByte(data, '\n')
+		if last < 0 {
+			committed = nil
+		} else {
+			committed = data[:last+1]
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(committed))
 	dec.UseNumber()
-
 	var records []rawRecord
 	for {
 		var rec rawRecord
-		if err := dec.Decode(&rec); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return records, fmt.Errorf("decode raw record %d: %w", len(records), err)
+		if err := dec.Decode(&rec); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return records, fmt.Errorf("decode raw record %d", len(records)+1)
+		}
+		sequence := uint64(len(records) + 1)
+		if rec.SchemaVersion == nil {
+			rec.SessionID = filepath.Base(filepath.Dir(path))
+			rec.Sequence = sequence
+			rec.Source = "gsi"
+		} else if *rec.SchemaVersion != 2 {
+			return records, fmt.Errorf("unsupported raw schema version at record %d", sequence)
+		} else if rec.Sequence != sequence || rec.SessionID == "" || rec.Source != "gsi" || rec.ReceivedAt.IsZero() || rec.Payload == nil {
+			return records, fmt.Errorf("invalid version 2 raw record %d", sequence)
 		}
 		records = append(records, rec)
 	}

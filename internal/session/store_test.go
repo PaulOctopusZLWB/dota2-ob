@@ -1,8 +1,10 @@
 package session_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,68 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
+
+type fakeRawFile struct {
+	data        []byte
+	offset      int64
+	writeLimit  int
+	truncateErr error
+	closeErr    error
+	writeCalls  int
+}
+
+func (f *fakeRawFile) Write(p []byte) (int, error) {
+	f.writeCalls++
+	n := len(p)
+	if f.writeLimit > 0 && n > f.writeLimit {
+		n = f.writeLimit
+	}
+	end := int(f.offset) + n
+	if end > len(f.data) {
+		f.data = append(f.data, make([]byte, end-len(f.data))...)
+	}
+	copy(f.data[int(f.offset):end], p[:n])
+	f.offset += int64(n)
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
+func (f *fakeRawFile) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		f.offset = offset
+	case io.SeekCurrent:
+		f.offset += offset
+	case io.SeekEnd:
+		f.offset = int64(len(f.data)) + offset
+	}
+	return f.offset, nil
+}
+
+func (f *fakeRawFile) Truncate(size int64) error {
+	if f.truncateErr != nil {
+		return f.truncateErr
+	}
+	f.data = f.data[:size]
+	if f.offset > size {
+		f.offset = size
+	}
+	return nil
+}
+
+func (f *fakeRawFile) Stat() (os.FileInfo, error) { return fakeFileInfo(int64(len(f.data))), nil }
+func (f *fakeRawFile) Close() error               { return f.closeErr }
+
+type fakeFileInfo int64
+
+func (f fakeFileInfo) Name() string       { return "raw.jsonl" }
+func (f fakeFileInfo) Size() int64        { return int64(f) }
+func (f fakeFileInfo) Mode() os.FileMode  { return 0o644 }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return false }
+func (f fakeFileInfo) Sys() any           { return nil }
 
 func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 	root := t.TempDir()
@@ -45,9 +109,13 @@ func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 	}
 
 	var persisted struct {
-		ReceivedAt time.Time       `json:"received_at"`
-		Payload    map[string]any  `json:"payload"`
-		Raw        json.RawMessage `json:"raw"`
+		SchemaVersion int             `json:"schema_version"`
+		SessionID     string          `json:"session_id"`
+		Sequence      uint64          `json:"sequence"`
+		ReceivedAt    time.Time       `json:"received_at"`
+		Source        string          `json:"source"`
+		Payload       map[string]any  `json:"payload"`
+		Raw           json.RawMessage `json:"raw"`
 	}
 	if err := json.Unmarshal([]byte(lines[0]), &persisted); err != nil {
 		t.Fatalf("JSONL line did not parse as JSON object: %v", err)
@@ -55,6 +123,9 @@ func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 
 	if !persisted.ReceivedAt.Equal(now) {
 		t.Fatalf("persisted timestamp = %s, want %s", persisted.ReceivedAt, now)
+	}
+	if persisted.SchemaVersion != 2 || persisted.SessionID != "test-session" || persisted.Sequence != 1 || persisted.Source != "gsi" {
+		t.Fatalf("persisted capture identity = %#v", persisted)
 	}
 	if persisted.Payload["provider"] == nil {
 		t.Fatalf("persisted payload missing provider: %#v", persisted.Payload)
@@ -66,6 +137,99 @@ func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 	}
 	if raw["map"] == nil {
 		t.Fatalf("raw payload missing map: %#v", raw)
+	}
+}
+
+func TestStoreShortWriteRollsBackAndReusesSequence(t *testing.T) {
+	f := &fakeRawFile{data: []byte("existing\n"), offset: int64(len("existing\n")), writeLimit: 8}
+	store, err := session.NewStore(t.TempDir(),
+		session.WithSessionID("short-write"),
+		session.WithRawFile(func(string) (session.RawFile, error) { return f, nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if _, err := store.Append([]byte(`{"map":{"game_time":1}}`)); !errors.Is(err, session.ErrAppendFailed) {
+		t.Fatalf("Append error = %v, want ErrAppendFailed", err)
+	}
+	if got := string(f.data); got != "existing\n" {
+		t.Fatalf("data after rollback = %q", got)
+	}
+	f.writeLimit = 0
+	rec, err := store.Append([]byte(`{"map":{"game_time":2}}`))
+	if err != nil {
+		t.Fatalf("recovery append: %v", err)
+	}
+	if rec.Sequence != 1 {
+		t.Fatalf("sequence = %d, want 1", rec.Sequence)
+	}
+}
+
+func TestStoreRollbackFailureSealsWithoutFurtherWrites(t *testing.T) {
+	f := &fakeRawFile{writeLimit: 4, truncateErr: errors.New("disk refused rollback")}
+	store, err := session.NewStore(t.TempDir(),
+		session.WithSessionID("sealed"),
+		session.WithRawFile(func(string) (session.RawFile, error) { return f, nil }),
+	)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if _, err := store.Append([]byte(`{"ok":true}`)); !errors.Is(err, session.ErrStoreSealed) {
+		t.Fatalf("first Append error = %v, want ErrStoreSealed", err)
+	}
+	calls := f.writeCalls
+	if _, err := store.Append([]byte(`{"ok":true}`)); !errors.Is(err, session.ErrStoreSealed) {
+		t.Fatalf("second Append error = %v, want ErrStoreSealed", err)
+	}
+	if f.writeCalls != calls {
+		t.Fatalf("sealed store attempted another write")
+	}
+}
+
+func TestStoreRecoveryRemovesOnlyUnterminatedTail(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "recover")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	valid := `{"schema_version":2,"session_id":"recover","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{},"raw":{}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), append([]byte(valid), []byte(`{"partial"`)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := session.NewStore(root, session.WithSessionID("recover"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	data, _ := os.ReadFile(store.RawPath())
+	if !bytes.Equal(data, []byte(valid)) {
+		t.Fatalf("recovered data = %q", data)
+	}
+	rec, err := store.Append([]byte(`{"ok":true}`))
+	if err != nil || rec.Sequence != 2 {
+		t.Fatalf("append after recovery: rec=%#v err=%v", rec, err)
+	}
+}
+
+func TestStoreRecoveryRejectsTerminatedInvalidRecordWithoutMutation(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "corrupt")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("not-json\n")
+	path := filepath.Join(dir, "raw.jsonl")
+	if err := os.WriteFile(path, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.NewStore(root, session.WithSessionID("corrupt")); err == nil {
+		t.Fatal("NewStore succeeded for terminated corruption")
+	}
+	got, _ := os.ReadFile(path)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("corrupt file changed: %q", got)
 	}
 }
 

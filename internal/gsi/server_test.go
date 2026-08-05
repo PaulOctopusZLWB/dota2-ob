@@ -11,13 +11,22 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
 )
+
+type failingProjection struct{}
+
+func (failingProjection) Apply(*session.Record) error {
+	return errors.New("do not expose this path /home/private")
+}
 
 func TestHealthzReturnsOK(t *testing.T) {
 	store, err := session.NewStore(t.TempDir(), session.WithSessionID("health"))
@@ -71,6 +80,54 @@ func TestGSIPostStoresValidJSON(t *testing.T) {
 	}
 	if strings.Count(strings.TrimSpace(string(data)), "\n") != 0 {
 		t.Fatalf("expected one JSONL line, got %q", string(data))
+	}
+}
+
+func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("degraded"), session.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := operator.NewTracker(store.SessionID(), now, 15*time.Second, func() time.Time { return now })
+	processor := capture.NewProcessor(store, tracker, capture.WithLatest(failingProjection{}))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"map":{"game_time":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "ok\n" || resp.Header.Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatalf("accepted response status=%d type=%q body=%q", resp.StatusCode, resp.Header.Get("Content-Type"), body)
+	}
+	statusResp, err := http.Get(server.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusResp.Body.Close()
+	var status operator.Snapshot
+	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || status.ActiveFailures[operator.SubsystemLatest].Code != "latest_failed" {
+		t.Fatalf("status = %#v", status)
+	}
+	encoded, _ := json.Marshal(status)
+	if strings.Contains(string(encoded), "/home/private") {
+		t.Fatalf("status leaked internal error: %s", encoded)
+	}
+}
+
+func TestStatusRejectsUnsupportedMethod(t *testing.T) {
+	store, _ := session.NewStore(t.TempDir(), session.WithSessionID("status-method"))
+	req := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	gsi.NewServer(store).ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d", rec.Code)
 	}
 }
 

@@ -255,6 +255,40 @@ func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSessionReadsVersion2AndIgnoresUnterminatedTail(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":2,"session_id":"v2-session","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{"map":{"game_time":1}},"raw":{"map":{"game_time":1}}}` + "\n" + `{"unterminated"`
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := AnalyzeSession(dir, "v2-session")
+	if err != nil {
+		t.Fatalf("AnalyzeSession: %v", err)
+	}
+	if snap.TickCount != 1 {
+		t.Fatalf("tick count = %d, want 1", snap.TickCount)
+	}
+}
+
+func TestAnalyzeSessionRejectsUnknownVersionAndTerminatedCorruption(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"unknown-version", `{"schema_version":99,"received_at":"2026-08-05T12:00:00Z","payload":{}}` + "\n"},
+		{"terminated-corruption", "not-json\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(tc.raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := AnalyzeSession(dir, "session"); err == nil {
+				t.Fatal("AnalyzeSession succeeded")
+			} else if len(err.Error()) > 240 {
+				t.Fatalf("error is unbounded: %d bytes", len(err.Error()))
+			}
+		})
+	}
+}
+
 // ---- helpers -----------------------------------------------------------------
 
 func miniSnapshot(item string, abilityLevel int, abilityCooldown float64) string {

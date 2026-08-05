@@ -94,6 +94,7 @@ func TestDashboardUsesLocalAPIsOnly(t *testing.T) {
 	html := string(data)
 
 	for _, endpoint := range []string{
+		"/api/status",
 		"/api/latest",
 		"/api/analytics",
 		"/api/events",
@@ -108,6 +109,19 @@ func TestDashboardUsesLocalAPIsOnly(t *testing.T) {
 	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
 		if strings.Contains(html, scheme) {
 			t.Fatalf("dashboard references external resource via %q", scheme)
+		}
+	}
+}
+
+func TestDashboardShowsOperatorStatus(t *testing.T) {
+	data, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	for _, want := range []string{`id="operator-state"`, `id="accepted-count"`, `id="last-accepted-age"`, `id="active-error"`, "waiting", "receiving", "stale", "degraded"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("dashboard missing operator marker %q", want)
 		}
 	}
 }
