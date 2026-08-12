@@ -19,10 +19,12 @@ import (
 )
 
 const (
-	MaxSegmentBytes int64 = 10 << 20
-	lengthBytes           = 4
-	hashBytes             = sha256.Size
-	markerBytes           = 8
+	MaxSegmentBytes    int64 = 10 << 20
+	MaxSessionBytes    int64 = 1 << 30
+	MaxSessionSegments       = 104
+	lengthBytes              = 4
+	hashBytes                = sha256.Size
+	markerBytes              = 8
 )
 
 var (
@@ -32,6 +34,7 @@ var (
 	ErrAppendFailed      = errors.New("policy_commit_append_failed")
 	ErrSealed            = errors.New("policy_log_sealed_hidden")
 	ErrCorrupt           = errors.New("policy_log_corrupt_hidden")
+	ErrCapacity          = errors.New("policy_log_capacity_hidden")
 	ErrInvalidCheckpoint = errors.New("policy_checkpoint_invalid")
 )
 
@@ -56,6 +59,16 @@ func WithSegmentLimit(n int64) Option {
 		}
 	}
 }
+func WithSessionLimits(bytes int64, segments int) Option {
+	return func(s *Store) {
+		if bytes > 0 {
+			s.maxSessionBytes = bytes
+		}
+		if segments > 0 {
+			s.maxSessionSegments = segments
+		}
+	}
+}
 
 type Committed struct {
 	Commit  contracts.PolicyCommitV1
@@ -74,16 +87,20 @@ type State struct {
 }
 
 type Store struct {
-	mu           sync.Mutex
-	dir          string
-	sessionID    string
-	hooks        Hooks
-	segmentLimit int64
-	file         *os.File
-	fileSize     int64
-	state        State
-	sealed       bool
-	closed       bool
+	mu                 sync.Mutex
+	dir                string
+	sessionID          string
+	hooks              Hooks
+	segmentLimit       int64
+	maxSessionBytes    int64
+	maxSessionSegments int
+	file               *os.File
+	fileSize           int64
+	totalBytes         int64
+	segmentCount       int
+	state              State
+	sealed             bool
+	closed             bool
 }
 
 func defaultHooks() Hooks {
@@ -141,7 +158,7 @@ func Open(root, sessionID string, opts ...Option) (*Store, State, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, State{}, fmt.Errorf("protect policy log: %w", err)
 	}
-	s := &Store{dir: dir, sessionID: sessionID, hooks: defaultHooks(), segmentLimit: MaxSegmentBytes}
+	s := &Store{dir: dir, sessionID: sessionID, hooks: defaultHooks(), segmentLimit: MaxSegmentBytes, maxSessionBytes: MaxSessionBytes, maxSessionSegments: MaxSessionSegments}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -185,7 +202,7 @@ func (s *Store) Append(commit contracts.PolicyCommitV1) (Committed, error) {
 	frame, sum := encodeFrame(payload)
 	if err := s.ensureSegment(commit.CommitSequence, int64(len(frame))); err != nil {
 		s.sealed = true
-		return Committed{}, fmt.Errorf("%w: segment: %v", ErrSealed, err)
+		return Committed{}, fmt.Errorf("%w: segment: %w", ErrSealed, err)
 	}
 	prior := s.fileSize
 	if err := s.hooks.Interrupt("before_append"); err != nil {
@@ -205,6 +222,7 @@ func (s *Store) Append(commit contracts.PolicyCommitV1) (Committed, error) {
 		return Committed{}, s.rollback(prior, err)
 	}
 	s.fileSize += int64(len(frame))
+	s.totalBytes += int64(len(frame))
 	var stored contracts.PolicyCommitV1
 	if err := contracts.DecodeStrict(payload, &stored); err != nil {
 		s.sealed = true
@@ -241,8 +259,14 @@ func (s *Store) ensureSegment(sequence uint64, frameSize int64) error {
 	if frameSize > s.segmentLimit {
 		return errors.New("frame exceeds segment bound")
 	}
+	if frameSize > s.maxSessionBytes-s.totalBytes {
+		return capacityError("aggregate_bytes")
+	}
 	if s.file != nil && s.fileSize+frameSize <= s.segmentLimit {
 		return nil
+	}
+	if s.segmentCount >= s.maxSessionSegments {
+		return capacityError("segment_count")
 	}
 	if s.file != nil {
 		if err := s.file.Close(); err != nil {
@@ -290,7 +314,12 @@ func (s *Store) ensureSegment(sequence uint64, frameSize int64) error {
 	}
 	s.file = f
 	s.fileSize = 0
+	s.segmentCount++
 	return nil
+}
+
+func capacityError(reason string) error {
+	return fmt.Errorf("%w: %w: %s", ErrSealed, ErrCapacity, reason)
 }
 
 func (s *Store) Close() error {
@@ -419,6 +448,15 @@ func (s *Store) completeCheckpointIndex(checkpoint contracts.PolicyCheckpointV1)
 			}
 		}
 	}
+	sort.Slice(expected, func(i, j int) bool {
+		if expected[i].PreviousRevision != expected[j].PreviousRevision {
+			return expected[i].PreviousRevision < expected[j].PreviousRevision
+		}
+		if expected[i].ResultingRevision != expected[j].ResultingRevision {
+			return expected[i].ResultingRevision < expected[j].ResultingRevision
+		}
+		return expected[i].CommandID < expected[j].CommandID
+	})
 	if len(expected) != len(checkpoint.CommandResults) {
 		return false
 	}
@@ -513,12 +551,24 @@ func (s *Store) recover() (State, error) {
 		}
 	}
 	sort.Strings(names)
+	if len(names) > s.maxSessionSegments {
+		return State{}, capacityError("recovered_segment_count")
+	}
+	s.segmentCount = len(names)
 	for index, name := range names {
 		path := filepath.Join(s.dir, name)
 		last := index == len(names)-1
 		if err := s.recoverSegment(path, last, &state); err != nil {
 			return State{}, err
 		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return State{}, err
+		}
+		if info.Size() > s.maxSessionBytes-s.totalBytes {
+			return State{}, capacityError("recovered_aggregate_bytes")
+		}
+		s.totalBytes += info.Size()
 	}
 	return state, nil
 }

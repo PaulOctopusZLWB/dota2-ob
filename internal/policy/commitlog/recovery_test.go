@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -251,5 +252,168 @@ func TestAppendRejectsRevisionOrStateDiscontinuity(t *testing.T) {
 	bad.PriorStateHash = strings.Repeat("b", 64)
 	if _, err := store.Append(bad); !errors.Is(err, commitlog.ErrSequence) {
 		t.Fatalf("state discontinuity error=%v", err)
+	}
+}
+
+func TestSessionCapacityExactBoundaryAndFirstOverFailClosed(t *testing.T) {
+	t.Run("aggregate bytes", func(t *testing.T) {
+		root := t.TempDir()
+		seed, _, err := commitlog.Open(root, "session")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = seed.Append(validCommit(1, 0, 1, "command-1")); err != nil {
+			t.Fatal(err)
+		}
+		_ = seed.Close()
+		info, err := os.Stat(onlySegment(t, root))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		store, state, err := commitlog.Open(root, "session", commitlog.WithSessionLimits(info.Size(), commitlog.MaxSessionSegments))
+		if err != nil {
+			t.Fatalf("exact aggregate boundary rejected: %v", err)
+		}
+		if state.CommitSequence != 1 {
+			t.Fatalf("recovered sequence=%d", state.CommitSequence)
+		}
+		if _, err = store.Append(validCommit(2, 1, 2, "command-2")); !errors.Is(err, commitlog.ErrCapacity) || !errors.Is(err, commitlog.ErrSealed) {
+			t.Fatalf("first byte over error=%v", err)
+		}
+		if _, err = store.Append(validCommit(2, 1, 2, "command-2")); !errors.Is(err, commitlog.ErrSealed) {
+			t.Fatalf("sealed retry error=%v", err)
+		}
+	})
+
+	t.Run("segments", func(t *testing.T) {
+		root := t.TempDir()
+		store, _, err := commitlog.Open(root, "session", commitlog.WithSegmentLimit(1200), commitlog.WithSessionLimits(commitlog.MaxSessionBytes, 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = store.Append(validCommit(1, 0, 1, "command-1")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = store.Append(validCommit(2, 1, 2, "command-2")); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close()
+		store, state, err := commitlog.Open(root, "session", commitlog.WithSegmentLimit(1200), commitlog.WithSessionLimits(commitlog.MaxSessionBytes, 2))
+		if err != nil {
+			t.Fatalf("exact segment boundary rejected on restart: %v", err)
+		}
+		if state.CommitSequence != 2 {
+			t.Fatalf("recovered sequence=%d", state.CommitSequence)
+		}
+		if _, err = store.Append(validCommit(3, 2, 3, "command-3")); !errors.Is(err, commitlog.ErrCapacity) || !errors.Is(err, commitlog.ErrSealed) {
+			t.Fatalf("first segment over error=%v", err)
+		}
+		entries, _ := os.ReadDir(filepath.Join(root, "session"))
+		segments := 0
+		for _, entry := range entries {
+			if filepath.Ext(entry.Name()) == ".pcl" {
+				segments++
+			}
+		}
+		if segments != 2 {
+			t.Fatalf("segments=%d, want exact limit 2", segments)
+		}
+	})
+}
+
+func TestProductionSessionLimitsAreNormative(t *testing.T) {
+	if commitlog.MaxSessionBytes != 1<<30 {
+		t.Fatalf("MaxSessionBytes=%d", commitlog.MaxSessionBytes)
+	}
+	if commitlog.MaxSessionSegments != 104 {
+		t.Fatalf("MaxSessionSegments=%d", commitlog.MaxSessionSegments)
+	}
+}
+
+func TestProductionSegmentLimitAccepts104AndRejects105AfterRestart(t *testing.T) {
+	root := t.TempDir()
+	store, _, err := commitlog.Open(root, "session", commitlog.WithSegmentLimit(1200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for sequence := uint64(1); sequence <= commitlog.MaxSessionSegments; sequence++ {
+		if _, err = store.Append(validCommit(sequence, sequence-1, sequence, fmt.Sprintf("command-%03d", sequence))); err != nil {
+			t.Fatalf("append %d: %v", sequence, err)
+		}
+	}
+	_ = store.Close()
+	reopened, state, err := commitlog.Open(root, "session", commitlog.WithSegmentLimit(1200))
+	if err != nil {
+		t.Fatalf("exact 104-segment recovery: %v", err)
+	}
+	if state.CommitSequence != commitlog.MaxSessionSegments {
+		t.Fatalf("recovered sequence=%d", state.CommitSequence)
+	}
+	next := uint64(commitlog.MaxSessionSegments + 1)
+	if _, err = reopened.Append(validCommit(next, next-1, next, "command-105")); !errors.Is(err, commitlog.ErrCapacity) || !errors.Is(err, commitlog.ErrSealed) {
+		t.Fatalf("append 105 error=%v", err)
+	}
+}
+
+func TestRecoveryRejectsAlreadyOverSessionLimits(t *testing.T) {
+	t.Run("aggregate bytes", func(t *testing.T) {
+		root := t.TempDir()
+		store, _, _ := commitlog.Open(root, "session")
+		if _, err := store.Append(validCommit(1, 0, 1, "command-1")); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close()
+		info, _ := os.Stat(onlySegment(t, root))
+		if _, _, err := commitlog.Open(root, "session", commitlog.WithSessionLimits(info.Size()-1, commitlog.MaxSessionSegments)); !errors.Is(err, commitlog.ErrCapacity) || !errors.Is(err, commitlog.ErrSealed) {
+			t.Fatalf("over-byte recovery error=%v", err)
+		}
+	})
+	t.Run("segments", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "session")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= 3; i++ {
+			name := filepath.Join(dir, fmt.Sprintf("%020d.pcl", i))
+			if err := os.WriteFile(name, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, _, err := commitlog.Open(root, "session", commitlog.WithSessionLimits(commitlog.MaxSessionBytes, 2)); !errors.Is(err, commitlog.ErrCapacity) || !errors.Is(err, commitlog.ErrSealed) {
+			t.Fatalf("over-segment recovery error=%v", err)
+		}
+	})
+}
+
+func TestRecoveryCapacityCountsOnlyCommittedBytesAfterTailTruncation(t *testing.T) {
+	root := t.TempDir()
+	store, _, _ := commitlog.Open(root, "session")
+	if _, err := store.Append(validCommit(1, 0, 1, "command-1")); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	path := onlySegment(t, root)
+	clean, _ := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.Write([]byte{0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	reopened, state, err := commitlog.Open(root, "session", commitlog.WithSessionLimits(clean.Size(), commitlog.MaxSessionSegments))
+	if err != nil {
+		t.Fatalf("recover incomplete tail at exact committed bound: %v", err)
+	}
+	defer reopened.Close()
+	if state.CommitSequence != 1 {
+		t.Fatalf("sequence=%d", state.CommitSequence)
+	}
+	info, _ := os.Stat(path)
+	if info.Size() != clean.Size() {
+		t.Fatalf("tail size=%d, want %d", info.Size(), clean.Size())
 	}
 }

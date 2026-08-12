@@ -103,3 +103,60 @@ func TestCheckpointRejectsIncompleteIndexAndRenameFailure(t *testing.T) {
 		t.Fatal("rename failure accepted")
 	}
 }
+
+func rejectedCommit(sequence, revision uint64, commandID string) contracts.PolicyCommitV1 {
+	commit := validCommit(sequence, revision, revision, commandID)
+	if sequence > 1 {
+		commit.PriorStateHash = strings.Repeat("a", 64)
+	}
+	commit.CommandResult.Status = contracts.CommandRejected
+	commit.CommandResult.Reason = "stale_revision"
+	commit.AuditEvents[0].Reason = "stale_revision"
+	return commit
+}
+
+func TestCheckpointCanonicalizesSameRevisionRejectedResultsAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	store, _, err := commitlog.Open(root, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Append(rejectedCommit(1, 0, "z-command")); err != nil {
+		t.Fatal(err)
+	}
+	last, err := store.Append(rejectedCommit(2, 0, "a-command"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := checkpointFor(last)
+	cp.CommandResults = []contracts.OperatorCommandResultV1{
+		*rejectedCommit(2, 0, "a-command").CommandResult,
+		*rejectedCommit(1, 0, "z-command").CommandResult,
+	}
+	if err = cp.ValidateAgainstCommit(last.Commit); err != nil {
+		t.Fatalf("canonical fixture invalid: %v", err)
+	}
+	if err = store.WriteCheckpoint(cp); err != nil {
+		t.Fatalf("canonical checkpoint rejected: %v", err)
+	}
+	_ = store.Close()
+
+	reopened, state, err := commitlog.Open(root, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(state.CommandResults) != 2 {
+		t.Fatalf("recovered command index=%d", len(state.CommandResults))
+	}
+	loaded, later, err := reopened.LoadCheckpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil || len(later) != 0 {
+		t.Fatalf("checkpoint=%#v later=%d", loaded, len(later))
+	}
+	if got := []string{loaded.CommandResults[0].CommandID, loaded.CommandResults[1].CommandID}; got[0] != "a-command" || got[1] != "z-command" {
+		t.Fatalf("canonical order=%v", got)
+	}
+}

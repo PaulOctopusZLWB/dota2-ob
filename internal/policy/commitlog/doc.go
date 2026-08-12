@@ -5,6 +5,8 @@
 //
 // Frames are length-prefixed canonical JSON followed by SHA-256 and a fixed
 // commit marker. Segments are protected with user-only permissions and rotate
-// before exceeding MaxSegmentBytes. Checkpoints are replaceable caches: their
-// loss or mismatch causes replay and never resets policy state.
+// before exceeding MaxSegmentBytes. A session fails closed before exceeding
+// MaxSessionBytes or MaxSessionSegments, including when recovery finds an
+// already-over-limit log. Checkpoints are replaceable caches: their loss or
+// mismatch causes replay and never resets policy state.
 package commitlog
