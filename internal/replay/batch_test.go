@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 )
 
 var errBoom = errors.New("boom")
@@ -378,6 +380,100 @@ func TestBatchCheckpointFailurePropagates(t *testing.T) {
 	if st != nil && st.Entries["m1"].Status == StatusSucceeded {
 		t.Fatalf("must not claim succeeded when checkpoint failed: %+v", st.Entries["m1"])
 	}
+}
+
+func TestBatchCheckpointDirectorySyncUncertaintyReconcilesAndRetryConverges(t *testing.T) {
+	calls := 0
+	r, dir, statePath, _ := newRunner(t, func(string) (*ParseResult, error) {
+		calls++
+		return &ParseResult{Facts: fixedFacts(), Hash: "HASH_A"}, nil
+	})
+	failSync := true
+	r.AtomicOps.SyncDir = func(path string) error {
+		if failSync && path == filepath.Dir(statePath) {
+			failSync = false
+			return errors.New("injected state directory sync")
+		}
+		return nil
+	}
+	dem := filepath.Join(dir, "m1.dem")
+	writeDemFile(t, dem, "dem-bytes")
+	m := &Manifest{Entries: []ManifestEntry{{MatchID: "m1", DemPath: dem}}}
+
+	_, errs := r.Run(m)
+	if len(errs) == 0 || !hasUncertainCommit(errs) {
+		t.Fatalf("checkpoint uncertainty not surfaced: %v", errs)
+	}
+	if _, err := LoadState(statePath); err != nil {
+		t.Fatalf("uncertain canonical state is not complete/valid: %v", err)
+	}
+	st, errs := r.Run(m)
+	if len(errs) != 0 || st.Entries["m1"].Status != StatusSucceeded || calls != 1 {
+		t.Fatalf("retry did not converge: state=%+v calls=%d errs=%v", st, calls, errs)
+	}
+}
+
+func TestFactsAndSidecarDirectorySyncUncertaintyReconcileAndRetry(t *testing.T) {
+	r, _, _, factsDir := newRunner(t, nil)
+	pr := &ParseResult{Facts: fixedFacts(), Hash: "HASH_A"}
+	contentSHA := strings.Repeat("a", 64)
+	failSync := true
+	r.AtomicOps.SyncDir = func(string) error {
+		if failSync {
+			failSync = false
+			return errors.New("injected facts directory sync")
+		}
+		return nil
+	}
+	err := r.persistFactsAndSidecar("m1", contentSHA, pr)
+	var uncertain *atomicfile.CommitOutcomeUncertainError
+	if !errors.As(err, &uncertain) || !uncertain.CanonicalMatchesExpected {
+		t.Fatalf("facts uncertainty not reconciled: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(factsDir, contentSHA+".facts.json")); err != nil {
+		t.Fatalf("complete facts not recoverable: %v", err)
+	}
+	if err := r.persistFactsAndSidecar("m1", contentSHA, pr); err != nil {
+		t.Fatalf("facts/sidecar retry did not converge: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(factsDir, contentSHA+".provenance.json")); err != nil {
+		t.Fatalf("sidecar absent after retry: %v", err)
+	}
+}
+
+func TestSidecarDirectorySyncUncertaintyReconcilesAndRetry(t *testing.T) {
+	r, _, _, factsDir := newRunner(t, nil)
+	pr := &ParseResult{Facts: fixedFacts(), Hash: "HASH_A"}
+	contentSHA := strings.Repeat("b", 64)
+	syncCalls := 0
+	r.AtomicOps.SyncDir = func(string) error {
+		syncCalls++
+		if syncCalls == 2 {
+			return errors.New("injected sidecar directory sync")
+		}
+		return nil
+	}
+	err := r.persistFactsAndSidecar("m1", contentSHA, pr)
+	var uncertain *atomicfile.CommitOutcomeUncertainError
+	if !errors.As(err, &uncertain) || !uncertain.CanonicalMatchesExpected || !strings.Contains(err.Error(), "sidecar") {
+		t.Fatalf("sidecar uncertainty not reconciled: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(factsDir, contentSHA+".provenance.json")); err != nil {
+		t.Fatalf("uncertain sidecar is not complete/readable: %v", err)
+	}
+	if err := r.persistFactsAndSidecar("m1", contentSHA, pr); err != nil {
+		t.Fatalf("sidecar retry did not converge: %v", err)
+	}
+}
+
+func hasUncertainCommit(errs []error) bool {
+	for _, err := range errs {
+		var uncertain *atomicfile.CommitOutcomeUncertainError
+		if errors.As(err, &uncertain) {
+			return true
+		}
+	}
+	return false
 }
 
 // F4 regression: a terminal entry failure in a multi-entry manifest does not

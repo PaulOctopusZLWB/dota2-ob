@@ -96,6 +96,8 @@ type Runner struct {
 	HashFile   HashFile
 	Now        func() time.Time
 	RetryAll   bool
+	// AtomicOps is empty in production and injectable in durability tests.
+	AtomicOps atomicfile.Ops
 }
 
 // DefaultHashFile hashes a file's full content with SHA-256.
@@ -142,7 +144,7 @@ func (r *Runner) SaveState(s *BatchState) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.WriteFile(r.StatePath, b, 0o644); err != nil {
+	if err := atomicfile.WriteFileWithOps(r.StatePath, b, 0o644, r.AtomicOps); err != nil {
 		return fmt.Errorf("replay: persist state: %w", err)
 	}
 	return nil
@@ -364,7 +366,7 @@ func (r *Runner) persistFactsAndSidecar(matchID, contentSHA string, pr *ParseRes
 		return err
 	}
 	factsPath := filepath.Join(r.FactsDir, contentSHA+".facts.json")
-	if err := atomicWrite(factsPath, append(b, '\n')); err != nil {
+	if err := r.atomicWrite(factsPath, append(b, '\n')); err != nil {
 		return fmt.Errorf("facts: %w", err)
 	}
 	side := ProvenanceSidecar{
@@ -383,14 +385,14 @@ func (r *Runner) persistFactsAndSidecar(matchID, contentSHA string, pr *ParseRes
 		return err
 	}
 	sidePath := filepath.Join(r.FactsDir, contentSHA+".provenance.json")
-	if err := atomicWrite(sidePath, append(sb, '\n')); err != nil {
+	if err := r.atomicWrite(sidePath, append(sb, '\n')); err != nil {
 		return fmt.Errorf("sidecar: %w", err)
 	}
 	return nil
 }
 
-// atomicWrite durably replaces path through the shared exclusive-temp,
-// file-sync, rename, and parent-directory-sync protocol.
-func atomicWrite(path string, data []byte) error {
-	return atomicfile.WriteFile(path, data, 0o644)
+// atomicWrite performs validated atomic replacement. A post-rename directory
+// sync failure remains a surfaced uncertain outcome for reconciliation/retry.
+func (r *Runner) atomicWrite(path string, data []byte) error {
+	return atomicfile.WriteFileWithOps(path, data, 0o644, r.AtomicOps)
 }

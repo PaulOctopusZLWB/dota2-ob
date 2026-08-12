@@ -94,11 +94,20 @@ untrusted input and defends it explicitly (reviewed hardening):
 
 - `matchID` is validated as numeric and length-bounded so it cannot carry path
   separators or escape the `data/replays/<matchID>.dem` filename slot.
-- The `replay_url` from OpenDota, every redirect destination, and the final
-  response URL are validated: scheme must be `http`/`https` and the host must
-  match the Valve replay CDN allowlist `replay<digits>.valve.net` exactly.
-  Redirects are capped at five, and a cross-host redirect is rejected before
-  its destination is fetched.
+- HTTPS is preferred when an approved endpoint works. The two measured replay
+  objects are available from plain HTTP while their equivalent HTTPS endpoint
+  fails TLS negotiation, so this spike permits a narrow offline-history-only
+  HTTP exception. The initial URL, every redirect, and final response must use
+  one unchanged scheme and match exactly `replay<digits>.valve.net` plus
+  `/570/<requested-match-id>_<numeric-salt>.dem.bz2`. Embedded credentials,
+  explicit/nonstandard ports, queries, fragments, malformed paths, mismatched
+  match IDs, other hosts, and HTTP/HTTPS cross-policy redirects are rejected.
+  Redirects remain capped at five.
+- HTTP provides no authenticated transport. An on-path party can substitute
+  bytes, and SHA-256 establishes content identity only—not source authenticity
+  and not a replacement for TLS. Acquisition records therefore retain
+  `transport_scheme`, `unauthenticated_transport`, `source_quality`, and an
+  explicit pending `identity_correlation` status.
 - All HTTP calls go through one bounded client (90s timeout) with bounded bodies:
   metadata/patch-catalog ≤ 4 MiB, download ≤ 1 GiB compressed,
   decompression ≤ 4 GiB decompressed. A zstd bomb or oversized response is
@@ -108,7 +117,21 @@ untrusted input and defends it explicitly (reviewed hardening):
   SHA-256, fsync/close, and only then atomically rename over the canonical path
   and fsync its parent directory. Acquisition records use the same protocol.
   Any failure removes the temp file so a short/oversized/rewind body never looks
-  canonical. Partial cleanup runs on every failure path.
+  canonical before rename. File-sync, close, and rename errors preserve the
+  prior canonical path. A directory-sync error occurs after rename and is
+  instead returned as typed `commit outcome uncertain`: the canonical name may
+  contain the complete old or complete intended payload across a crash. Each
+  caller reconciles the current canonical file against exact expected bytes or
+  magic+size+full SHA-256, treats uncertainty as failure, and permits an
+  idempotent retry to converge. No rollback/preservation claim is made for this
+  post-rename path, and truncated/invalid content is never accepted.
+- HTTP-acquired bytes remain untrusted after download. They require bounded
+  zstd decompression, zstd and `PBDEMS2` magic checks, full-content SHA-256,
+  successful parsing, and requested-match/build/time correlation with public
+  source metadata before downstream use. This spike records the correlation as
+  pending; M1 must suppress/quarantine any object that cannot be reconciled.
+  The exception adds no credential, GC/account automation, hidden live state,
+  or broadcast-path network dependency.
 - This is testable without network via `cmd/replay-spike/main_test.go` and
   `internal/atomicfile/atomicfile_test.go` (numeric match ID, redirect
   allowlist/count, validate-before-replace, atomic acquisition record, and
@@ -203,10 +226,12 @@ broadcast).
 machine with explicit `queued / running / succeeded / failed_terminal` states,
 content-addressed dedupe, bounded retries, and a dead-letter (terminal) state.
 State is persisted via atomic write (random exclusive temp file, file fsync,
-rename, parent-directory fsync) after every
+close, rename, parent-directory fsync) after every
 state transition, and any checkpoint failure is propagated (not ignored)
 because resume safety is lost if the on-disk state diverges from in-memory
-state.
+state. A post-rename directory-sync failure is a typed uncertain commit; the
+complete canonical JSON is reconciled but the run still fails. A subsequent
+idempotent run reloads/reconciles state and retries the checkpoint to converge.
 
 Content identity is enforced, not assumed: on resume a succeeded entry is
 re-hashed and the fresh SHA-256 is compared with the stored digest; a changed
@@ -373,6 +398,8 @@ unchanged.
   reconstruction.
 - Named item purchases and per-hero gold/XP attribution require entity
   inventory + player-to-hero mapping, deferred to M1.
-- HTTP replay URLs are plain `http://`; acquisition should verify the content
-  SHA-256 (already done) and, if a chain-of-custody requirement appears, mirror
-  from Steam Web API's `replay_url` rather than OpenDota where available.
+- The measured Valve replay URLs are plain `http://`. Their bytes have an
+  unavoidable on-path substitution/chain-of-custody limitation; full SHA-256
+  is only an identity check. M1 must quarantine metadata/parser identity
+  mismatches, and any future authenticity requirement needs a working approved
+  authenticated source rather than treating these hashes as proof of origin.

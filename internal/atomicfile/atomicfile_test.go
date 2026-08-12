@@ -15,6 +15,11 @@ func TestWriteFilePropagatesDurabilityFailures(t *testing.T) {
 		want string
 	}{
 		{
+			name: "close",
+			ops:  Ops{CloseFile: func(*os.File) error { return errors.New("close-file") }},
+			want: "close-file",
+		},
+		{
 			name: "file sync",
 			ops:  Ops{SyncFile: func(*os.File) error { return errors.New("sync-file") }},
 			want: "sync-file",
@@ -67,5 +72,93 @@ func TestWriteFileUsesRandomExclusiveTempAndCleansIt(t *testing.T) {
 		if strings.Contains(entry.Name(), ".atomic-") {
 			t.Fatalf("temporary file leaked: %s", entry.Name())
 		}
+	}
+}
+
+func TestDirectorySyncFailureIsTypedUncertainAndRetryConverges(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(dest, []byte("old-complete"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("new-complete")
+	err := WriteFileWithOps(dest, want, 0o644, Ops{
+		SyncDir: func(string) error { return errors.New("injected directory sync") },
+	})
+	var uncertain *CommitOutcomeUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("got %T %v, want typed commit outcome uncertainty", err, err)
+	}
+	if !uncertain.CanonicalMatchesExpected {
+		t.Fatalf("canonical reconciliation did not recognize complete intended payload: %+v", uncertain)
+	}
+	got, readErr := os.ReadFile(dest)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "old-complete" && string(got) != string(want) {
+		t.Fatalf("canonical is neither complete old nor complete new payload: %q", got)
+	}
+	if err := WriteFile(dest, want, 0o644); err != nil {
+		t.Fatalf("idempotent retry did not converge: %v", err)
+	}
+	got, _ = os.ReadFile(dest)
+	if string(got) != string(want) {
+		t.Fatalf("retry payload = %q, want %q", got, want)
+	}
+}
+
+func TestFileSyncAndRenameFailuresPreservePriorCanonical(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ops  Ops
+	}{
+		{name: "file sync", ops: Ops{SyncFile: func(*os.File) error { return errors.New("sync") }}},
+		{name: "close", ops: Ops{CloseFile: func(*os.File) error { return errors.New("close") }}},
+		{name: "rename", ops: Ops{Rename: func(string, string) error { return errors.New("rename") }}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := filepath.Join(t.TempDir(), "artifact")
+			if err := os.WriteFile(dest, []byte("prior-good"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := WriteFileWithOps(dest, []byte("replacement"), 0o644, tt.ops); err == nil {
+				t.Fatal("expected injected failure")
+			}
+			got, _ := os.ReadFile(dest)
+			if string(got) != "prior-good" {
+				t.Fatalf("pre-rename failure replaced canonical: %q", got)
+			}
+		})
+	}
+}
+
+func TestDirectorySyncUncertaintyDoesNotAcceptInvalidCanonical(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "artifact")
+	f, err := NewTemp(dest, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("complete-intended")); err != nil {
+		t.Fatal(err)
+	}
+	err = CommitWithOps(f, dest, func(path string) error {
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if string(b) != "complete-intended" {
+			return errors.New("invalid or truncated canonical")
+		}
+		return nil
+	}, Ops{
+		Rename: func(_, target string) error {
+			return os.WriteFile(target, []byte("truncated"), 0o644)
+		},
+		SyncDir: func(string) error { return errors.New("sync-dir") },
+	})
+	var uncertain *CommitOutcomeUncertainError
+	if !errors.As(err, &uncertain) || uncertain.CanonicalMatchesExpected || uncertain.ReconcileError == nil {
+		t.Fatalf("invalid canonical was accepted: %+v err=%v", uncertain, err)
 	}
 }

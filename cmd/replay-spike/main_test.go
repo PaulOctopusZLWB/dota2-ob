@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -44,7 +45,7 @@ func TestValidateReplayURLAcceptlist(t *testing.T) {
 		"https://replay1.valve.net/570/123_456.dem.bz2",
 	}
 	for _, u := range good {
-		if err := validateReplayURL(u); err != nil {
+		if err := validateReplayURL(u, ""); err != nil {
 			t.Errorf("validateReplayURL(%q) unexpected err: %v", u, err)
 		}
 	}
@@ -55,29 +56,30 @@ func TestValidateReplayURLAcceptlist(t *testing.T) {
 		"http://replay.valve.net/x.dem.bz2",                 // missing digits
 		"http://replayabc.valve.net/x.dem.bz2",              // non-numeric suffix
 		"http://evil.com/570/8941092540_1595018738.dem.bz2", // untrusted host
-		"http://replay273.valve.net",                        // ok host, missing path (host test only)
+		"http://replay273.valve.net",                        // missing replay path
 		"http://replay273.evil.net/x.dem.bz2",               // wrong domain
+		"http://user@replay273.valve.net/570/123_456.dem.bz2",
+		"http://replay273.valve.net:80/570/123_456.dem.bz2",
+		"http://replay273.valve.net/570/123_456.dem.bz2?q=x",
+		"http://replay273.valve.net/570/123_456.dem.bz2#x",
+		"http://replay273.valve.net/571/123_456.dem.bz2",
+		"http://replay273.valve.net/570/abc_456.dem.bz2",
+		"http://replay273.valve.net/570/123_salt.dem.bz2",
 	}
 	for _, u := range bad {
-		// "" and the missing-path case are treated as "no replay_url"/ok-host
-		// respectively; assert the host/scheme rejects the clearly bad ones.
-		if u == "" {
-			if err := validateReplayURL(u); err == nil {
-				t.Errorf("validateReplayURL(%q) expected error", u)
-			}
-			continue
-		}
-		err := validateReplayURL(u)
-		if u == "http://replay273.valve.net" {
-			// host is valid; only scheme+host are checked here, path not required
-			if err != nil {
-				t.Errorf("validateReplayURL(%q) unexpected err: %v", u, err)
-			}
-			continue
-		}
-		if err == nil {
+		if err := validateReplayURL(u, ""); err == nil {
 			t.Errorf("validateReplayURL(%q) expected rejection, got nil", u)
 		}
+	}
+}
+
+func TestValidateReplayURLCorrelatesRequestedMatch(t *testing.T) {
+	u := "http://replay273.valve.net/570/8941092540_1595018738.dem.bz2"
+	if err := validateReplayURL(u, "8941092540"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReplayURL(u, "8940891805"); err == nil || !strings.Contains(err.Error(), "requested match") {
+		t.Fatalf("mismatched replay identity accepted: %v", err)
 	}
 }
 
@@ -151,13 +153,13 @@ func TestBoundedDownloadRejectsCrossHostRedirect(t *testing.T) {
 	withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
 		if requests == 1 {
-			return response(http.StatusFound, "https://attacker.example/replay", nil), nil
+			return response(http.StatusFound, "https://attacker.example/570/123_456.dem.bz2", nil), nil
 		}
 		return response(http.StatusOK, "", append(zstdMagic, 1)), nil
 	})})
 
 	dest := filepath.Join(t.TempDir(), "replay.dem.bz2")
-	err := boundedDownload("https://replay1.valve.net/replay", dest, 1024)
+	err := boundedDownload("https://replay1.valve.net/570/123_456.dem.bz2", dest, 1024, "123")
 	if err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Fatalf("cross-host redirect must be rejected by allowlist, got %v", err)
 	}
@@ -170,11 +172,11 @@ func TestBoundedDownloadCapsAllowedRedirects(t *testing.T) {
 	requests := 0
 	withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		requests++
-		return response(http.StatusFound, fmt.Sprintf("https://replay%d.valve.net/replay", requests+1), nil), nil
+		return response(http.StatusFound, fmt.Sprintf("https://replay%d.valve.net/570/123_456.dem.bz2", requests+1), nil), nil
 	})})
 
 	dest := filepath.Join(t.TempDir(), "replay.dem.bz2")
-	err := boundedDownload("https://replay1.valve.net/replay", dest, 1024)
+	err := boundedDownload("https://replay1.valve.net/570/123_456.dem.bz2", dest, 1024, "123")
 	if err == nil || !strings.Contains(err.Error(), "too many redirects") {
 		t.Fatalf("allowed redirect chain must be bounded, got %v", err)
 	}
@@ -196,7 +198,7 @@ func TestBoundedDownloadValidatesBeforeReplacingCanonicalFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := boundedDownload("https://replay1.valve.net/replay", dest, 1024)
+	err := boundedDownload("https://replay1.valve.net/570/123_456.dem.bz2", dest, 1024, "123")
 	if err == nil || !strings.Contains(err.Error(), "magic") {
 		t.Fatalf("invalid payload must fail before replacement, got %v", err)
 	}
@@ -207,6 +209,18 @@ func TestBoundedDownloadValidatesBeforeReplacingCanonicalFile(t *testing.T) {
 	tmp, _ := os.ReadFile(dest + ".tmp")
 	if string(tmp) != "sentinel" {
 		t.Fatalf("predictable temp file was reused: %q", tmp)
+	}
+}
+
+func TestBoundedDownloadRejectsCrossSchemeRedirect(t *testing.T) {
+	requests := 0
+	withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return response(http.StatusFound, "https://replay1.valve.net/570/123_456.dem.bz2", nil), nil
+	})})
+	err := boundedDownload("http://replay1.valve.net/570/123_456.dem.bz2", filepath.Join(t.TempDir(), "x"), 1024, "123")
+	if err == nil || !strings.Contains(err.Error(), "transport policy") || requests != 1 {
+		t.Fatalf("cross-scheme redirect accepted: requests=%d err=%v", requests, err)
 	}
 }
 
@@ -266,6 +280,81 @@ func TestWriteAcquireRecordIsAtomic(t *testing.T) {
 	tmp, _ := os.ReadFile(dest + ".tmp")
 	if string(tmp) != "sentinel" {
 		t.Fatalf("predictable temp file was reused: %q", tmp)
+	}
+}
+
+func TestAcquisitionAtomicCallersSurfaceUncertaintyAndRetryConverges(t *testing.T) {
+	oldOps := acquisitionAtomicOps
+	failNext := true
+	acquisitionAtomicOps.SyncDir = func(string) error {
+		if failNext {
+			failNext = false
+			return errors.New("injected directory sync")
+		}
+		return nil
+	}
+	t.Cleanup(func() { acquisitionAtomicOps = oldOps })
+
+	dir := t.TempDir()
+	compressed := filepath.Join(dir, "123.dem.bz2")
+	withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusOK, "", validZstdDemo(t)), nil
+	})})
+	err := boundedDownload("http://replay1.valve.net/570/123_456.dem.bz2", compressed, 1024, "123")
+	assertUncertainMatch(t, err)
+	if err := boundedDownload("http://replay1.valve.net/570/123_456.dem.bz2", compressed, 1024, "123"); err != nil {
+		t.Fatalf("compressed retry: %v", err)
+	}
+
+	dem := filepath.Join(dir, "123.dem")
+	failNext = true
+	_, _, _, err = zstdDecompressBounded(compressed, dem, 1024)
+	assertUncertainMatch(t, err)
+	if _, _, _, err := zstdDecompressBounded(compressed, dem, 1024); err != nil {
+		t.Fatalf("decompressed retry: %v", err)
+	}
+
+	record := filepath.Join(dir, "123.acquire.json")
+	failNext = true
+	err = writeAcquireRecord(record, acquireRecord{MatchID: "123"})
+	assertUncertainMatch(t, err)
+	if err := writeAcquireRecord(record, acquireRecord{MatchID: "123"}); err != nil {
+		t.Fatalf("record retry: %v", err)
+	}
+}
+
+func assertUncertainMatch(t *testing.T, err error) {
+	t.Helper()
+	var uncertain *atomicfile.CommitOutcomeUncertainError
+	if !errors.As(err, &uncertain) || !uncertain.CanonicalMatchesExpected {
+		t.Fatalf("got %v, want reconciled uncertain commit", err)
+	}
+}
+
+func validZstdDemo(t *testing.T) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	zw, err := zstd.NewWriter(&encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zw.Write(append(append([]byte{}, pbDEMS2Magic...), []byte("payload")...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
+func TestAcquireRecordTransportProvenance(t *testing.T) {
+	httpRecord := newAcquireRecord("123", matchMeta{ReplayURL: "http://replay1.valve.net/570/123_456.dem.bz2"})
+	if httpRecord.TransportScheme != "http" || !httpRecord.UnauthenticatedTransport || httpRecord.SourceQuality != "untrusted_pending_identity_correlation" {
+		t.Fatalf("HTTP provenance not explicit: %+v", httpRecord)
+	}
+	httpsRecord := newAcquireRecord("123", matchMeta{ReplayURL: "https://replay1.valve.net/570/123_456.dem.bz2"})
+	if httpsRecord.TransportScheme != "https" || httpsRecord.UnauthenticatedTransport {
+		t.Fatalf("HTTPS provenance incorrect: %+v", httpsRecord)
 	}
 }
 

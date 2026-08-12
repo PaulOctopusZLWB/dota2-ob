@@ -52,6 +52,8 @@ var (
 	pbDEMS2Magic = []byte{'P', 'B', 'D', 'E', 'M', 'S', '2', 0x00}
 	// httpClient is the single bounded client used for all acquisition calls.
 	httpClient = &http.Client{Timeout: 90 * time.Second}
+	// acquisitionAtomicOps is empty in production and injectable in tests.
+	acquisitionAtomicOps atomicfile.Ops
 )
 
 func main() {
@@ -153,21 +155,25 @@ type acquireRecord struct {
 	// PatchID is OpenDota's gameplay `patch` catalog id; PatchName is its
 	// human-readable Dota version (e.g. id 60 -> "7.41"). These are the
 	// authoritative gameplay-patch fields.
-	PatchID            int64     `json:"patch_id"`
-	PatchName          string    `json:"patch_name"`
-	League             string    `json:"league"`
-	LeagueTier         string    `json:"league_tier"`
-	RadiantTeam        string    `json:"radiant_team"`
-	DireTeam           string    `json:"dire_team"`
-	DurationSec        int64     `json:"duration_sec"`
-	PlayerCount        int       `json:"player_count"`
-	CompressedBytes    int64     `json:"compressed_bytes"`
-	DecompressedBytes  int64     `json:"decompressed_bytes"`
-	CompressedSHA256   string    `json:"compressed_sha256"`
-	DecompressedSHA256 string    `json:"decompressed_sha256"`
-	CompressionActual  string    `json:"compression_actual"`
-	DownloadedAt       time.Time `json:"downloaded_at"`
-	DecompressedAt     time.Time `json:"decompressed_at"`
+	PatchID                  int64     `json:"patch_id"`
+	PatchName                string    `json:"patch_name"`
+	League                   string    `json:"league"`
+	LeagueTier               string    `json:"league_tier"`
+	RadiantTeam              string    `json:"radiant_team"`
+	DireTeam                 string    `json:"dire_team"`
+	DurationSec              int64     `json:"duration_sec"`
+	PlayerCount              int       `json:"player_count"`
+	CompressedBytes          int64     `json:"compressed_bytes"`
+	DecompressedBytes        int64     `json:"decompressed_bytes"`
+	CompressedSHA256         string    `json:"compressed_sha256"`
+	DecompressedSHA256       string    `json:"decompressed_sha256"`
+	CompressionActual        string    `json:"compression_actual"`
+	DownloadedAt             time.Time `json:"downloaded_at"`
+	DecompressedAt           time.Time `json:"decompressed_at"`
+	TransportScheme          string    `json:"transport_scheme"`
+	UnauthenticatedTransport bool      `json:"unauthenticated_transport"`
+	SourceQuality            string    `json:"source_quality"`
+	IdentityCorrelation      string    `json:"identity_correlation"`
 }
 
 func cmdAcquire(args []string) {
@@ -194,14 +200,14 @@ func cmdAcquire(args []string) {
 	if err != nil {
 		fail("opendota metadata: %v", err)
 	}
-	if err := validateReplayURL(meta.ReplayURL); err != nil {
+	if err := validateReplayURL(meta.ReplayURL, matchID); err != nil {
 		fail("replay_url: %v", err)
 	}
 
 	bz2Path := filepath.Join(replaysDir, matchID+".dem.bz2")
 	demPath := filepath.Join(replaysDir, matchID+".dem")
 	dlAt := time.Now().UTC()
-	if err := boundedDownload(meta.ReplayURL, bz2Path, maxCompressedBytes); err != nil {
+	if err := boundedDownload(meta.ReplayURL, bz2Path, maxCompressedBytes, matchID); err != nil {
 		fail("download: %v", err)
 	}
 	if err := validateMagic(bz2Path, zstdMagic); err != nil {
@@ -221,18 +227,16 @@ func cmdAcquire(args []string) {
 		fail("decompressed magic: %v", err)
 	}
 
-	rec := acquireRecord{
-		MatchID: matchID, Source: "opendota-metadata+valve-public-cdn",
-		ReplayURL: meta.ReplayURL, Cluster: meta.Cluster,
-		ReplayFormatVersion: meta.ReplayFormatVersion,
-		PatchID:             meta.PatchID, PatchName: meta.PatchName,
-		League: meta.LeagueName, LeagueTier: meta.LeagueTier,
-		RadiantTeam: meta.RadiantName, DireTeam: meta.DireName,
-		DurationSec: meta.Duration, PlayerCount: meta.PlayerCount,
-		CompressedBytes: cBytes, DecompressedBytes: dBytes,
-		CompressedSHA256: cSHA, DecompressedSHA256: dSHA,
-		CompressionActual: compression, DownloadedAt: dlAt, DecompressedAt: decompAt,
-	}
+	rec := newAcquireRecord(matchID, meta)
+	rec.Cluster = meta.Cluster
+	rec.ReplayFormatVersion = meta.ReplayFormatVersion
+	rec.PatchID, rec.PatchName = meta.PatchID, meta.PatchName
+	rec.League, rec.LeagueTier = meta.LeagueName, meta.LeagueTier
+	rec.RadiantTeam, rec.DireTeam = meta.RadiantName, meta.DireName
+	rec.DurationSec, rec.PlayerCount = meta.Duration, meta.PlayerCount
+	rec.CompressedBytes, rec.DecompressedBytes = cBytes, dBytes
+	rec.CompressedSHA256, rec.DecompressedSHA256 = cSHA, dSHA
+	rec.CompressionActual, rec.DownloadedAt, rec.DecompressedAt = compression, dlAt, decompAt
 	recPath := filepath.Join(factsDir, matchID+".acquire.json")
 	if err := writeAcquireRecord(recPath, rec); err != nil {
 		fail("write acquire record: %v", err)
@@ -246,6 +250,20 @@ func cmdAcquire(args []string) {
 	fmt.Printf("  decompressed=%d bytes sha256=%s compression=%s\n", dBytes, dSHA[:16], compression)
 	fmt.Printf("  dem=%s\n", demPath)
 	fmt.Printf("  record=%s\n", recPath)
+	if rec.UnauthenticatedTransport {
+		fmt.Printf("  warning=unauthenticated offline transport; source remains untrusted pending parser/metadata identity correlation\n")
+	}
+}
+
+func newAcquireRecord(matchID string, meta matchMeta) acquireRecord {
+	u, _ := url.Parse(meta.ReplayURL)
+	scheme := u.Scheme
+	return acquireRecord{
+		MatchID: matchID, Source: "opendota-metadata+valve-public-cdn", ReplayURL: meta.ReplayURL,
+		TransportScheme: scheme, UnauthenticatedTransport: scheme == "http",
+		SourceQuality:       "untrusted_pending_identity_correlation",
+		IdentityCorrelation: "pending_m1_parser_match_build_time_reconciliation",
+	}
 }
 
 func cmdBatch(args []string) {
@@ -386,18 +404,23 @@ func fetchPatchName(patchID int64) (string, error) {
 // boundedDownload streams a validated Valve replay URL to a randomized,
 // exclusive adjacent temp file with a hard size limit. Every redirect and the
 // final URL are allowlisted. The temp is hashed, magic-validated, fsynced, and
-// closed before atomic rename; the parent directory is then fsynced.
-func boundedDownload(rawURL, dest string, maxBytes int64) error {
-	if err := validateReplayURL(rawURL); err != nil {
+// closed before atomic rename; the parent directory is then fsynced. A failed
+// directory sync is surfaced as an uncertain commit after identity reconciliation.
+func boundedDownload(rawURL, dest string, maxBytes int64, expectedMatchID string) error {
+	if err := validateReplayURL(rawURL, expectedMatchID); err != nil {
 		return err
 	}
+	initial, _ := url.Parse(rawURL)
 	client := *httpClient
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxReplayRedirects {
 			return fmt.Errorf("too many redirects (max %d)", maxReplayRedirects)
 		}
-		if err := validateReplayURL(req.URL.String()); err != nil {
+		if err := validateReplayURL(req.URL.String(), expectedMatchID); err != nil {
 			return fmt.Errorf("redirect URL: %w", err)
+		}
+		if req.URL.Scheme != initial.Scheme {
+			return fmt.Errorf("redirect crosses transport policy from %s to %s", initial.Scheme, req.URL.Scheme)
 		}
 		return nil
 	}
@@ -410,8 +433,12 @@ func boundedDownload(rawURL, dest string, maxBytes int64) error {
 	if resp.Request != nil && resp.Request.URL != nil {
 		finalURL = resp.Request.URL.String()
 	}
-	if err := validateReplayURL(finalURL); err != nil {
+	if err := validateReplayURL(finalURL, expectedMatchID); err != nil {
 		return fmt.Errorf("final response URL: %w", err)
+	}
+	finalParsed, _ := url.Parse(finalURL)
+	if finalParsed.Scheme != initial.Scheme {
+		return fmt.Errorf("final response crosses transport policy from %s to %s", initial.Scheme, finalParsed.Scheme)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("valve cdn status %d", resp.StatusCode)
@@ -436,10 +463,10 @@ func boundedDownload(rawURL, dest string, maxBytes int64) error {
 	if n > maxBytes {
 		return fmt.Errorf("download exceeds %d bytes (got %d)", maxBytes, n)
 	}
-	_ = h.Sum(nil) // force the full-stream digest before canonical replacement
-	if err := atomicfile.Commit(f, dest, func(path string) error {
-		return validateMagic(path, zstdMagic)
-	}); err != nil {
+	digest := hex.EncodeToString(h.Sum(nil))
+	if err := atomicfile.CommitWithOps(f, dest, func(path string) error {
+		return validateFileIdentity(path, zstdMagic, n, digest)
+	}, acquisitionAtomicOps); err != nil {
 		return err
 	}
 	committed = true
@@ -448,7 +475,8 @@ func boundedDownload(rawURL, dest string, maxBytes int64) error {
 
 // zstdDecompressBounded streams src (zstd) to a randomized adjacent temp with a
 // hard decompressed-size limit. It hashes and PBDEMS2-validates the temp before
-// durable atomic replacement. A zstd bomb is rejected at maxBytes.
+// atomic replacement plus directory sync. A zstd bomb is rejected at maxBytes;
+// post-rename sync uncertainty is reconciled by full identity and surfaced.
 func zstdDecompressBounded(src, dst string, maxBytes int64) (int64, string, string, error) {
 	in, err := os.Open(src)
 	if err != nil {
@@ -481,9 +509,9 @@ func zstdDecompressBounded(src, dst string, maxBytes int64) (int64, string, stri
 		return 0, "", "", fmt.Errorf("decompressed exceeds %d bytes (got %d)", maxBytes, n)
 	}
 	dSHA := hex.EncodeToString(h.Sum(nil))
-	if err := atomicfile.Commit(out, dst, func(path string) error {
-		return validateMagic(path, pbDEMS2Magic)
-	}); err != nil {
+	if err := atomicfile.CommitWithOps(out, dst, func(path string) error {
+		return validateFileIdentity(path, pbDEMS2Magic, n, dSHA)
+	}, acquisitionAtomicOps); err != nil {
 		return 0, "", "", err
 	}
 	committed = true
@@ -495,7 +523,21 @@ func writeAcquireRecord(path string, rec acquireRecord) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(path, append(b, '\n'), 0o644)
+	return atomicfile.WriteFileWithOps(path, append(b, '\n'), 0o644, acquisitionAtomicOps)
+}
+
+func validateFileIdentity(path string, magic []byte, expectedSize int64, expectedSHA string) error {
+	if err := validateMagic(path, magic); err != nil {
+		return err
+	}
+	size, digest, err := hashAndSize(path)
+	if err != nil {
+		return err
+	}
+	if size != expectedSize || digest != expectedSHA {
+		return fmt.Errorf("identity mismatch: size=%d sha256=%s, want size=%d sha256=%s", size, digest, expectedSize, expectedSHA)
+	}
+	return nil
 }
 
 func hashAndSize(path string) (int64, string, error) {
@@ -526,10 +568,10 @@ func validateMatchID(id string) error {
 	return nil
 }
 
-// validateReplayURL ensures the scheme is http/https and the host is a Valve
-// replay CDN host, rejecting redirects to untrusted hosts from the metadata
-// source before any network fetch.
-func validateReplayURL(rawURL string) error {
+// validateReplayURL enforces the approved offline replay transport boundary:
+// HTTP or HTTPS, exact Valve replay host/path shape, no credentials/ports/query/
+// fragment, and optional correlation to the requested match ID.
+func validateReplayURL(rawURL, expectedMatchID string) error {
 	if rawURL == "" {
 		return fmt.Errorf("no replay_url (OpenDota may have purged the match)")
 	}
@@ -540,11 +582,40 @@ func validateReplayURL(rawURL string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("scheme %q not allowed", u.Scheme)
 	}
+	if u.User != nil {
+		return fmt.Errorf("embedded credentials not allowed")
+	}
+	if u.Port() != "" {
+		return fmt.Errorf("nonstandard or explicit port not allowed")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("query and fragment not allowed")
+	}
 	host := u.Hostname()
 	if !looksLikeValveReplayHost(host) {
 		return fmt.Errorf("host %q not in Valve replay CDN allowlist", host)
 	}
+	matchID, err := replayPathMatchID(u.EscapedPath())
+	if err != nil {
+		return err
+	}
+	if expectedMatchID != "" && matchID != expectedMatchID {
+		return fmt.Errorf("replay path match %q does not equal requested match %q", matchID, expectedMatchID)
+	}
 	return nil
+}
+
+func replayPathMatchID(path string) (string, error) {
+	const prefix, suffix = "/570/", ".dem.bz2"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", fmt.Errorf("path %q is not approved Valve replay shape /570/<match>_<salt>.dem.bz2", path)
+	}
+	stem := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	parts := strings.Split(stem, "_")
+	if len(parts) != 2 || validateMatchID(parts[0]) != nil || validateMatchID(parts[1]) != nil {
+		return "", fmt.Errorf("path %q has nonnumeric or malformed match/salt", path)
+	}
+	return parts[0], nil
 }
 
 // looksLikeValveReplayHost matches replay<digits>.valve.net exactly.

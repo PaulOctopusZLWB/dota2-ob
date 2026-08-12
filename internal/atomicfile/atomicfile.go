@@ -1,20 +1,42 @@
-// Package atomicfile persists local artifacts with process- and crash-safe
-// replacement semantics: write an exclusive adjacent temporary file, sync and
-// close it, optionally validate it, rename it, then sync the parent directory.
+// Package atomicfile performs validated atomic namespace replacement. A
+// post-rename directory-sync failure is explicitly uncertain rather than
+// claimed crash-durable; callers must reconcile and retry.
 package atomicfile
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
+// CommitOutcomeUncertainError means rename succeeded but syncing the parent
+// directory failed. The canonical name may resolve to the complete old or
+// complete intended payload after a crash. Callers must treat this as failure,
+// inspect the reconciliation fields, and retry idempotently.
+type CommitOutcomeUncertainError struct {
+	Path                     string
+	Cause                    error
+	CanonicalMatchesExpected bool
+	ReconcileError           error
+}
+
+func (e *CommitOutcomeUncertainError) Error() string {
+	if e.ReconcileError != nil {
+		return fmt.Sprintf("commit outcome uncertain for %s: %v; canonical reconciliation failed: %v", e.Path, e.Cause, e.ReconcileError)
+	}
+	return fmt.Sprintf("commit outcome uncertain for %s: %v; canonical_matches_expected=%t", e.Path, e.Cause, e.CanonicalMatchesExpected)
+}
+
+func (e *CommitOutcomeUncertainError) Unwrap() error { return e.Cause }
+
 // Ops exposes durability operations for focused failure-path tests. Nil
 // functions use the operating-system implementation.
 type Ops struct {
-	SyncFile func(*os.File) error
-	Rename   func(string, string) error
-	SyncDir  func(string) error
+	SyncFile  func(*os.File) error
+	CloseFile func(*os.File) error
+	Rename    func(string, string) error
+	SyncDir   func(string) error
 }
 
 func (o Ops) withDefaults() Ops {
@@ -23,6 +45,9 @@ func (o Ops) withDefaults() Ops {
 	}
 	if o.Rename == nil {
 		o.Rename = os.Rename
+	}
+	if o.CloseFile == nil {
+		o.CloseFile = func(f *os.File) error { return f.Close() }
 	}
 	if o.SyncDir == nil {
 		o.SyncDir = syncDir
@@ -71,7 +96,8 @@ func CommitWithOps(temp *os.File, dest string, validate func(string) error, ops 
 		_ = temp.Close()
 		return fmt.Errorf("sync temporary file: %w", err)
 	}
-	if err := temp.Close(); err != nil {
+	if err := ops.CloseFile(temp); err != nil {
+		_ = temp.Close()
 		return fmt.Errorf("close temporary file: %w", err)
 	}
 	if validate != nil {
@@ -84,12 +110,21 @@ func CommitWithOps(temp *os.File, dest string, validate func(string) error, ops 
 	}
 	renamed = true
 	if err := ops.SyncDir(filepath.Dir(dest)); err != nil {
-		return fmt.Errorf("sync parent directory: %w", err)
+		uncertain := &CommitOutcomeUncertainError{Path: dest, Cause: err}
+		if validate == nil {
+			uncertain.ReconcileError = fmt.Errorf("no expected-content validator")
+		} else if reconcileErr := validate(dest); reconcileErr != nil {
+			uncertain.ReconcileError = reconcileErr
+		} else {
+			uncertain.CanonicalMatchesExpected = true
+		}
+		return uncertain
 	}
 	return nil
 }
 
-// WriteFile atomically and durably replaces path with data.
+// WriteFile atomically replaces path and attempts to make the namespace update
+// durable. A post-rename sync failure returns CommitOutcomeUncertainError.
 func WriteFile(path string, data []byte, perm os.FileMode) error {
 	return WriteFileWithOps(path, data, perm, Ops{})
 }
@@ -113,7 +148,16 @@ func WriteFileWithOps(path string, data []byte, perm os.FileMode, ops Ops) error
 		_ = os.Remove(name)
 		return fmt.Errorf("short temporary write: wrote %d of %d bytes", n, len(data))
 	}
-	return CommitWithOps(f, path, nil, ops)
+	return CommitWithOps(f, path, func(canonical string) error {
+		got, err := os.ReadFile(canonical)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(got, data) {
+			return fmt.Errorf("content mismatch: got %d bytes, want %d", len(got), len(data))
+		}
+		return nil
+	}, ops)
 }
 
 func syncDir(path string) error {
