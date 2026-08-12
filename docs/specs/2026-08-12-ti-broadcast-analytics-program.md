@@ -159,8 +159,8 @@ planes and frontends. It is not a microservice topology:
 
 | Area | Owner | Allowed dependencies | Forbidden dependencies |
 | --- | --- | --- | --- |
-| raw GSI capture and durable session log | capture | localhost HTTP, session storage | replay, history, policy, i18n, OBS |
-| bounded live projection | capture | durable accepted records, domain contracts | replay acquisition, UI bundles |
+| raw GSI capture and committed session log | capture | localhost HTTP, session storage | replay, history, policy, i18n, OBS |
+| bounded live projection | capture | committed accepted records, domain contracts | replay acquisition, UI bundles |
 | offline replay/history | M1 data pipeline | public metadata, downloaded demos, local storage | live policy, presentation |
 | pure insight and policy core | M2 backend | five accepted contracts, explicit config/time/state | HTTP, filesystem, database, replay parser, i18n, OBS |
 | typed loopback delivery gateway | M3 backend edge | policy command/result ports, committed overlay state | raw GSI/replay/history queries from overlay routes |
@@ -186,19 +186,35 @@ rules.
 
 ### Raw acceptance and asynchronous handoff
 
-Raw acceptance ends after one `session.Record` has been validated and durably
-appended with its session-local sequence. The GSI response does not wait for
-normalization, analytics, insight, audit, localization, delivery, or rendering.
-This is an explicit migration from the currently accepted synchronous
-projection path; compatibility tests must prove that existing APIs and offline
-rebuild still produce the same accepted values.
+Raw acceptance retains the accepted Block A failure model. A record is
+**committed** when one complete newline-terminated `session.Record` write has
+returned successfully from the operating system with its session-local
+sequence. A short/partial write is rolled back to the preceding newline or the
+session is sealed. The GSI response does not wait for normalization, analytics,
+insight, audit, localization, delivery, or rendering. This is an explicit
+migration from the currently accepted synchronous projection path;
+compatibility tests must prove that existing APIs and offline rebuild still
+produce the same accepted values.
 
-The live projector follows the durable session log by `(session_id, sequence)`:
+`committed` deliberately does not mean host/power-crash durable. Raw append does
+not call `fsync`/`fdatasync` per record and claims only the existing
+OS-buffered complete-write boundary in
+`2026-08-05-mvp3-manual-capture-and-source-boundaries.md`: ordinary process
+restart on a still-running host recovers complete newline records and removes
+only an unterminated tail, but kernel crash, storage failure, or sudden power
+loss may lose recently acknowledged records. A stronger raw sync profile would
+require a separately reviewed contract and P5 latency evidence; DOT-31 must not
+introduce it implicitly.
 
-- a capacity-one in-memory notification carries only the newest durable
-  high-water mark; notifications may coalesce, but accepted records never do;
-- one projector reads every missing sequence in order and commits a durable
-  cursor only after all projections for that sequence succeed;
+The live projector follows the committed session log by
+`(session_id, sequence)`:
+
+- a capacity-one in-memory notification carries only the newest committed
+  high-water mark; it is published after raw append returns and is not persisted.
+  Notifications may coalesce or disappear on restart, but accepted records
+  never do;
+- one projector reads every missing sequence in order and advances a cursor
+  cache only after all projections for that sequence succeed;
 - saturation is represented as sequence lag and age. It never drops or rewrites
   raw records and never extends the raw HTTP acknowledgement path;
 - on restart, a valid cursor resumes at `cursor + 1`; a missing/corrupt cursor
@@ -209,14 +225,23 @@ The live projector follows the durable session log by `(session_id, sequence)`:
 - health exposes high-water sequence, projected sequence, lag count, oldest lag
   age, last error, and degraded state;
 - shutdown stops intake, finishes any in-flight raw append, closes the listener,
-  and persists the projector cursor after a bounded drain. An unfinished
+  and writes the projector cursor cache after a bounded drain. An unfinished
   projection is replayed after restart; a downstream drain cannot corrupt or
   delay an already accepted raw record.
+
+The cursor/checkpoint cache uses an exclusive complete same-directory temporary
+write plus atomic rename so an ordinary process interruption yields an old, new,
+missing, or rejected cache—not a trusted partial value. It is not synced and
+makes no host/power-crash claim; the session log is always authoritative, and a
+stale or lost cursor only causes deterministic duplicate work. Files whose
+specification requires power-crash durability, such as committed
+broadcast-policy records, use the stronger synchronized protocol defined
+separately below.
 
 Overlay freshness is computed independently from projection health. If lag,
 disconnect, or invalid state crosses its threshold, the delivery plane emits a
 hide state even while the projector later catches up. No internal event bus or
-universal envelope is introduced; the durable source log and one coalesced
+universal envelope is introduced; the committed source log and one coalesced
 wakeup are the complete handoff.
 
 For this program, inconsistent live input means one of: match/session identity
@@ -230,8 +255,8 @@ health/suppression code and fails live claims closed.
 
 The program freezes five cross-track data contracts. They are not
 interchangeable source payloads. Supporting tournament/snapshot manifests,
-operator-command, command-result, and audit-event records below are narrow
-versioned ports, not additional source models or a universal envelope.
+operator-command/result, policy-commit, and audit-event records below are
+narrow versioned ports, not additional source models or a universal envelope.
 
 ### 1. Live observation
 
@@ -241,8 +266,10 @@ produced only from one accepted GSI `session.Record`. It carries:
 - `EvidenceRefV1`: record schema version, session ID, monotonic sequence,
   receive time, provider/source version, and raw-payload SHA-256;
 - match/session identity and the observed game-clock basis;
-- every currently accepted `NormalizedTick` field, with source presence
-  preserved separately from its value;
+- every currently accepted non-private analytical `NormalizedTick` field, with
+  source presence preserved separately from its value and participant identity
+  represented by session-local slot plus verified tournament identity when
+  available;
 - source-quality/confidence flags and deterministic mapping version.
 
 Provider-supplied numeric zero is a real value only when its presence bit is
@@ -253,11 +280,58 @@ value.
 `LiveObservationV1` becomes the canonical cross-track observation. The existing
 `NormalizedTick` remains a temporary compatibility view produced from it for
 the accepted APIs and rebuild outputs; it is not a second persisted contract.
-The mapping path is `session.Record + raw payload -> LiveObservationV1 ->
-NormalizedTick compatibility view`. Golden tests must prove field/presence
-equivalence with current live processing and offline rebuild, and the evidence
-reference must resolve back to the immutable raw record. Existing raw and
-analytics API shapes do not change during M0.
+The canonical mapping is `session.Record + raw payload -> LiveObservationV1`.
+A capture-owned legacy adapter alone may combine that observation with its
+evidence-reference-resolved raw record to reproduce the existing
+`NormalizedTick`, including source-private account/Steam fields, for accepted
+diagnostic APIs and rebuild artifacts. No M1/M2/M3 package may import that
+adapter or receive its output. Golden tests must prove non-private
+field/presence equivalence, byte-compatible legacy output, evidence resolution,
+and absence of private fields from `LiveObservationV1` and all new routes.
+Existing raw and analytics API shapes do not change during M0.
+
+#### Legacy localhost API migration
+
+The accepted capture listener has an explicit compatibility/privacy inventory:
+
+- `POST /gsi` is the localhost capture input and returns no captured identity;
+- `GET /healthz` and `GET /api/status` expose only health/counters;
+- `GET /api/latest` is a source-faithful diagnostic and can expose raw player
+  names, account IDs, Steam IDs, and provider fields;
+- `GET /api/profile` can expose sampled scalar values, including source-private
+  identifiers;
+- `GET /api/analytics` and `GET /api/events` can expose observed player handles
+  and evidence-derived values;
+- `GET /` is the legacy diagnostic dashboard that consumes those `/api/*`
+  endpoints.
+
+The accepted offline `normalized_ticks.jsonl` rebuild artifact can likewise
+contain account/Steam IDs, and analytics summaries can contain observed player
+handles. They remain capture-owned legacy diagnostics under the local session
+root; they are not historical baselines or broadcast inputs.
+
+M0 preserves the response shapes and accepted tests for these endpoints. They
+are classified as deprecated, protected local diagnostics—not operator,
+overlay, or broadcast contracts. The new delivery gateway runs on a separate
+loopback listener, never proxies or imports a capture diagnostic handler, and
+serves only authenticated `/v1/operator/*` routes plus read-only
+`/v1/overlay/state` as `OverlayStateV1`. Neither `web/operator` nor
+`web/overlay` may request the legacy listener; dependency, route, CSP, and
+hostile-page tests enforce that separation.
+
+By M3, the production profile disables `GET /`, `/api/latest`, `/api/profile`,
+`/api/analytics`, and `/api/events` by default while leaving `/gsi`, `/healthz`,
+and `/api/status` available on the capture listener. Explicit diagnostic mode
+may re-enable the legacy GET shapes unchanged, but requires the ephemeral
+operator bearer token, same-origin checks, no CORS, and the separately chosen
+capture port. This is the compatibility consequence: authorized diagnostic
+clients keep their JSON shape, while unauthenticated production access receives
+`404`/`401`. Redacting, versioning, or deleting those shapes after M6 requires
+its own migration; DOT-31 does not choose one.
+
+New production session roots use user-only directory/file permissions
+(`0700`/`0600`). Existing acceptance artifacts are not silently rewritten;
+their permission audit and any in-place migration are explicit runbook steps.
 
 ### 2. Historical baseline
 
@@ -343,15 +417,47 @@ reason. The M3 console is only a client of this port. It never edits policy
 state directly.
 
 `AuditEventV1` is emitted for candidate creation/suppression, every autonomous
-transition, and every accepted or rejected command. The pure policy core
-returns the decision and audit event as values; an application adapter durably
-commits them before a show/pin result is published. Audit failure hides output
-and fails the command closed but never blocks raw capture. Events are canonical,
-individually bounded to 16 KiB, segmented at 10 MiB, sequence-ordered, and
-retained through release acceptance plus 180 days. Rotation bounds storage
-without rewriting prior events.
+transition, and every accepted or rejected command. An event is individually
+bounded to 16 KiB and is never persisted independently of its causal policy
+result.
 
-The M2 policy area owns all three supporting schemas and transition semantics.
+`PolicyCommitV1` is the narrow recoverable unit for the policy plane. It is not
+a source envelope or event bus. One canonical record, bounded to 256 KiB,
+contains schema/session identity, monotonic commit sequence, causal
+observation/command identity, prior/resulting policy revision and state hashes,
+ordered `BroadcastDecisionV1` values, optional `OperatorCommandResultV1`, all
+causal `AuditEventV1` values, and whether presentation must publish, remain
+unchanged, or hide. Rejected commands and no-display/suppressed observations
+also receive a commit with an unchanged state hash, giving every accepted input
+one terminal recoverable outcome.
+
+The pure core deterministically returns the unpersisted commit payload from its
+explicit input and prior state. The application layer supplies the next commit
+sequence and performs the storage protocol; no filesystem operation or retry
+policy enters the core.
+
+The application adapter serializes `PolicyCommitV1` frames into a policy-only
+append log. Each frame is `length || canonical payload || SHA-256 || commit
+marker`. Before any command response or presentation publication, the writer
+must complete the frame and `fdatasync`/`fsync` its segment. Segment creation or
+rotation uses an exclusive same-directory temporary file, file sync, atomic
+rename, and parent-directory sync. A failed append is truncated and synced back
+to its prior offset; if rollback cannot be verified, the policy log is sealed,
+the overlay hides, and commands fail closed. Recovery accepts only contiguous
+commit sequences with valid length, hash, and marker; it truncates an incomplete
+tail and fails closed on a terminated invalid frame. Segments roll at 10 MiB
+and are retained through release acceptance plus 180 days.
+
+The committed frame—not a separate decision, result, audit, or checkpoint
+write—is the source of truth. Presentation consumes only a synced committed
+frame. Repeating a command ID returns the exact stored result from that frame;
+replay reconstructs revision/state and the idempotency index from committed
+frames. Checkpoints are optional caches written with file sync, atomic rename,
+and parent-directory sync; losing one only forces log replay. This stronger
+policy protocol deliberately differs from the OS-buffered raw-capture boundary
+and its cost is included in P5.
+
+The M2 policy area owns these supporting schemas and transition semantics.
 M3 owns the authenticated HTTP adapter and operator client. The M3 presentation
 assembler exclusively owns localization plus creation of `OverlayStateV1` from
 committed decisions and health; M2 never emits final prose. The read-only
@@ -374,13 +480,14 @@ order.
 
 Policy checkpoints contain schema/rule/config versions, bound session and
 snapshot identities, last processed observation sequence, current revision,
-command-idempotency window, queue contents, cooldowns, pins, and emergency-hide
-state. The preview queue holds at most 64 candidates; the checkpoint retains the
+command-idempotency set, queue contents, cooldowns, pins, and emergency-hide
+state. The preview queue holds at most 64 candidates; the checkpoint caches the
 complete bounded set of at most 4,096 command results in revision order. Restart
-validates a checkpoint and replays canonical inputs after its sequence. A
-missing/incompatible checkpoint rebuilds from the session/decision logs; it
-never silently resets policy state. Reprocessing produces identical decision
-and audit identities, so persistence adapters deduplicate safely.
+validates the checkpoint against its referenced `PolicyCommitV1` hash and
+replays later committed frames. A missing/incompatible checkpoint rebuilds from
+the session log plus policy-commit log; it never silently resets policy state.
+Reprocessing produces identical decision and audit identities, so persistence
+adapters deduplicate safely.
 
 ## Dependency Direction
 
@@ -397,7 +504,7 @@ Downloaded .dem -----------> replay parser port ----> replay facts
                                                                v
                                                 HistoricalBaselineV1
                                                                |
-Manual DotaTV -> GSI -> durable session log                     |
+Manual DotaTV -> GSI -> committed session log                   |
                               |                                 |
                      coalesced high-water wakeup                |
                               |                                 |
@@ -417,9 +524,12 @@ Manual DotaTV -> GSI -> durable session log                     |
                        pure policy core <----- OperatorCommandV1
                               |                       ^
                               |                       |
-             BroadcastDecisionV1 + AuditEventV1      |
+             uncommitted PolicyCommitV1 payload      |
                               |                       |
-                              +--> durable audit      |
+                              v                       |
+                   synced policy-commit log          |
+                              |                       |
+             committed decision/result/audit --------+
                               |                       |
                               v                       |
                  zh-CN presentation assembler        |
@@ -475,14 +585,19 @@ Acceptance:
   live/rebuild API results compatible.
 - The raw-log/high-water/projector handoff has tested ordering, coalescing,
   saturation, restart, invalid cursor, shutdown, and downstream-failure behavior;
-  raw acknowledgement is independent of every downstream adapter.
+  raw acknowledgement is independent of every downstream adapter and retains
+  the accepted OS-buffered—not host/power-durable—failure model.
+- Legacy endpoint inventory, production disable/auth behavior, separate listener
+  ownership, and forbidden operator/overlay reachability have compatibility,
+  route, dependency, CSP, and hostile-origin tests.
 - A `TournamentScopeV1` golden manifest pins TI 2026, the dated roster-snapshot
   rule, history cutoffs, discovery-run shape, initial patch/build rules, and the
   full/restricted/no-go outcomes above.
 - Command idempotency/revision ordering, emergency-hide precedence,
-  audit-before-display, canonical encoding, total ordering, checkpoint/replay,
-  identifier classification, and localhost control security have adversarial
-  contract tests.
+  atomic `PolicyCommitV1`, audit-before-display, partial-tail/rollback/recovery,
+  canonical encoding, total ordering, checkpoint/replay, identifier
+  classification, and localhost control security have adversarial contract
+  tests with injectable sync/rename/directory-sync failures.
 - A replay spike parses at least two public professional `.dem` files on the
   frozen patch/build set, reports available facts and parser failure modes, and
   benchmarks CPU, memory, output size, and deterministic repeatability on
@@ -638,11 +753,18 @@ Acceptance:
 - Failures outside raw capture do not corrupt evidence; presentation failures do
   not block capture; all unsafe states fail closed.
 - A 12-hour accelerated soak passes protocol P4: zero lost accepted raw records;
-  notification capacity one; candidate queue capacity 64; API request/response
-  bodies at most 1 MiB except `OverlayStateV1` at 64 KiB; combined live
+  notification capacity one; candidate queue capacity 64; accepted GSI request
+  bodies at most the existing 10 MiB limit, other API request/response bodies at
+  most 1 MiB, and `OverlayStateV1` at most 64 KiB; combined live
   projection/policy/gateway RSS at most 384 MiB; post-warmup RSS growth at most
-  64 MiB; goroutine delta at most ten; no unbounded file/descriptor growth; all
-  backlogs expose deterministic health and the process exits cleanly.
+  64 MiB; goroutine delta at most ten; open FDs at most 128 and at most 16 above
+  post-warmup baseline; raw file count exactly matches the schedule manifest and
+  raw bytes stay within expected fixture bytes plus the larger of 1% or 16 MiB;
+  policy commits use at most 1 GiB and 104 segments; total non-raw live files
+  under the isolated run data root number at most 192 and use at most 1.6 GiB;
+  rotated operational logs use at most ten files/100 MiB; no temporary file
+  remains at exit; all backlogs expose deterministic health and the process
+  exits cleanly.
 - Full test, race, vet, contract, frontend, screenshot, and end-to-end suites
   pass from one documented command set.
 
@@ -681,10 +803,13 @@ Acceptance:
 - Three consecutive full-match dress rehearsals complete with DotaTV, local GSI,
   historical snapshot, insight engine, operator console, OBS Browser Source,
   recording, and audit enabled.
-- No P0/P1 factual, privacy, hidden-state, crash, evidence-loss, stale-on-air, or
-  operator-control defect remains open.
-- GSI-receive to overlay-state latency is p95 below 500 ms under protocol P5,
-  explicitly excluding DotaTV delay; all latency stages are measured separately.
+- No P0/P1 factual, privacy, hidden-state, crash, evidence-loss within the stated
+  OS-buffered capture failure model, stale-on-air, or operator-control defect
+  remains open.
+- GSI-receive to terminal broadcast-outcome latency over all accepted updates,
+  and GSI-receive to overlay publication for the publication-required subset,
+  are each p95 below 500 ms under protocol P5. DotaTV delay is excluded and all
+  local stages are measured separately.
 - Restart/reconnect, stale input, overlay refresh, OBS restart, missing history,
   emergency hide, and rollback are exercised from the production runbook.
 - Capture remains raw-first and complete during presentation failures; batch
@@ -742,12 +867,21 @@ and excluded samples are reported, never silently removed.
 ### P4 — 12-hour bounded soak
 
 - Replay a fixed content-addressed multi-match GSI corpus for 12 wall-clock
-  hours at 10 accepted records/second, including pause, burst, stale,
-  out-of-order, restart, cursor loss, audit failure, and overlay disconnect
-  intervals from a checked-in deterministic schedule.
+  hours at 10 accepted records/second. Its checked-in deterministic schedule
+  freezes session count, record count, exact input/raw byte expectation, pause,
+  burst, stale, out-of-order, audit failure, and overlay-disconnect intervals.
+- Execute 12 orderly restarts, 12 `SIGKILL` process restarts on the same running
+  host, and 12 injected incomplete raw tails/cursor/checkpoint/policy frames at
+  deterministic sequence numbers. Recovery must preserve every record whose
+  OS-buffered append returned before process termination, discard only invalid
+  tails, replay stale/missing caches, and preserve every synced policy commit.
+  Kernel crash, storage failure, and sudden power loss are explicitly outside
+  this gate because raw capture does not sync per record; report that residual
+  instead of claiming those failures passed.
 - Sample sequence lag, queue occupancy, file/descriptor/goroutine counts, RSS,
-  API/state sizes, decision/audit identities, and raw/derived counts every 30
-  seconds. Rebuild afterward and byte-compare canonical derived outputs.
+  per-class file counts/bytes, policy segment count, API/state sizes,
+  decision/audit identities, and raw/derived counts every 30 seconds. Rebuild
+  afterward and byte-compare canonical derived outputs.
 - Apply every numeric M4 bound. Any accepted-record loss, silent queue drop,
   unreported saturation, nondeterministic rebuild, or unclean exit fails P4.
 
@@ -755,14 +889,28 @@ and excluded samples are reported, never silently removed.
 
 - Collect every accepted update across the three full-match rehearsals, with at
   least 5,000 total samples. `t0` is immediately after the complete GSI body is
-  accepted for validation; `t1` is atomic publication of the corresponding
-  committed `OverlayStateV1` revision.
-- Record raw append, projector dequeue, engine return, decision/audit commit,
-  presentation assembly, and gateway publication timestamps separately. Report
-  unmatched/suppressed observations as outcomes, not discarded latency samples.
+  accepted for validation. Every accepted update must produce exactly one
+  committed `PolicyCommitV1` terminal outcome: `publish`, `unchanged`,
+  `suppressed`, or `hide`.
+- For the all-update denominator, `t1` is the synchronized policy-commit time.
+  For `publish`/`hide` outcomes that require a new overlay revision, record a
+  second `t1_overlay` at atomic gateway publication. Compute nearest-rank p95
+  over all accepted updates for `t1 - t0` and separately over the complete
+  publication-required subset for `t1_overlay - t0`; report both numerator and
+  denominator counts. Unmatched, unchanged, and suppressed observations remain
+  in the all-update denominator.
+- An update without a terminal commit within 2,000 ms is `unresolved`, is
+  assigned 2,000 ms in the all-update distribution if no later timestamp exists,
+  and fails P5 regardless of percentile. A required overlay revision missing or
+  published after 2,000 ms is likewise a hard failure and remains in the
+  publication denominator with its actual latency or 2,000 ms lower bound. Zero
+  unresolved/missing publications are allowed.
+- Record raw append, projector dequeue, engine return, synchronized policy
+  commit, presentation assembly, and gateway publication timestamps separately.
 - DotaTV observer delay is reported as separate external context and is the only
-  excluded stage. P5 passes when end-to-end p95 is below 500 ms and all capture,
-  fail-closed, and resource gates pass concurrently.
+  excluded stage. P5 passes when both p95 values are below 500 ms, no hard
+  failure above occurs, and all capture, fail-closed, and resource gates pass
+  concurrently.
 
 ## Parallel Delivery Model
 
@@ -834,8 +982,12 @@ Identifier classes are explicit:
 
 - source-private identifiers (Steam/account IDs, raw provider handles, local
   paths, tokens) may exist only in protected raw/acquisition records when the
-  source requires them; they never enter candidates, decisions, audit, APIs,
-  logs, screenshots, fixtures, or overlay state;
+  source requires them and, during the explicit compatibility window, in the
+  legacy capture diagnostic/rebuild artifacts and loopback responses inventoried
+  above; the M3 production profile protects or disables those surfaces as
+  specified. They never enter candidates, decisions, policy commits/audit, new
+  versioned operator/overlay APIs, operational logs, screenshots, sanitized
+  fixtures, or overlay state;
 - domain identifiers are stable language-neutral tournament/team/player/hero/
   match IDs with source provenance. `LiveObservationV1` uses session-local
   participant slots and evidence references, not Steam/account IDs;
