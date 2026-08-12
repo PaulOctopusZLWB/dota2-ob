@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "draft-context",
+    "kicker": "直播洞察 · 阵容语境",
+    "title": "招牌英雄回归当前版本",
+    "body": "Ame 近 90 天使用该英雄 18 场，样本覆盖两个当前版本赛事阶段。",
+    "evidence": "18 场 · 61% 胜率 · 一号位样本",
+    "confidenceLabel": "中高置信度",
+    "sourceLabel": "赛前历史基线 · 样本已锁定",
+    "ageLabel": "赛前生成",
+    "asset": null
+  }
+}
