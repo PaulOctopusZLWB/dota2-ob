@@ -1,3 +1,6 @@
 /data/sessions/*
 !/data/sessions/.gitkeep
 /data/*.log
+/web/browser/node_modules/
+/web/browser/test-results/
+/web/browser/playwright-report/

@@ -30,9 +30,12 @@ var ownershipRules = map[string]importRule{
 	"history":        {standard: stringSet(), internal: []string{"internal/contracts"}},
 	"insight":        {standard: stringSet(), internal: []string{"internal/contracts"}},
 	"policy":         {standard: stringSet(), internal: []string{"internal/contracts"}},
-	"delivery":       {standard: stringSet(), internal: []string{"internal/contracts"}},
-	"presentation":   {standard: stringSet(), internal: []string{"internal/contracts"}},
-	"obscontrol":     {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"delivery": {
+		standard: stringSet("context", "crypto/subtle", "encoding/json", "errors", "io", "mime", "net", "net/http", "net/url", "path", "strconv", "strings", "sync", "time"),
+		internal: []string{"internal/contracts"},
+	},
+	"presentation": {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"obscontrol":   {standard: stringSet(), internal: []string{"internal/contracts"}},
 }
 
 func TestTrackImportGraphUsesExplicitDirections(t *testing.T) {
@@ -92,6 +95,9 @@ func TestTrackImportGraphRejectsForbiddenDependencyFixtures(t *testing.T) {
 	for root, rule := range ownershipRules {
 		root, rule := root, rule
 		for _, tc := range cases {
+			if rule.standard[tc.path] {
+				continue
+			}
 			if tc.path == modulePrefix+"internal/"+root {
 				continue
 			}
