@@ -2,14 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/preflight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -25,6 +31,19 @@ type commandAddress string
 
 func (a commandAddress) Network() string { return "tcp" }
 func (a commandAddress) String() string  { return string(a) }
+
+type failingDeliveryListener struct {
+	address net.Addr
+	failed  chan struct{}
+	once    sync.Once
+}
+
+func (l *failingDeliveryListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.failed) })
+	return nil, errors.New("delivery serve failed")
+}
+func (l *failingDeliveryListener) Close() error   { return nil }
+func (l *failingDeliveryListener) Addr() net.Addr { return l.address }
 
 func TestRunRejectsUnsafeNormalAddressBeforeCreatingDataRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "must-not-exist")
@@ -81,21 +100,26 @@ func TestRunNormalAddressMatrixUsesNormalizedListener(t *testing.T) {
 	} {
 		t.Run(tc.input, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "sessions")
-			var listened string
+			tokenDirectory := t.TempDir()
+			if err := os.Chmod(tokenDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tokenPath := filepath.Join(tokenDirectory, "operator.token")
+			var listened []string
 			deps := defaultRunDependencies()
 			deps.listen = func(_ string, address string) (net.Listener, error) {
-				listened = address
+				listened = append(listened, address)
 				return commandListener{address: commandAddress(address)}, nil
 			}
 			deps.runLifecycle = func(_ lifecycle.Server, _ net.Listener, appender lifecycle.Closer, _ lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
 				return appender.Close()
 			}
 			var output bytes.Buffer
-			if code := runWithDependencies([]string{"--addr", tc.input, "--data-dir", root}, &output, deps); code != 0 {
+			if code := runWithDependencies([]string{"--addr", tc.input, "--data-dir", root, "--operator-token-file", tokenPath}, &output, deps); code != 0 {
 				t.Fatalf("exit=%d output=%q", code, output.String())
 			}
-			if listened != tc.want {
-				t.Fatalf("listener address=%q want %q", listened, tc.want)
+			if len(listened) != 2 || listened[0] != tc.want || listened[1] != "127.0.0.1:43211" {
+				t.Fatalf("listener addresses=%q want capture=%q delivery=127.0.0.1:43211", listened, tc.want)
 			}
 		})
 	}
@@ -120,6 +144,204 @@ func TestRunNormalRejectsAddressBeforeAnySideEffect(t *testing.T) {
 				t.Fatalf("side effects store/listen/lifecycle=%d/%d/%d", storeCalls, listenCalls, lifecycleCalls)
 			}
 		})
+	}
+}
+
+func TestRunRejectsCollidingCaptureAndDeliveryAddressesBeforeDataSideEffects(t *testing.T) {
+	deps := defaultRunDependencies()
+	storeCalls, listenCalls := 0, 0
+	deps.newStore = func(string) (*session.Store, error) { storeCalls++; return nil, errors.New("must not run") }
+	deps.listen = func(string, string) (net.Listener, error) { listenCalls++; return nil, errors.New("must not run") }
+	var output bytes.Buffer
+	code := runWithDependencies([]string{"--addr", "127.0.0.1:43210", "--delivery-addr", "localhost:43210"}, &output, deps)
+	if code != 1 || storeCalls != 0 || listenCalls != 0 || !strings.Contains(output.String(), "listener_addresses_must_be_distinct") {
+		t.Fatalf("code=%d store/listen=%d/%d output=%q", code, storeCalls, listenCalls, output.String())
+	}
+}
+
+func TestRunDeliveryBindFailureLeavesCapturePersistingGSI(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	deps := defaultRunDependencies()
+	deps.newTokenFile = func(string) (string, string, func(), error) {
+		return "test-only-operator-token", "", func() {}, nil
+	}
+	listenCalls := 0
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		listenCalls++
+		if listenCalls == 2 {
+			return nil, errors.New("delivery address already in use")
+		}
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, _ lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		store := appender.(*session.Store)
+		request := httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`))
+		response := httptest.NewRecorder()
+		server.(*pairedHTTPServer).capture.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("POST /gsi status=%d body=%q", response.Code, response.Body.String())
+		}
+		if data, err := os.ReadFile(store.RawPath()); err != nil || !bytes.Contains(data, []byte(`"game_time":41`)) {
+			t.Fatalf("persisted raw=%q err=%v", data, err)
+		}
+		return appender.Close()
+	}
+
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root}, &output, deps); code != 0 {
+		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+	if !strings.Contains(output.String(), "delivery_listen_failed") {
+		t.Fatalf("missing observable delivery failure: %q", output.String())
+	}
+}
+
+func TestDeliveryServeFailureLeavesCapturePersistingGSI(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("delivery-failure"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveryListener := &failingDeliveryListener{
+		address: commandAddress("127.0.0.1:43211"),
+		failed:  make(chan struct{}),
+	}
+	deliveryFailures := make(chan string, 1)
+	handler := gsi.NewServer(store)
+	servers := &pairedHTTPServer{
+		capture:               &http.Server{Handler: handler},
+		delivery:              &http.Server{Handler: http.NotFoundHandler()},
+		deliveryListener:      deliveryListener,
+		reportDeliveryFailure: func(code string) { deliveryFailures <- code },
+	}
+	signals := make(chan os.Signal, 1)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- lifecycle.Run(servers, captureListener, store, handler, signals, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), time.Second)
+		})
+	}()
+
+	<-deliveryListener.failed
+	if code := <-deliveryFailures; code != "delivery_serve_failed" {
+		t.Fatalf("delivery failure code=%q", code)
+	}
+	select {
+	case err := <-runDone:
+		t.Fatalf("delivery failure terminated capture lifecycle: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	response, err := http.Post("http://"+captureListener.Addr().String()+"/gsi", "application/json", strings.NewReader(`{"map":{"game_time":42}}`))
+	if err != nil {
+		t.Fatalf("POST /gsi after delivery failure: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("POST /gsi status=%d", response.StatusCode)
+	}
+	if data, err := os.ReadFile(store.RawPath()); err != nil || !bytes.Contains(data, []byte(`"game_time":42`)) {
+		t.Fatalf("persisted raw=%q err=%v", data, err)
+	}
+
+	signals <- os.Interrupt
+	if err := <-runDone; err != nil {
+		t.Fatalf("capture shutdown after isolated delivery failure: %v", err)
+	}
+}
+
+func TestRunCreatesPrivateEphemeralTokenAndProductionCaptureProfile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	deps := defaultRunDependencies()
+	createTokenFile := deps.newTokenFile
+	var tokenPath string
+	deps.newTokenFile = func(explicit string) (string, string, func(), error) {
+		token, path, cleanup, err := createTokenFile(explicit)
+		tokenPath = path
+		return token, path, cleanup, err
+	}
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	var tokenValue string
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, _ lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		store := appender.(*session.Store)
+		if strings.HasPrefix(tokenPath, store.SessionDir()+string(os.PathSeparator)) {
+			t.Fatalf("token path is inside session root: %s", tokenPath)
+		}
+		info, err := os.Stat(tokenPath)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("token stat=%v mode=%v", err, info.Mode())
+		}
+		data, err := os.ReadFile(tokenPath)
+		if err != nil || len(bytes.TrimSpace(data)) < 32 {
+			t.Fatalf("token len=%d err=%v", len(data), err)
+		}
+		tokenValue = strings.TrimSpace(string(data))
+		handler := server.(*pairedHTTPServer).capture.Handler
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/latest", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("production latest status=%d", rec.Code)
+		}
+		return appender.Close()
+	}
+	var output bytes.Buffer
+	tokenDirectory := t.TempDir()
+	if err := os.Chmod(tokenDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	explicitTokenPath := filepath.Join(tokenDirectory, "operator.token")
+	if code := runWithDependencies([]string{"--data-dir", root, "--operator-token-file", explicitTokenPath}, &output, deps); code != 0 {
+		t.Fatalf("code=%d output=%q", code, output.String())
+	}
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("ephemeral token remains: %v", err)
+	}
+	if tokenValue == "" || strings.Contains(output.String(), tokenValue) {
+		t.Fatalf("token leaked to logs: %q", output.String())
+	}
+}
+
+func TestRunDiagnosticModeUsesSameEphemeralBearer(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	deps := defaultRunDependencies()
+	createTokenFile := deps.newTokenFile
+	var tokenPath string
+	deps.newTokenFile = func(explicit string) (string, string, func(), error) {
+		token, path, cleanup, err := createTokenFile(explicit)
+		tokenPath = path
+		return token, path, cleanup, err
+	}
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, _ lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		token, err := os.ReadFile(tokenPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := server.(*pairedHTTPServer).capture.Handler
+		unauthorized := httptest.NewRecorder()
+		handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/latest", nil))
+		if unauthorized.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthorized=%d", unauthorized.Code)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/latest", nil)
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+		authorized := httptest.NewRecorder()
+		handler.ServeHTTP(authorized, req)
+		if authorized.Code != http.StatusOK {
+			t.Fatalf("authorized=%d body=%s", authorized.Code, authorized.Body.String())
+		}
+		return appender.Close()
+	}
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root, "--diagnostic-mode"}, &output, deps); code != 0 {
+		t.Fatalf("code=%d output=%q", code, output.String())
 	}
 }
 

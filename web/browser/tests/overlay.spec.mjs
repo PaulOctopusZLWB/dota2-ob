@@ -1,0 +1,216 @@
+import { expect, test } from "@playwright/test";
+
+const canvasSizes = [
+  { name: "1080p", width: 1920, height: 1080 },
+  { name: "1440p", width: 2560, height: 1440 }
+];
+
+function visibleState(overrides = {}) {
+  const now = Date.now();
+  return {
+    schema_version: "overlay_state.v1",
+    session_id: "browser-session",
+    publication_time_ms: now,
+    stale_deadline_ms: now + 1500,
+    visibility: "visible",
+    decision_id: "decision-browser-1",
+    evidence: [{
+      record_schema_version: 1,
+      session_id: "browser-session",
+      sequence: 1,
+      receive_time: new Date(now - 100).toISOString(),
+      source: "gsi",
+      provider_version: { state: "absent" },
+      raw_payload_sha256: "a".repeat(64)
+    }],
+    confidence: "高置信度",
+    source_receive_time: new Date(now - 100).toISOString(),
+    claim: { title: "肉山窗口已经打开", body: "经济领先可转化为下一阶段的地图控制。", asset_key: "roshan" },
+    ...overrides
+  };
+}
+
+async function routeState(page, factory = () => visibleState()) {
+  await page.route("**/v1/overlay/state", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(factory())
+  }));
+}
+
+async function openVisible(page) {
+  await page.goto("/overlay/");
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible");
+}
+
+async function layout(page) {
+  return page.locator("#overlay-card").evaluate((card) => {
+    const rect = card.getBoundingClientRect();
+    const header = card.querySelector(".card-header").getBoundingClientRect();
+    const claimElement = card.querySelector(".claim");
+    const claim = claimElement.getBoundingClientRect();
+    const footer = card.querySelector("footer").getBoundingClientRect();
+    return {
+      inside: rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+      overflow: card.scrollWidth > card.clientWidth + 1 || card.scrollHeight > card.clientHeight + 1,
+      ordered: header.bottom <= claim.top && claim.bottom <= footer.top,
+      claimVisible: getComputedStyle(claimElement).visibility !== "hidden"
+    };
+  });
+}
+
+test("transparent OBS surface uses localhost resources only", async ({ page }) => {
+  const remote = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).hostname !== "127.0.0.1") remote.push(request.url());
+  });
+  await routeState(page);
+  await openVisible(page);
+  expect(await page.evaluate(() => ({
+    html: getComputedStyle(document.documentElement).backgroundColor,
+    body: getComputedStyle(document.body).backgroundColor
+  }))).toEqual({ html: "rgba(0, 0, 0, 0)", body: "rgba(0, 0, 0, 0)" });
+  expect(remote).toEqual([]);
+});
+
+for (const canvas of canvasSizes) {
+  test(`long Chinese copy remains inside the ${canvas.name} safe area`, async ({ page }, testInfo) => {
+    await page.setViewportSize(canvas);
+    await routeState(page, () => visibleState({
+      claim: { title: "关键装备时间点决定下一轮团战主动权".repeat(4), body: "双方资源分配已经出现明显差异，领先方可以围绕视野、兵线与肉山区域建立连续控制。".repeat(4), asset_key: "missing-local-asset" }
+    }));
+    await openVisible(page);
+    expect(await layout(page)).toEqual({ inside: true, overflow: false, ordered: true, claimVisible: true });
+    const screenshot = await page.screenshot({ path: `./test-results/overlay-${canvas.name}.png`, animations: "disabled", omitBackground: true });
+    await testInfo.attach(`overlay-${canvas.name}`, { body: screenshot, contentType: "image/png" });
+  });
+}
+
+test("missing asset preserves geometry and fallback", async ({ page }) => {
+  let assetRequested = false;
+  await page.route("**/overlay/assets/**", async (route) => { assetRequested = true; await route.fulfill({ status: 404, body: "missing" }); });
+  await routeState(page);
+  await openVisible(page);
+  await page.locator("#overlay-card").evaluate((card) => card.getAnimations().forEach((animation) => animation.finish()));
+  const before = await page.locator("#overlay-card").boundingBox();
+  await expect.poll(() => assetRequested).toBe(true);
+  await expect(page.locator("#asset-fallback")).toBeVisible();
+  expect(await page.locator("#overlay-card").boundingBox()).toEqual(before);
+});
+
+for (const unsafe of ["malformed", "stale", "hidden", "disconnected"]) {
+  test(`${unsafe} state hides analytical claims`, async ({ page }) => {
+    if (unsafe === "disconnected") {
+      await page.route("**/v1/overlay/state", (route) => route.abort("connectionfailed"));
+    } else {
+      await routeState(page, () => {
+        if (unsafe === "malformed") return { schema_version: "overlay_state.v1", raw_gsi: { player: "forbidden" } };
+        if (unsafe === "stale") return visibleState({ stale_deadline_ms: Date.now() - 1 });
+        return visibleState({ visibility: "hidden", health_code: "emergency_hide", claim: null, decision_id: "", evidence: [], confidence: "", source_receive_time: null });
+      });
+    }
+    const started = Date.now();
+    await page.goto("/overlay/");
+    await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden", { timeout: 2000 });
+    expect(Date.now() - started).toBeLessThan(2000);
+    await expect(page.locator("#claim")).toBeHidden();
+  });
+}
+
+test("presentation-oversized contract text fails closed before layout", async ({ page }) => {
+  await routeState(page, () => visibleState({ claim: { title: "界".repeat(97), body: "正文", asset_key: "" } }));
+  await page.goto("/overlay/");
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+  await expect(page.locator("#claim")).toBeHidden();
+});
+
+test("unknown nested state and unsafe asset keys fail closed", async ({ page }) => {
+  await routeState(page, () => {
+    const state = visibleState({ claim: { title: "标题", body: "正文", asset_key: "../../operator" } });
+    state.evidence[0].provider_version = { state: "mystery" };
+    return state;
+  });
+  await page.goto("/overlay/");
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+  await expect(page.locator("#claim")).toBeHidden();
+});
+
+test("oversized total response and unordered evidence fail closed", async ({ page }) => {
+  await page.route("**/v1/overlay/state", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ ...visibleState(), padding: "x".repeat(65 * 1024) })
+  }));
+  await page.goto("/overlay/");
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+  await page.unroute("**/v1/overlay/state");
+  await routeState(page, () => {
+    const state = visibleState();
+    state.evidence.push({ ...state.evidence[0], sequence: 1 });
+    return state;
+  });
+  await page.reload();
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+});
+
+test("valid response reconnects after connection loss", async ({ page }) => {
+  let connected = true;
+  await page.route("**/v1/overlay/state", (route) => connected ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(visibleState()) }) : route.abort("connectionfailed"));
+  await openVisible(page);
+  connected = false;
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden", { timeout: 2000 });
+  connected = true;
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible", { timeout: 2000 });
+});
+
+test("hostile null-origin page cannot invoke operator commands", async ({ page }) => {
+  await page.goto("data:text/html,<title>hostile</title>");
+  const result = await page.evaluate(async () => {
+    try {
+      await fetch("http://127.0.0.1:18838/v1/operator/commands", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer guessed-token",
+          "Content-Type": "application/json",
+          "X-Dota2-OB-CSRF": "operator-command"
+        },
+        body: "{}"
+      });
+      return "unexpected-success";
+    } catch (error) {
+      return error.name;
+    }
+  });
+  expect(result).toBe("TypeError");
+});
+
+test("real capture and delivery listeners do not proxy each other's routes", async ({ request }) => {
+  expect((await request.get("http://127.0.0.1:18839/v1/overlay/state")).status()).toBe(404);
+  expect((await request.get("http://127.0.0.1:18839/api/latest")).status()).toBe(404);
+  expect((await request.post("http://127.0.0.1:18838/gsi", { data: {} })).status()).toBe(404);
+  expect((await request.get("http://127.0.0.1:18838/api/status")).status()).toBe(404);
+});
+
+test("older delayed response cannot revive a newer unsafe state", async ({ page }) => {
+  const healthy = JSON.stringify(visibleState());
+  const unsafe = JSON.stringify({ schema_version: "overlay_state.v1", raw_gsi: { forbidden: true } });
+  await page.addInitScript(({ healthy, unsafe }) => {
+    const response = (body) => new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+    let release;
+    window.testPolls = 0;
+    window.releaseOld = () => release();
+    window.fetch = async () => {
+      window.testPolls += 1;
+      if (window.testPolls === 1) return response(healthy);
+      if (window.testPolls === 2) return new Promise((resolve) => { release = () => resolve(response(healthy)); });
+      if (window.testPolls === 3) return response(unsafe);
+      return new Promise(() => {});
+    };
+  }, { healthy, unsafe });
+  await openVisible(page);
+  await expect.poll(() => page.evaluate(() => window.testPolls)).toBeGreaterThanOrEqual(3);
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+  await page.evaluate(() => window.releaseOld());
+  await page.waitForTimeout(350);
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+});

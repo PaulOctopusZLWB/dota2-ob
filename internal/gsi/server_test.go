@@ -1,6 +1,7 @@
 package gsi_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,6 +36,29 @@ func (p barrierProjection) Apply(*session.Record) error { close(p.entered); <-p.
 type countingProjection struct{ calls int }
 
 func (p *countingProjection) Apply(*session.Record) error { p.calls++; return nil }
+
+const diagnosticToken = "test-only-diagnostic-token"
+
+func diagnosticOption() gsi.Option {
+	return gsi.WithDiagnostics(gsi.DiagnosticConfig{
+		BearerToken:   diagnosticToken,
+		AllowedOrigin: "http://127.0.0.1:43210",
+	})
+}
+
+func diagnosticGet(t *testing.T, target string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
 
 type sealingRawFile struct {
 	writes int
@@ -339,7 +363,7 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 	}
 	latest := state.NewLatest()
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithLatest(latest)))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithLatest(latest), diagnosticOption()))
 	defer server.Close()
 
 	validBody := `{"provider":{"name":"Dota 2","appid":570},"map":{"game_time":123},"hero":{"team2":{"player0":{"name":"npc_dota_hero_axe","xpos":100,"ypos":200}}}}`
@@ -352,10 +376,7 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 		t.Fatalf("valid POST status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	resp, err = http.Get(server.URL + "/api/latest")
-	if err != nil {
-		t.Fatalf("GET /api/latest returned error: %v", err)
-	}
+	resp = diagnosticGet(t, server.URL+"/api/latest")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -389,10 +410,7 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 		t.Fatalf("invalid POST status = %d, want 4xx", resp.StatusCode)
 	}
 
-	resp, err = http.Get(server.URL + "/api/latest")
-	if err != nil {
-		t.Fatalf("GET /api/latest after invalid returned error: %v", err)
-	}
+	resp = diagnosticGet(t, server.URL+"/api/latest")
 	defer resp.Body.Close()
 	var afterInvalid struct {
 		SnapshotCount uint64 `json:"snapshot_count"`
@@ -414,13 +432,10 @@ func TestDashboardLoadsFromSameServer(t *testing.T) {
 		"index.html": {Data: []byte(`<html><script>fetch('/api/latest')</script></html>`)},
 	}))
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithDashboard(dashboard)))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithDashboard(dashboard), diagnosticOption()))
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/")
-	if err != nil {
-		t.Fatalf("GET / returned error: %v", err)
-	}
+	resp := diagnosticGet(t, server.URL+"/")
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -440,7 +455,7 @@ func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
 	}
 	profiler := profile.NewProfiler()
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithProfiler(profiler)))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithProfiler(profiler), diagnosticOption()))
 	defer server.Close()
 
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"provider":{"name":"Dota 2"},"map":{"game_time":123},"hero":{"team2":{"player0":{"xpos":100,"ypos":200}}}}`))
@@ -452,10 +467,7 @@ func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
 		t.Fatalf("POST /gsi status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	resp, err = http.Get(server.URL + "/api/profile")
-	if err != nil {
-		t.Fatalf("GET /api/profile returned error: %v", err)
-	}
+	resp = diagnosticGet(t, server.URL+"/api/profile")
 	defer resp.Body.Close()
 
 	var profileBody struct {
@@ -502,14 +514,11 @@ func TestAnalyticsAPIsEmptyValidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore returned error: %v", err)
 	}
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(analytics.NewEngine())))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(analytics.NewEngine()), diagnosticOption()))
 	defer server.Close()
 
 	for _, endpoint := range []string{"/api/analytics", "/api/events"} {
-		resp, err := http.Get(server.URL + endpoint)
-		if err != nil {
-			t.Fatalf("GET %s returned error: %v", endpoint, err)
-		}
+		resp := diagnosticGet(t, server.URL+endpoint)
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -532,7 +541,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		t.Fatalf("NewStore returned error: %v", err)
 	}
 	engine := analytics.NewEngine()
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(engine)))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(engine), diagnosticOption()))
 	defer server.Close()
 
 	first := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
@@ -560,10 +569,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		t.Fatalf("tick count after second = %d, want 2", got)
 	}
 
-	resp, err := http.Get(server.URL + "/api/events")
-	if err != nil {
-		t.Fatalf("GET /api/events: %v", err)
-	}
+	resp := diagnosticGet(t, server.URL+"/api/events")
 	defer resp.Body.Close()
 	var events []analytics.Event
 	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
@@ -596,4 +602,143 @@ func containsEvent(events []analytics.Event, ty string) bool {
 		}
 	}
 	return false
+}
+
+func TestProductionProfileDisablesLegacyDiagnosticsAndDeliveryRoutes(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("production-private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := gsi.NewServer(store,
+		gsi.WithLatest(state.NewLatest()), gsi.WithProfiler(profile.NewProfiler()),
+		gsi.WithAnalytics(analytics.NewEngine()),
+		gsi.WithDashboard(http.FileServer(http.FS(fstest.MapFS{"index.html": {Data: []byte("private")}}))),
+	)
+	for _, target := range []string{"/", "/api/latest", "/api/profile", "/api/analytics", "/api/events", "/v1/operator/commands", "/v1/overlay/state"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d body=%s", target, rec.Code, rec.Body.String())
+		}
+	}
+	for _, target := range []string{"/healthz", "/api/status"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d", target, rec.Code)
+		}
+	}
+}
+
+func TestDiagnosticModeRequiresBearerAndSameOriginWithoutCORS(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("diagnostic-private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := gsi.NewServer(store, gsi.WithLatest(state.NewLatest()), diagnosticOption())
+	tests := []struct {
+		name, method string
+		headers      map[string]string
+		want         int
+	}{
+		{name: "missing bearer", method: http.MethodGet, want: http.StatusUnauthorized},
+		{name: "cookie only", method: http.MethodGet, headers: map[string]string{"Cookie": "token=" + diagnosticToken}, want: http.StatusUnauthorized},
+		{name: "wrong bearer", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer wrong"}, want: http.StatusUnauthorized},
+		{name: "cross origin", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken, "Origin": "https://hostile.invalid"}, want: http.StatusForbidden},
+		{name: "null origin", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken, "Origin": "null"}, want: http.StatusForbidden},
+		{name: "wrong method", method: http.MethodPost, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken}, want: http.StatusMethodNotAllowed},
+		{name: "same origin", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken, "Origin": "http://127.0.0.1:43210"}, want: http.StatusOK},
+		{name: "non browser", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken}, want: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/api/latest", nil)
+			for key, value := range tc.headers {
+				req.Header.Set(key, value)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+			if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+				t.Fatal("diagnostic route enabled CORS")
+			}
+			if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatalf("security headers=%v", rec.Header())
+			}
+		})
+	}
+}
+
+func TestDiagnosticModeWithUnsafeOriginFailsClosed(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("unsafe-origin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := gsi.NewServer(store, gsi.WithDiagnostics(gsi.DiagnosticConfig{
+		BearerToken: diagnosticToken, AllowedOrigin: "https://hostile.invalid",
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unsafe diagnostic origin status=%d", rec.Code)
+	}
+}
+
+func TestAuthorizedDiagnosticJSONShapesRemainExact(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("shape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := state.NewLatest()
+	profiler := profile.NewProfiler()
+	engine := analytics.NewEngine()
+	handler := gsi.NewServer(store, gsi.WithLatest(latest), gsi.WithProfiler(profiler), gsi.WithAnalytics(engine), diagnosticOption())
+	tests := []struct {
+		target string
+		value  any
+	}{
+		{target: "/api/latest", value: latest.Snapshot(store.SessionID())},
+		{target: "/api/profile", value: profiler.Snapshot()},
+		{target: "/api/analytics", value: engine.Snapshot(store.SessionID())},
+		{target: "/api/events", value: engine.Events()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			want, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want = append(want, '\n')
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), want) {
+				t.Fatalf("status=%d\ngot =%s\nwant=%s", rec.Code, rec.Body.Bytes(), want)
+			}
+		})
+	}
+}
+
+func TestAuthorizedDiagnosticDashboardBodyRemainsUnchanged(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("dashboard-shape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("<html>legacy dashboard</html>")
+	dashboard := http.FileServer(http.FS(fstest.MapFS{"index.html": {Data: want}}))
+	handler := gsi.NewServer(store, gsi.WithDashboard(dashboard), diagnosticOption())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), want) {
+		t.Fatalf("status=%d got=%q want=%q", rec.Code, rec.Body.Bytes(), want)
+	}
 }

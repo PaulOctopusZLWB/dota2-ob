@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dota2-OB 导播控制台</title>
+  <link rel="stylesheet" href="/operator/app.css">
+</head>
+<body>
+  <main>
+    <header><p class="eyebrow">LOCAL OPERATOR</p><h1>导播安全控制台</h1></header>
+    <section class="panel" aria-labelledby="command-heading">
+      <h2 id="command-heading">提交已签名的控制命令</h2>
+      <p>令牌只保存在当前输入框内，不写入 URL、Cookie 或浏览器存储。</p>
+      <form id="command-form">
+        <label>本次启动令牌<input id="token" type="password" autocomplete="off" required></label>
+        <label>OperatorCommandV1<textarea id="command" spellcheck="false" required></textarea></label>
+        <button type="submit">提交命令</button>
+      </form>
+      <pre id="result" role="status" aria-live="polite">等待命令</pre>
+    </section>
+  </main>
+  <script src="/operator/app.js" defer></script>
+</body>
+</html>

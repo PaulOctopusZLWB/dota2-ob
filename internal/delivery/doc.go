@@ -1,3 +1,4 @@
-// Package delivery owns the future authenticated loopback delivery gateway.
-// M0 declares the boundary only; it contains no HTTP behavior.
+// Package delivery owns the authenticated loopback delivery gateway. It
+// depends only on typed policy command/result ports and committed overlay
+// state; capture diagnostics and policy internals are deliberately absent.
 package delivery
