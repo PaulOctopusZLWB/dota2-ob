@@ -2,6 +2,6 @@
   "name": "dota2-ob-delivery-browser-tests",
   "private": true,
   "version": "0.0.0",
-  "scripts": { "test": "playwright test" },
+  "scripts": { "test": "node --test ./server-harness.test.mjs && playwright test" },
   "devDependencies": { "@playwright/test": "1.62.1" }
 }
