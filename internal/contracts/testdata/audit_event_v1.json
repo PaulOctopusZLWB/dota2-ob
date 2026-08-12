@@ -1,1 +1,1 @@
-{"schema_version":"audit_event.v1","event_id":"audit-1","session_id":"session-1","event_type":"command_accepted","policy_time_ms":2000,"candidate_id":"candidate-1","decision_id":"decision-1","command_id":"command-1","reason":"approved"}
+{"candidate_id":"candidate-1","command_id":"command-1","decision_id":"decision-1","event_id":"audit-1","event_type":"command_accepted","policy_time_ms":2000,"reason":"approved","schema_version":"audit_event.v1","session_id":"session-1"}

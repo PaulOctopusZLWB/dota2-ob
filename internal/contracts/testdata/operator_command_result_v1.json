@@ -1,1 +1,1 @@
-{"schema_version":"operator_command_result.v1","command_id":"command-1","session_id":"session-1","status":"accepted","previous_revision":0,"resulting_revision":1,"decision_ids":["decision-1"],"reason":"approved"}
+{"command_id":"command-1","decision_ids":["decision-1"],"previous_revision":0,"reason":"approved","resulting_revision":1,"schema_version":"operator_command_result.v1","session_id":"session-1","status":"accepted"}

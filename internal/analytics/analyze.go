@@ -12,12 +12,27 @@ import (
 	"time"
 )
 
-// AnalyzeSession reads <sessionDir>/raw.jsonl, normalizes every accepted
-// snapshot, derives delta events, and writes the four analysis artifacts back
-// under sessionDir. It returns the engine snapshot it materialized.
-func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
+// RebuildRecord retains the committed evidence needed by a caller-supplied
+// canonical normalizer without exposing analytics storage internals.
+type RebuildRecord struct {
+	SchemaVersion int
+	SessionID     string
+	Sequence      uint64
+	ReceivedAt    time.Time
+	Source        string
+	Payload       any
+	Raw           json.RawMessage
+}
+type RebuildNormalizer func(index int, record RebuildRecord) (NormalizedTick, error)
+
+// AnalyzeSessionWithNormalizer reads raw.jsonl and materializes the accepted
+// artifacts through a required caller-owned normalization boundary.
+func AnalyzeSessionWithNormalizer(sessionDir, sessionID string, normalize RebuildNormalizer) (Snapshot, error) {
 	if sessionDir == "" {
 		return Snapshot{}, errors.New("session directory is required")
+	}
+	if normalize == nil {
+		return Snapshot{}, errors.New("rebuild normalizer is required")
 	}
 
 	records, err := readRawJSONL(filepath.Join(sessionDir, "raw.jsonl"), sessionID)
@@ -33,7 +48,10 @@ func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
 	// artifact generation must not silently drop older events.
 	events := make([]Event, 0)
 	for i, rec := range records {
-		tick := Normalize(rec.ReceivedAt, rec.Payload)
+		tick, err := normalize(i, rec)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("normalize raw record %d: %w", i+1, err)
+		}
 		tick.TickIndex = int64(i)
 		derived := engine.Observe(tick)
 		ticks = append(ticks, tick)
@@ -48,10 +66,7 @@ func AnalyzeSession(sessionDir, sessionID string) (Snapshot, error) {
 }
 
 // rawRecord is the on-disk shape written by the session store.
-type rawRecord struct {
-	ReceivedAt time.Time `json:"received_at"`
-	Payload    any       `json:"payload"`
-}
+type rawRecord = RebuildRecord
 
 type diskRawRecord struct {
 	SchemaVersion json.RawMessage `json:"schema_version"`
@@ -126,7 +141,19 @@ func readRawJSONL(path, expectedSessionID string) ([]rawRecord, error) {
 		if err != nil || !reflect.DeepEqual(payload, rawValue) {
 			return records, fmt.Errorf("raw payload mismatch at record %d", sequence)
 		}
-		records = append(records, rawRecord{ReceivedAt: disk.ReceivedAt, Payload: payload})
+		version := 1
+		if len(disk.SchemaVersion) > 0 {
+			version = 2
+		}
+		source := disk.Source
+		if source == "" {
+			source = "gsi"
+		}
+		sessionID := disk.SessionID
+		if sessionID == "" {
+			sessionID = expectedSessionID
+		}
+		records = append(records, rawRecord{SchemaVersion: version, SessionID: sessionID, Sequence: sequence, ReceivedAt: disk.ReceivedAt, Source: source, Payload: payload, Raw: append(json.RawMessage(nil), disk.Raw...)})
 	}
 	return records, nil
 }

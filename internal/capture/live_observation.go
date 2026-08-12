@@ -5,120 +5,119 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
+	"strconv"
 
-	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
 const liveObservationMappingVersion = "gsi_normalized.v1"
 
-// MapLiveObservationV1 deterministically projects one committed raw GSI record
-// into the public cross-track contract. Account IDs, Steam IDs, and observed
-// player handles intentionally remain in the capture-owned legacy view.
+// MapLiveObservationV1 is the source parser for the canonical cross-track
+// observation. It reads the accepted raw record directly and never constructs
+// a private legacy tick.
 func MapLiveObservationV1(record *session.Record) (contracts.LiveObservationV1, error) {
 	if record == nil || record.SchemaVersion <= 0 || record.SessionID == "" || record.Sequence == 0 || record.ReceivedAt.IsZero() || record.Source != "gsi" || len(record.Raw) == 0 {
 		return contracts.LiveObservationV1{}, errors.New("invalid committed GSI record")
 	}
-	tick := analytics.Normalize(record.ReceivedAt, record.Payload)
-	digest := sha256.Sum256(record.Raw)
-	root, _ := record.Payload.(map[string]any)
+	root, ok := record.Payload.(map[string]any)
+	if !ok {
+		return contracts.LiveObservationV1{}, errors.New("GSI payload is not an object")
+	}
 	provider := mapValue(root, "provider")
-	mapSection := mapValue(root, "map")
-
-	observation := contracts.LiveObservationV1{
-		SchemaVersion:  contracts.LiveObservationSchemaV1,
-		MappingVersion: liveObservationMappingVersion,
-		Evidence: contracts.EvidenceRefV1{
-			RecordSchemaVersion: record.SchemaVersion, SessionID: record.SessionID,
-			Sequence: record.Sequence, ReceiveTime: record.ReceivedAt.UTC(), Source: record.Source,
-			ProviderVersion: observedInt(provider, "version"), RawPayloadSHA256: hex.EncodeToString(digest[:]),
-		},
-		Provider: contracts.ProviderObservationV1{Name: observedString(provider, "name"), AppID: observedInt(provider, "appid"), Timestamp: observedInt(provider, "timestamp")},
-		MatchID:  observedMatchID(root, tick.MatchID), ClockBasis: "gsi_map_clock_and_game_time",
-		Map:       mapMapObservation(mapSection, tick.Map),
-		Roshan:    contracts.ObjectiveObservationV1{State: observedString(mapSection, "roshan_state"), Location: contracts.Absent[string](), EndSeconds: observedFloatPointer(tick.Roshan.EndSeconds)},
-		Tormentor: contracts.ObjectiveObservationV1{State: observedString(mapSection, "tormentor_state"), Location: observedString(mapSection, "tormentor_state_location"), EndSeconds: observedFloatPointer(tick.Tormentor.EndSeconds)},
-		Buildings: mapBuildings(tick.Buildings), Participants: mapParticipants(tick.Players),
-		Quality: contracts.SourceQualityV1{Confidence: "observed", Flags: []string{}},
-	}
-	return observation, nil
+	m := mapValue(root, "map")
+	h := sha256.Sum256(record.Raw)
+	o := contracts.LiveObservationV1{SchemaVersion: contracts.LiveObservationSchemaV1, MappingVersion: liveObservationMappingVersion, Evidence: contracts.EvidenceRefV1{RecordSchemaVersion: record.SchemaVersion, SessionID: record.SessionID, Sequence: record.Sequence, ReceiveTime: record.ReceivedAt.UTC(), Source: record.Source, ProviderVersion: observedInt(provider, "version"), RawPayloadSHA256: hex.EncodeToString(h[:])}, Provider: contracts.ProviderObservationV1{Name: observedString(provider, "name"), AppID: observedInt(provider, "appid"), Timestamp: observedInt(provider, "timestamp")}, MatchID: observedMatchID(root), ClockBasis: "gsi_map_clock_and_game_time", Map: mapObservation(m), Roshan: contracts.ObjectiveObservationV1{State: observedString(m, "roshan_state"), Location: contracts.Absent[string](), EndSeconds: observedDecimal(m, "roshan_state_end_seconds")}, Tormentor: contracts.ObjectiveObservationV1{State: observedString(m, "tormentor_state"), Location: observedString(m, "tormentor_state_location"), EndSeconds: observedDecimal(m, "tormentor_state_end_seconds")}, Buildings: mapBuildings(mapValue(root, "buildings")), Participants: mapParticipants(root), Quality: contracts.SourceQualityV1{Confidence: "observed", Flags: []string{}}}
+	return o, nil
 }
 
-func mapMapObservation(raw map[string]any, value analytics.MapState) contracts.MapObservationV1 {
-	return contracts.MapObservationV1{
-		ClockTime: observedIntPointer(value.ClockTime), GameTime: observedIntPointer(value.GameTime), GameState: observedString(raw, "game_state"), Paused: observedBoolPointer(value.Paused), Daytime: observedBoolPointer(value.Daytime), NightstalkerNight: observedBoolPointer(value.NightstalkerNight), WinTeam: observedString(raw, "win_team"),
-		RadiantScore: observedIntPointer(value.RadiantScore), DireScore: observedIntPointer(value.DireScore), RadiantGlyphCooldown: observedFloatPointer(value.RadiantGlyphCooldown), DireGlyphCooldown: observedFloatPointer(value.DireGlyphCooldown), RadiantScanCharges: observedIntPointer(value.RadiantScanCharges), DireScanCharges: observedIntPointer(value.DireScanCharges), RadiantLotusPoolCount: observedIntPointer(value.RadiantLotusPoolCount), DireLotusPoolCount: observedIntPointer(value.DireLotusPoolCount), RadiantWardPurchaseCooldown: observedFloatPointer(value.RadiantWardPurchaseCooldown), DireWardPurchaseCooldown: observedFloatPointer(value.DireWardPurchaseCooldown),
-	}
+func mapObservation(m map[string]any) contracts.MapObservationV1 {
+	return contracts.MapObservationV1{ClockTime: observedInt(m, "clock_time"), GameTime: observedInt(m, "game_time"), GameState: observedString(m, "game_state"), Paused: observedBool(m, "paused"), Daytime: observedBool(m, "daytime"), NightstalkerNight: observedBool(m, "nightstalker_night"), WinTeam: observedString(m, "win_team"), RadiantScore: observedInt(m, "radiant_score"), DireScore: observedInt(m, "dire_score"), RadiantGlyphCooldown: observedDecimal(m, "radiant_glyph_cooldown"), DireGlyphCooldown: observedDecimal(m, "dire_glyph_cooldown"), RadiantScanCharges: observedInt(m, "radiant_scan_charges"), DireScanCharges: observedInt(m, "dire_scan_charges"), RadiantLotusPoolCount: observedInt(m, "radiant_lotus_pool_count"), DireLotusPoolCount: observedInt(m, "dire_lotus_pool_count"), RadiantWardPurchaseCooldown: observedDecimal(m, "radiant_ward_purchase_cooldown"), DireWardPurchaseCooldown: observedDecimal(m, "dire_ward_purchase_cooldown")}
 }
-
-func mapBuildings(values []analytics.BuildingTick) []contracts.BuildingObservationV1 {
-	out := make([]contracts.BuildingObservationV1, 0, len(values))
-	for _, value := range values {
-		out = append(out, contracts.BuildingObservationV1{Team: value.Team, Name: value.Name, Health: observedFloatPointer(value.Health), MaxHealth: observedFloatPointer(value.MaxHealth)})
+func mapBuildings(teams map[string]any) []contracts.BuildingObservationV1 {
+	if teams == nil {
+		return nil
 	}
-	return out
-}
-
-func mapParticipants(values []analytics.PlayerTick) []contracts.ParticipantObservationV1 {
-	out := make([]contracts.ParticipantObservationV1, 0, len(values))
-	for _, v := range values {
-		present := func(path string) bool {
-			for _, p := range v.ObservedFields {
-				if p == path {
-					return true
-				}
-			}
-			return false
+	var out []contracts.BuildingObservationV1
+	for _, team := range sortedKeys(teams) {
+		for _, name := range sortedKeys(mapValue(teams, team)) {
+			stats := mapValue(mapValue(teams, team), name)
+			out = append(out, contracts.BuildingObservationV1{Team: team, Name: name, Health: observedDecimal(stats, "health"), MaxHealth: observedDecimal(stats, "max_health")})
 		}
-		playerPath := func(field string) string { return "player." + v.TeamKey + "." + v.Slot + "." + field }
-		heroPath := func(field string) string { return "hero." + v.TeamKey + "." + v.Slot + "." + field }
-		p := contracts.ParticipantObservationV1{SessionSlot: v.Slot, TeamKey: v.TeamKey,
-			TeamName: observedStringValue(v.TeamName, present(playerPath("team_name"))), PlayerSlot: observedIntPointer(v.PlayerSlot), HeroName: observedStringValue(v.HeroName, present(heroPath("name"))), HeroID: observedIntPointer(v.HeroID),
-			Gold: observedFloatPointer(v.Gold), NetWorth: observedFloatPointer(v.NetWorth), GPM: observedIntPointer(v.GPM), XPM: observedIntPointer(v.XPM), GoldReliable: observedFloatPointer(v.GoldReliable), GoldUnreliable: observedFloatPointer(v.GoldUnreliable), Kills: observedIntPointer(v.Kills), Deaths: observedIntPointer(v.Deaths), Assists: observedIntPointer(v.Assists), LastHits: observedIntPointer(v.LastHits), Denies: observedIntPointer(v.Denies), XPos: observedFloatPointer(v.XPos), YPos: observedFloatPointer(v.YPos), Health: observedFloatPointer(v.Health), MaxHealth: observedFloatPointer(v.MaxHealth), HealthPercent: observedFloatPointer(v.HealthPercent), Mana: observedFloatPointer(v.Mana), MaxMana: observedFloatPointer(v.MaxMana), ManaPercent: observedFloatPointer(v.ManaPercent), Alive: observedBoolPointer(v.Alive), RespawnSeconds: observedFloatPointer(v.RespawnSeconds), Level: observedIntPointer(v.Level), XP: observedFloatPointer(v.XP), BuybackCost: observedFloatPointer(v.BuybackCost), BuybackCooldown: observedFloatPointer(v.BuybackCooldown), Stunned: observedBoolPointer(v.Stunned), Silenced: observedBoolPointer(v.Silenced), Disarmed: observedBoolPointer(v.Disarmed), Hexed: observedBoolPointer(v.Hexed), Muted: observedBoolPointer(v.Muted), Break: observedBoolPointer(v.Break), HasDebuff: observedBoolPointer(v.HasDebuff), MagicImmune: observedBoolPointer(v.MagicImmune), Smoked: observedBoolPointer(v.Smoked), WardsPlaced: observedIntPointer(v.WardsPlaced), WardsDestroyed: observedIntPointer(v.WardsDestroyed), WardsPurchased: observedIntPointer(v.WardsPurchased), Items: mapItems(v.Items), Abilities: mapAbilities(v.Abilities)}
-		out = append(out, p)
 	}
 	return out
 }
 
-func mapItems(values []analytics.ItemSlot) []contracts.ItemObservationV1 {
-	out := make([]contracts.ItemObservationV1, 0, len(values))
-	for _, v := range values {
-		out = append(out, contracts.ItemObservationV1{Slot: v.Slot, Name: contracts.Present(v.Name), ItemLevel: observedIntPointer(v.ItemLevel), Cooldown: observedFloatPointer(v.Cooldown), MaxCooldown: observedFloatPointer(v.MaxCooldown), CanCast: observedBoolPointer(v.CanCast), Charges: observedIntPointer(v.Charges), Passive: observedBoolPointer(v.Passive)})
-	}
-	return out
-}
-func mapAbilities(values []analytics.AbilitySlot) []contracts.AbilityObservationV1 {
-	out := make([]contracts.AbilityObservationV1, 0, len(values))
-	for _, v := range values {
-		out = append(out, contracts.AbilityObservationV1{Slot: v.Slot, Name: contracts.Present(v.Name), Level: observedIntPointer(v.Level), Cooldown: observedFloatPointer(v.Cooldown), MaxCooldown: observedFloatPointer(v.MaxCooldown), CanCast: observedBoolPointer(v.CanCast), Passive: observedBoolPointer(v.Passive), Ultimate: observedBoolPointer(v.Ultimate)})
-	}
-	return out
-}
+type participantKey struct{ team, slot string }
 
-func observedIntPointer(v *int64) contracts.ObservedV1[int64] {
-	if v == nil {
-		return contracts.Absent[int64]()
+func mapParticipants(root map[string]any) []contracts.ParticipantObservationV1 {
+	sections := []map[string]any{mapValue(root, "player"), mapValue(root, "hero"), mapValue(root, "items"), mapValue(root, "abilities")}
+	keys := map[participantKey]bool{}
+	for _, section := range sections {
+		for _, team := range sortedKeys(section) {
+			for _, slot := range sortedKeys(mapValue(section, team)) {
+				keys[participantKey{team, slot}] = true
+			}
+		}
 	}
-	return contracts.Present(*v)
+	ordered := make([]participantKey, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].team == ordered[j].team {
+			return ordered[i].slot < ordered[j].slot
+		}
+		return ordered[i].team < ordered[j].team
+	})
+	if len(ordered) == 0 {
+		return nil
+	}
+	out := make([]contracts.ParticipantObservationV1, 0, len(ordered))
+	for _, k := range ordered {
+		p := mapValue(mapValue(mapValue(root, "player"), k.team), k.slot)
+		h := mapValue(mapValue(mapValue(root, "hero"), k.team), k.slot)
+		items := mapValue(mapValue(mapValue(root, "items"), k.team), k.slot)
+		abilities := mapValue(mapValue(mapValue(root, "abilities"), k.team), k.slot)
+		out = append(out, contracts.ParticipantObservationV1{SessionSlot: k.slot, TeamKey: k.team, TeamName: observedString(p, "team_name"), PlayerSlot: observedInt(p, "player_slot"), HeroName: observedString(h, "name"), HeroID: observedInt(h, "id"), Gold: observedDecimal(p, "gold"), NetWorth: observedDecimal(p, "net_worth"), GPM: observedInt(p, "gpm"), XPM: observedInt(p, "xpm"), GoldReliable: observedDecimal(p, "gold_reliable"), GoldUnreliable: observedDecimal(p, "gold_unreliable"), Kills: observedInt(p, "kills"), Deaths: observedInt(p, "deaths"), Assists: observedInt(p, "assists"), LastHits: observedInt(p, "last_hits"), Denies: observedInt(p, "denies"), XPos: observedDecimal(h, "xpos"), YPos: observedDecimal(h, "ypos"), Health: observedDecimal(h, "health"), MaxHealth: observedDecimal(h, "max_health"), HealthPercent: observedDecimal(h, "health_percent"), Mana: observedDecimal(h, "mana"), MaxMana: observedDecimal(h, "max_mana"), ManaPercent: observedDecimal(h, "mana_percent"), Alive: observedBool(h, "alive"), RespawnSeconds: observedDecimal(h, "respawn_seconds"), Level: observedInt(h, "level"), XP: observedDecimal(h, "xp"), BuybackCost: observedDecimal(h, "buyback_cost"), BuybackCooldown: observedDecimal(h, "buyback_cooldown"), Stunned: observedBool(h, "stunned"), Silenced: observedBool(h, "silenced"), Disarmed: observedBool(h, "disarmed"), Hexed: observedBool(h, "hexed"), Muted: observedBool(h, "muted"), Break: observedBool(h, "break"), HasDebuff: observedBool(h, "has_debuff"), MagicImmune: observedBool(h, "magicimmune"), Smoked: observedBool(h, "smoked"), WardsPlaced: observedInt(p, "wards_placed"), WardsDestroyed: observedInt(p, "wards_destroyed"), WardsPurchased: observedInt(p, "wards_purchased"), Items: mapItems(items), Abilities: mapAbilities(abilities)})
+	}
+	return out
 }
-func observedFloatPointer(v *float64) contracts.ObservedV1[float64] {
-	if v == nil {
-		return contracts.Absent[float64]()
+func mapItems(m map[string]any) []contracts.ItemObservationV1 {
+	if m == nil {
+		return nil
 	}
-	return contracts.Present(*v)
+	out := make([]contracts.ItemObservationV1, 0, len(m))
+	for _, slot := range sortedKeys(m) {
+		x := mapValue(m, slot)
+		charges := observedInt(x, "charges")
+		if charges.State == contracts.ValueAbsent {
+			charges = observedInt(x, "item_charges")
+		}
+		out = append(out, contracts.ItemObservationV1{Slot: slot, Name: observedString(x, "name"), ItemLevel: observedInt(x, "item_level"), Cooldown: observedDecimal(x, "cooldown"), MaxCooldown: observedDecimal(x, "max_cooldown"), CanCast: observedBool(x, "can_cast"), Charges: charges, Passive: observedBool(x, "passive")})
+	}
+	return out
 }
-func observedBoolPointer(v *bool) contracts.ObservedV1[bool] {
-	if v == nil {
-		return contracts.Absent[bool]()
+func mapAbilities(m map[string]any) []contracts.AbilityObservationV1 {
+	if m == nil {
+		return nil
 	}
-	return contracts.Present(*v)
+	out := make([]contracts.AbilityObservationV1, 0, len(m))
+	for _, slot := range sortedKeys(m) {
+		x := mapValue(m, slot)
+		out = append(out, contracts.AbilityObservationV1{Slot: slot, Name: observedString(x, "name"), Level: observedInt(x, "level"), Cooldown: observedDecimal(x, "cooldown"), MaxCooldown: observedDecimal(x, "max_cooldown"), CanCast: observedBool(x, "can_cast"), Passive: observedBool(x, "passive"), Ultimate: observedBool(x, "ultimate")})
+	}
+	return out
 }
-func observedStringValue(v string, present bool) contracts.ObservedV1[string] {
-	if !present {
-		return contracts.Absent[string]()
+func observedMatchID(root map[string]any) contracts.ObservedV1[string] {
+	if league := mapValue(root, "league"); league != nil {
+		if _, ok := league["match_id"]; ok {
+			return observedString(league, "match_id")
+		}
 	}
-	return contracts.Present(v)
+	return observedString(mapValue(root, "map"), "matchid")
 }
 func observedString(m map[string]any, key string) contracts.ObservedV1[string] {
 	v, ok := m[key]
@@ -131,36 +130,61 @@ func observedString(m map[string]any, key string) contracts.ObservedV1[string] {
 	}
 	return contracts.Present(s)
 }
+func observedBool(m map[string]any, key string) contracts.ObservedV1[bool] {
+	v, ok := m[key]
+	if !ok {
+		return contracts.Absent[bool]()
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return contracts.ObservedV1[bool]{State: contracts.ValueInvalid}
+	}
+	return contracts.Present(b)
+}
 func observedInt(m map[string]any, key string) contracts.ObservedV1[int64] {
 	v, ok := m[key]
 	if !ok {
 		return contracts.Absent[int64]()
 	}
-	switch n := v.(type) {
-	case json.Number:
-		i, e := n.Int64()
-		if e == nil {
-			return contracts.Present(i)
-		}
-	case float64:
-		return contracts.Present(int64(n))
-	case int64:
-		return contracts.Present(n)
+	n, ok := number(v)
+	if !ok {
+		return contracts.ObservedV1[int64]{State: contracts.ValueInvalid}
 	}
-	return contracts.ObservedV1[int64]{State: contracts.ValueInvalid}
+	return contracts.Present(int64(n))
 }
-func observedMatchID(root map[string]any, value string) contracts.ObservedV1[string] {
-	if league := mapValue(root, "league"); league != nil {
-		if _, ok := league["match_id"]; ok {
-			return observedStringValue(value, true)
-		}
+func observedDecimal(m map[string]any, key string) contracts.ObservedV1[contracts.Decimal] {
+	v, ok := m[key]
+	if !ok {
+		return contracts.Absent[contracts.Decimal]()
 	}
-	if m := mapValue(root, "map"); m != nil {
-		if _, ok := m["matchid"]; ok {
-			return observedStringValue(value, true)
-		}
+	n, ok := number(v)
+	if !ok {
+		return contracts.ObservedV1[contracts.Decimal]{State: contracts.ValueInvalid}
 	}
-	return contracts.Absent[string]()
+	return contracts.Present(contracts.Decimal(fmt.Sprintf("%.3f", n)))
+}
+func number(v any) (float64, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		n, e := x.Float64()
+		return n, e == nil
+	case float64:
+		return x, true
+	case float32:
+		return float64(x), true
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case string:
+		n, e := strconv.ParseFloat(x, 64)
+		return n, e == nil
+	}
+	return 0, false
 }
 func mapValue(m map[string]any, key string) map[string]any {
 	if m == nil {
@@ -168,4 +192,12 @@ func mapValue(m map[string]any, key string) map[string]any {
 	}
 	v, _ := m[key].(map[string]any)
 	return v
+}
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

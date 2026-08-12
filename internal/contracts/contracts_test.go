@@ -2,8 +2,11 @@ package contracts_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +21,7 @@ func TestGoldenContractsStrictRoundTrip(t *testing.T) {
 		new  func() contracts.Contract
 	}{
 		{"live_observation_v1.json", func() contracts.Contract { return &contracts.LiveObservationV1{} }},
+		{"tournament_scope_v1.json", func() contracts.Contract { return &contracts.TournamentScopeV1{} }},
 		{"historical_snapshot_manifest_v1.json", func() contracts.Contract { return &contracts.HistoricalSnapshotManifestV1{} }},
 		{"historical_baseline_v1.json", func() contracts.Contract { return &contracts.HistoricalBaselineV1{} }},
 		{"insight_candidate_v1.json", func() contracts.Contract { return &contracts.InsightCandidateV1{} }},
@@ -46,6 +50,17 @@ func TestGoldenContractsStrictRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if !bytes.Equal(bytes.TrimSpace(raw), got) {
+				t.Fatalf("golden bytes are not canonical\nwant %s\n got %s", bytes.TrimSpace(raw), got)
+			}
+			digest := sha256.Sum256(got)
+			wantHash, err := os.ReadFile(filepath.Join("testdata", tc.file+".sha256"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(wantHash)) != hex.EncodeToString(digest[:]) {
+				t.Fatalf("golden hash mismatch")
+			}
 			roundTripped := tc.new()
 			if err := contracts.DecodeStrict(got, roundTripped); err != nil {
 				t.Fatalf("canonical decode: %v", err)
@@ -58,6 +73,92 @@ func TestGoldenContractsStrictRoundTrip(t *testing.T) {
 				t.Fatal("canonical encoding is not stable")
 			}
 		})
+	}
+}
+
+func TestCanonicalReaderCompatibilityAndFloatRejection(t *testing.T) {
+	var decision contracts.BroadcastDecisionV1
+	input := []byte(`{"session_id":"s","schema_version":"broadcast_decision.v1","resulting_state":"shown","reason":"approved","prior_state":"queued","policy_time_ms":1,"policy_revision":1,"decision_id":"d","command_id":"c"}`)
+	if err := contracts.DecodeStrict(input, &decision); err != nil {
+		t.Fatal(err)
+	}
+	if err := decision.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := contracts.MarshalCanonical(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(got, []byte(`{"command_id":"c","decision_id":"d"`)) {
+		t.Fatalf("not RFC 8785 property order: %s", got)
+	}
+	if _, err := contracts.MarshalCanonical(struct {
+		Value float64 `json:"value"`
+	}{1.5}); err == nil {
+		t.Fatal("float accepted")
+	}
+}
+
+func TestGoldenCrossContractBindingsAndRecovery(t *testing.T) {
+	var scope contracts.TournamentScopeV1
+	readGolden(t, "tournament_scope_v1.json", &scope)
+	var manifest contracts.HistoricalSnapshotManifestV1
+	readGolden(t, "historical_snapshot_manifest_v1.json", &manifest)
+	if err := manifest.ValidateAgainstScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	var baseline contracts.HistoricalBaselineV1
+	readGolden(t, "historical_baseline_v1.json", &baseline)
+	if err := baseline.ValidateAgainst(manifest); err != nil {
+		t.Fatal(err)
+	}
+	var commit contracts.PolicyCommitV1
+	readGolden(t, "policy_commit_v1.json", &commit)
+	var checkpoint contracts.PolicyCheckpointV1
+	readGolden(t, "policy_checkpoint_v1.json", &checkpoint)
+	if err := checkpoint.ValidateAgainstCommit(commit); err != nil {
+		t.Fatal(err)
+	}
+	if !checkpoint.EmergencyHide || len(checkpoint.CommandResults) != 1 || len(checkpoint.Pins) != 1 {
+		t.Fatal("recovery fixture omits emergency-hide/idempotency/pin state")
+	}
+}
+
+func TestPersistedContractTypesContainNoFloatsOrMaps(t *testing.T) {
+	types := []reflect.Type{reflect.TypeOf(contracts.TournamentScopeV1{}), reflect.TypeOf(contracts.LiveObservationV1{}), reflect.TypeOf(contracts.HistoricalSnapshotManifestV1{}), reflect.TypeOf(contracts.HistoricalBaselineV1{}), reflect.TypeOf(contracts.InsightCandidateV1{}), reflect.TypeOf(contracts.BroadcastDecisionV1{}), reflect.TypeOf(contracts.OverlayStateV1{}), reflect.TypeOf(contracts.OperatorCommandV1{}), reflect.TypeOf(contracts.OperatorCommandResultV1{}), reflect.TypeOf(contracts.AuditEventV1{}), reflect.TypeOf(contracts.PolicyCommitV1{}), reflect.TypeOf(contracts.PolicyCheckpointV1{})}
+	seen := map[reflect.Type]bool{}
+	var visit func(reflect.Type)
+	visit = func(typ reflect.Type) {
+		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array {
+			typ = typ.Elem()
+		}
+		if seen[typ] {
+			return
+		}
+		seen[typ] = true
+		if typ.Kind() == reflect.Float32 || typ.Kind() == reflect.Float64 || typ.Kind() == reflect.Map {
+			t.Errorf("persisted contract contains forbidden %s: %s", typ.Kind(), typ)
+			return
+		}
+		if typ.Kind() == reflect.Struct && typ.PkgPath() == "github.com/PaulOctopusZLWB/dota2-ob/internal/contracts" {
+			for i := 0; i < typ.NumField(); i++ {
+				visit(typ.Field(i).Type)
+			}
+		}
+	}
+	for _, typ := range types {
+		visit(typ)
+	}
+}
+
+func readGolden(t *testing.T, name string, dst any) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := contracts.DecodeStrict(raw, dst); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -86,8 +187,8 @@ func TestContractSizeBounds(t *testing.T) {
 		value contracts.Contract
 	}{
 		{"overlay", &contracts.OverlayStateV1{SchemaVersion: contracts.OverlayStateSchemaV1, SessionID: "s", PublicationTimeMS: 1, StaleDeadlineMS: 2, Visibility: "hidden", HealthCode: strings.Repeat("x", contracts.MaxOverlayBytes)}},
-		{"audit", &contracts.AuditEventV1{SchemaVersion: contracts.AuditEventSchemaV1, EventID: "e", SessionID: "s", EventType: "candidate_created", PolicyTimeMS: 1, Reason: strings.Repeat("x", contracts.MaxAuditEventBytes)}},
-		{"policy", &contracts.PolicyCommitV1{SchemaVersion: contracts.PolicyCommitSchemaV1, SessionID: "s", CommitSequence: 1, ResultingStateHash: strings.Repeat("a", 64), Publication: "unchanged", AuditEvents: []contracts.AuditEventV1{{SchemaVersion: contracts.AuditEventSchemaV1, EventID: "e", SessionID: "s", EventType: "candidate_created", PolicyTimeMS: 1, Reason: strings.Repeat("x", contracts.MaxPolicyCommitBytes)}}}},
+		{"audit", &contracts.AuditEventV1{SchemaVersion: contracts.AuditEventSchemaV1, EventID: "e", SessionID: "s", EventType: "candidate_created", PolicyTimeMS: 1, CandidateID: "c", Reason: strings.Repeat("x", contracts.MaxAuditEventBytes)}},
+		{"policy", &contracts.PolicyCommitV1{SchemaVersion: contracts.PolicyCommitSchemaV1, SessionID: "s", CommitSequence: 1, ObservationSequence: 1, ResultingStateHash: strings.Repeat("a", 64), Publication: contracts.PublicationUnchanged, AuditEvents: []contracts.AuditEventV1{{SchemaVersion: contracts.AuditEventSchemaV1, EventID: "e", SessionID: "s", EventType: "candidate_created", PolicyTimeMS: 1, CandidateID: "c", Reason: strings.Repeat("x", contracts.MaxPolicyCommitBytes)}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,7 +214,7 @@ func TestOverlayRejectsForbiddenFieldsAndMarkup(t *testing.T) {
 func TestObservedNullabilityRejectsInconsistentStateAndValue(t *testing.T) {
 	state := contracts.OverlayStateV1{
 		SchemaVersion: contracts.OverlayStateSchemaV1, SessionID: "s", PublicationTimeMS: 1,
-		StaleDeadlineMS: 2, Visibility: "visible", DecisionID: "d", Claim: &contracts.OverlayClaimV1{Title: "safe", Body: "safe"},
+		StaleDeadlineMS: 2, Visibility: "visible", DecisionID: "d", Confidence: "observed", SourceReceiveTime: ptrTime(time.Unix(1, 0).UTC()), Claim: &contracts.OverlayClaimV1{Title: "safe", Body: "safe"},
 		Evidence: []contracts.EvidenceRefV1{{
 			RecordSchemaVersion: 2, SessionID: "s", Sequence: 1, ReceiveTime: time.Unix(1, 0).UTC(), Source: "gsi",
 			ProviderVersion: contracts.ObservedV1[int64]{State: contracts.ValuePresent}, RawPayloadSHA256: strings.Repeat("a", 64),
