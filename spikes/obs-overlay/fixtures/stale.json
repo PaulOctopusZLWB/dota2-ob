@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "stale", "renderSafe": false, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "lane-checkpoint",
+    "kicker": "禁止显示",
+    "title": "过期分析不得停留在直播画面",
+    "body": "该字段仅用于验证失败关闭边界，不得渲染。",
+    "evidence": "过期输入",
+    "confidenceLabel": "不可用",
+    "sourceLabel": "陈旧状态",
+    "ageLabel": "超过时限",
+    "asset": null
+  }
+}

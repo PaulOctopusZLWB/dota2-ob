@@ -1,3 +1,19 @@
 /data/sessions/*
 !/data/sessions/.gitkeep
+
+# Replay spike data: raw professional .dem/.dem.bz2 replays, parsed fact
+# JSON, batch state, and measurement outputs are reproducible artifacts that
+# stay under the canonical local data root and out of git. They never contain
+# credentials, but raw replays are large licensed content and parsed facts may
+# embed match/player identifiers, so they are local-only by default.
+/data/replays/*
+!/data/replays/.gitkeep
+/data/replay-facts/*
+!/data/replay-facts/.gitkeep
+
 /data/*.log
+/spikes/obs-overlay/node_modules/
+/spikes/obs-overlay/test-results/
+/web/browser/node_modules/
+/web/browser/test-results/
+/web/browser/playwright-report/
