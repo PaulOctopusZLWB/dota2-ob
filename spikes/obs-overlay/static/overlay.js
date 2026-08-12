@@ -41,6 +41,7 @@
 
   let lastSafeAt = null;
   let maxSilenceMs = 1250;
+  let latestRequestGeneration = 0;
 
   function hasOnlyKeys(value, allowed) {
     return value && typeof value === "object" && !Array.isArray(value) &&
@@ -105,6 +106,7 @@
   }
 
   async function refresh() {
+    const requestGeneration = ++latestRequestGeneration;
     if (!allowedFixtures.has(fixture)) {
       hide("invalid-fixture");
       return;
@@ -113,12 +115,14 @@
       const response = await fetch(`/fixtures/${fixture}.json`, { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error(`fixture request failed: ${response.status}`);
       const state = await response.json();
+      if (requestGeneration !== latestRequestGeneration) return;
       if (!isValidState(state)) {
         hide("invalid-state");
         return;
       }
       render(state);
     } catch {
+      if (requestGeneration !== latestRequestGeneration) return;
       if (lastSafeAt === null) hide("disconnected");
     }
   }

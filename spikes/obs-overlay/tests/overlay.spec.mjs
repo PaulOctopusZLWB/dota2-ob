@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 
 const families = [
   "draft-context",
@@ -12,6 +13,13 @@ const canvases = [
   { name: "1080p", width: 1920, height: 1080 },
   { name: "1440p", width: 2560, height: 1440 }
 ];
+
+const fixtureBodies = new Map(
+  ["healthy", "stale", "emergency-hide"].map((name) => [
+    name,
+    readFileSync(new URL(`../fixtures/${name}.json`, import.meta.url), "utf8")
+  ])
+);
 
 async function openFixture(page, fixture) {
   await page.goto(`/?fixture=${fixture}`);
@@ -41,6 +49,54 @@ async function expectNoOverflow(page) {
     };
   });
   expect(result).toEqual({ insideViewport: true, cardOverflow: false, sectionsOrdered: true, clippedText: [] });
+}
+
+async function expectNewerUnsafeResponseToWin(page, unsafeOutcome) {
+  const unsafeBody = unsafeOutcome === "malformed"
+    ? JSON.stringify({ schemaVersion: "overlay-state/v1", rawGsi: { player: "forbidden" } })
+    : fixtureBodies.get(unsafeOutcome);
+  await page.addInitScript(({ healthyBody, unsafeBody, unsafeOutcome }) => {
+    const response = (body) => new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+    let releaseDelayedHealthy;
+    window.__overlayPollCount = 0;
+    window.__releaseDelayedHealthy = () => releaseDelayedHealthy();
+    window.fetch = async () => {
+      window.__overlayPollCount += 1;
+      if (window.__overlayPollCount === 1) return response(healthyBody);
+      if (window.__overlayPollCount === 2) {
+        return new Promise((resolve) => {
+          releaseDelayedHealthy = () => resolve(response(healthyBody));
+        });
+      }
+      if (window.__overlayPollCount === 3) {
+        if (unsafeOutcome === "disconnected") throw new TypeError("connection failed");
+        return response(unsafeBody);
+      }
+      // Keep subsequent polls pending so only the deliberately ordered
+      // responses below can affect the assertion.
+      return new Promise(() => {});
+    };
+  }, { healthyBody: fixtureBodies.get("healthy"), unsafeBody, unsafeOutcome });
+
+  await openFixture(page, "healthy");
+  await expect.poll(() => page.evaluate(() => window.__overlayPollCount)).toBeGreaterThanOrEqual(3);
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden", { timeout: 2_000 });
+
+  await page.evaluate(() => {
+    window.__visibleAfterUnsafe = false;
+    const observer = new MutationObserver(() => {
+      if (document.body.dataset.renderState === "visible") window.__visibleAfterUnsafe = true;
+    });
+    observer.observe(document.body, { attributes: true, attributeFilter: ["data-render-state"] });
+    window.__releaseDelayedHealthy();
+  });
+  await page.waitForTimeout(350);
+  expect(await page.evaluate(() => window.__visibleAfterUnsafe)).toBe(false);
+  expect(await page.locator("body").getAttribute("data-render-state")).toBe("hidden");
+  expect(await page.locator("#claim").isHidden()).toBe(true);
 }
 
 test("uses a transparent canvas and localhost resources only", async ({ page }) => {
@@ -139,3 +195,9 @@ test("connection loss hides within two seconds and a valid response reconnects",
   await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible", { timeout: 2_000 });
   await expect(page.locator("#claim")).toBeVisible();
 });
+
+for (const unsafeOutcome of ["stale", "malformed", "disconnected", "emergency-hide"]) {
+  test(`an older healthy response cannot revive claims after newer ${unsafeOutcome}`, async ({ page }) => {
+    await expectNewerUnsafeResponseToWin(page, unsafeOutcome);
+  });
+}
