@@ -201,3 +201,18 @@ for (const unsafeOutcome of ["stale", "malformed", "disconnected", "emergency-hi
     await expectNewerUnsafeResponseToWin(page, unsafeOutcome);
   });
 }
+
+test("a healthy response slower than the poll interval still renders", async ({ page }) => {
+  await page.addInitScript((healthyBody) => {
+    window.fetch = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return new Response(healthyBody, {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    };
+  }, fixtureBodies.get("healthy"));
+
+  await page.goto("/?fixture=healthy");
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible", { timeout: 2_000 });
+});

@@ -21,9 +21,10 @@ PaulPC4090 inventory during this run:
   installed, no Flatpak or Snap OBS application is registered, and no
   `obs-browser.so` or `libcef.so` was found under `/usr` or `/app`.
 
-Therefore Browser Source availability, OBS CEF rendering, OBS compositing, and
-OBS source CPU/memory are exact environment blockers. No software was installed
-and no existing OBS profile or scene was read or modified.
+Those facts were the exact DOT-30 environment blocker. DOT-34 subsequently
+installed and measured the user-scoped Flatpak package described below without
+using `sudo` or the deployment checkout. No pre-existing OBS profile or scene
+was read or modified.
 
 ## Decision
 
@@ -83,14 +84,61 @@ shared pages across Chrome processes; PSS is the more defensible memory measure.
 This short spike sample is not the M3 60-minute OBS recording gate.
 
 Fresh verification passed `go test ./...`, `go vet ./...`, `go build ./...`,
-JavaScript syntax checks, and all 19 Playwright tests. The host exposes
+JavaScript syntax checks, and all 24 Playwright tests. The host exposes
 `CGO_ENABLED=0` and no `gcc`, so `go test -race ./...` cannot start; race testing
 remains an environment limitation rather than a passing claim.
 
+### Real OBS follow-up (DOT-34)
+
+The follow-up installed `com.obsproject.Studio/x86_64/stable` as a user Flatpak
+at commit
+`a3a5cbd575a1ab74c239cd3fd6903377377a43ef65e936271f655d458dc520b4`.
+The measured stack is OBS 32.2.1, Browser Source 2.26.9, CEF
+127.0.6533.120, Qt 6.11.1, Freedesktop 25.08, and OpenGL 3.3 on the RTX 4090
+with NVIDIA 595.84. Browser Source hardware acceleration was disabled by its
+driver blacklist, so this result exercises its software-composited path.
+
+OBS ran with `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_CACHE_HOME` exported
+inside the Flatpak sandbox to an issue-local directory. Two audio-free profiles
+and scenes used native 1920x1080 and 2560x1440 canvases and matching Browser
+Source dimensions. The real CEF pass rendered all five families, the longest
+Chinese fixture, and the missing-asset fallback without clipping, overlap, or
+layout shift. Known-color sources behind the browser page remained visible
+outside the card, confirming transparent compositing. Stale, disconnected, and
+emergency fixtures hid the complete card; Playwright retains malformed-schema
+coverage.
+
+After a healthy warmup, killing the loopback server hid the OBS card in an
+observed 1,428 ms and restarting it restored the card in 477 ms. The capture
+probe sampled about every 235 ms, so these are conservative observed bounds,
+not exact renderer callback durations.
+
+The final 1440p steady sample used a 10-second warmup and a 30-second window at
+five-second intervals. OBS averaged 2.43% CPU and active CEF processes 1.27%; the
+combined OBS/CEF process tree used 721,321 KiB PSS and 59 MiB GPU framebuffer.
+Preview held 60/60 FPS. The complete non-recording run reported a 0.506 ms
+graphics-thread p99 and 99.9523% of calls below the 16.667 ms frame budget.
+
+A separate 17.941-second 2560x1440 NVENC recording made output counters
+observable: 1,076 frames were output, 1,058 of 1,099 attempted frames were
+drawn, 41 frames (3.7%) lagged in rendering, and 41 of 1,093 frames (3.8%) were
+skipped for encoding lag. The recorded frame is correct, but this short
+startup-inclusive result is a residual performance risk for the later M3
+60-minute recording gate.
+
+The final OBS pass ran in an unprivileged network namespace whose routing table
+contained loopback only. CEF connections were exclusively to
+`127.0.0.1:18838`; OBS update attempts failed immediately because no remote
+route existed. The overlay server still exposes only GET/HEAD fixture and
+static routes, so the page cannot call a state-changing operator endpoint.
+Sanitized measurements are committed in
+`spikes/obs-overlay/evidence/obs-measurement.json`.
+
 ## Consequences
 
-Browser rendering and failure behavior are reproducible without Dota, capture,
-analytics, a database, OBS, or credentials. The branch cannot claim Linux OBS
-Browser Source acceptance until the bounded manual procedure in the spike
-README is completed on a host with OBS and its Browser Source plugin. CEF-specific
-font, CSS, alpha, refresh-flash, and resource behavior remain residual risks.
+Browser rendering and failure behavior remain reproducible without Dota,
+capture, analytics, a database, or credentials. DOT-34 removes the Linux OBS,
+CEF, font, alpha, and reconnect feasibility blocker on PaulPC4090. Browser
+hardware acceleration is unavailable with this OBS/driver combination, and the
+short recording's render/encode lag remains a measured risk for the production
+duration gate.

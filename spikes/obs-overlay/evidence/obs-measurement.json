@@ -1,0 +1,81 @@
+{
+  "measuredAt": "2026-08-12T18:53:25+08:00",
+  "host": {
+    "os": "Ubuntu 24.04.4 LTS",
+    "session": "X11",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "driver": "595.84",
+    "opengl": "3.3.0 NVIDIA 595.84"
+  },
+  "obs": {
+    "version": "32.2.1",
+    "package": "com.obsproject.Studio/x86_64/stable",
+    "flatpakCommit": "a3a5cbd575a1ab74c239cd3fd6903377377a43ef65e936271f655d458dc520b4",
+    "runtime": "org.freedesktop.Platform/x86_64/25.08",
+    "qtRuntime": "6.11.1",
+    "browserSource": "2.26.9",
+    "cefRuntime": "127.0.6533.120",
+    "browserHardwareAcceleration": "disabled by obs-browser driver blacklist"
+  },
+  "visual": {
+    "canvases": [
+      {"width": 1920, "height": 1080, "fps": 60},
+      {"width": 2560, "height": 1440, "fps": 60}
+    ],
+    "verifiedFixtures": [
+      "draft-context",
+      "lane-checkpoint",
+      "item-timing-long",
+      "objective-exchange",
+      "teamfight-readiness",
+      "missing-asset",
+      "stale",
+      "disconnected",
+      "emergency-hide"
+    ],
+    "transparentOverKnownColor": true,
+    "longestChineseStringClipped": false,
+    "missingAssetShiftedLayout": false
+  },
+  "failureRecovery": {
+    "pollIntervalMs": 250,
+    "measurementSamplingApproxMs": 235,
+    "connectionLossToHiddenObservedMs": 1428,
+    "serverRecoveryToVisibleObservedMs": 477,
+    "staleHidden": true,
+    "disconnectedHidden": true,
+    "emergencyHidden": true,
+    "malformedCoveredByPlaywright": true
+  },
+  "steady1440p": {
+    "warmupSeconds": 10,
+    "sampleSeconds": 30,
+    "sampleIntervalSeconds": 5,
+    "obsCpuPercent": 2.43,
+    "activeBrowserCpuPercent": 1.27,
+    "overlayServerCpuPercent": 0.07,
+    "obsAndBrowserPssKiB": 721321,
+    "gpuFramebufferMiB": 59,
+    "previewFps": 60,
+    "graphicsThreadP99Ms": 0.506,
+    "graphicsThreadPercentUnderFrameBudget": 99.9523
+  },
+  "recording1440p": {
+    "durationSeconds": 17.941,
+    "encoder": "NVENC H.264",
+    "framesOutput": 1076,
+    "drawnFrames": 1058,
+    "attemptedFrames": 1099,
+    "renderLaggedFrames": 41,
+    "renderLagPercent": 3.7,
+    "encodingSkippedFrames": 41,
+    "encodingAttemptedFrames": 1093,
+    "encodingSkipPercent": 3.8
+  },
+  "network": {
+    "isolation": "unprivileged network namespace with loopback as the only route",
+    "browserConnections": ["127.0.0.1:18838"],
+    "remoteConnectionsPossible": false,
+    "obsRemoteUpdateAttemptsBlocked": true
+  }
+}

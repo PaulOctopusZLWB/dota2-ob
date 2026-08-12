@@ -59,10 +59,14 @@ The measured host has `CGO_ENABLED=0` and no C compiler, so the Go race detector
 cannot run there. This does not affect the standard tests above, but remains a
 verification limitation.
 
-## Bounded OBS verification after OBS is available
+## Bounded OBS verification
 
-OBS is not installed on the measured host, so its Browser Source CEF could not
-be exercised in this run. Do not modify an existing broadcast collection.
+DOT-34 completed this procedure with user Flatpak OBS 32.2.1 and Browser Source
+2.26.9 on PaulPC4090. The exact measured package commit, CEF/GPU versions,
+failure timing, resource sample, output-frame counters, and residual risks are
+recorded in `docs/adr/2026-08-12-obs-overlay-spike.md` and
+`evidence/obs-measurement.json`. Do not modify an existing broadcast
+collection when repeating it.
 
 1. Start the loopback server with the command above.
 2. In OBS, create a profile named `DOT-30 Overlay Spike` and a scene collection
@@ -73,8 +77,24 @@ be exercised in this run. Do not modify an existing broadcast collection.
    Switch the URL through `item-timing-long`, `missing-asset`, `stale`,
    `disconnected`, and `emergency-hide`.
 5. Stop the Go process with `Ctrl-C`. Delete only the profile and scene
-   collection named `DOT-30 Overlay Spike` through the OBS menus.
+   collection created for the spike through the OBS menus.
 
 This manual step is intentionally bounded by unique names. It does not require
 or expose an obs-websocket password and does not overwrite Paul's profiles or
 scenes.
+
+The reproducible user install and package identity commands are:
+
+```bash
+flatpak install --user -y flathub com.obsproject.Studio
+flatpak info --user --show-commit com.obsproject.Studio
+flatpak run --user --command=obs com.obsproject.Studio --version
+```
+
+For a fully isolated validation, export issue-local XDG directories from an
+inner Flatpak shell before executing `obs`; Flatpak itself rewrites XDG
+variables passed through `flatpak run --env`. Run OBS and the overlay server in
+the same unprivileged network namespace with only loopback enabled when the
+test must prove that CEF cannot reach remote resources. The package can later
+be removed with `flatpak uninstall --user com.obsproject.Studio`; delete only
+the issue-local XDG directory used by the spike.
