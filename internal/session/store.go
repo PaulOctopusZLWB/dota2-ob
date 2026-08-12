@@ -41,6 +41,7 @@ type Store struct {
 	openFile  OpenRawFile
 	file      RawFile
 	sequence  uint64
+	highWater *HighWater
 	sealed    bool
 	closed    bool
 	mu        sync.Mutex
@@ -76,6 +77,10 @@ func WithRawFile(open OpenRawFile) Option {
 	}
 }
 
+func WithHighWater(highWater *HighWater) Option {
+	return func(store *Store) { store.highWater = highWater }
+}
+
 func NewStore(root string, opts ...Option) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("session root is required")
@@ -104,12 +109,16 @@ func NewStore(root string, opts ...Option) (*Store, error) {
 			return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 		}
 	}
+	if store.highWater == nil {
+		store.highWater = NewHighWater(store.sessionID, store.sequence)
+	}
 	return store, nil
 }
 
-func (s *Store) SessionID() string  { return s.sessionID }
-func (s *Store) SessionDir() string { return filepath.Join(s.root, s.sessionID) }
-func (s *Store) RawPath() string    { return filepath.Join(s.SessionDir(), "raw.jsonl") }
+func (s *Store) SessionID() string     { return s.sessionID }
+func (s *Store) SessionDir() string    { return filepath.Join(s.root, s.sessionID) }
+func (s *Store) RawPath() string       { return filepath.Join(s.SessionDir(), "raw.jsonl") }
+func (s *Store) HighWater() *HighWater { return s.highWater }
 
 func (s *Store) Append(raw []byte) (*Record, error) {
 	payload, err := decodeJSON(raw)
@@ -152,6 +161,9 @@ func (s *Store) Append(raw []byte) (*Record, error) {
 		return nil, ErrAppendFailed
 	}
 	s.sequence = next
+	if s.highWater != nil {
+		s.highWater.Publish(next)
+	}
 	return record, nil
 }
 

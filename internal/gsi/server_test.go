@@ -1,6 +1,7 @@
 package gsi_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -24,17 +26,33 @@ import (
 
 type failingProjection struct{}
 
-func (failingProjection) Apply(*session.Record) error {
+func (failingProjection) Apply(context.Context, *session.Record) error {
 	return errors.New("do not expose this path /home/private")
 }
 
 type barrierProjection struct{ entered, release chan struct{} }
 
-func (p barrierProjection) Apply(*session.Record) error { close(p.entered); <-p.release; return nil }
+func (p barrierProjection) Apply(ctx context.Context, _ *session.Record) error {
+	close(p.entered)
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type stubbornProjection struct{ entered, release chan struct{} }
+
+func (p stubbornProjection) Apply(context.Context, *session.Record) error {
+	close(p.entered)
+	<-p.release
+	return nil
+}
 
 type countingProjection struct{ calls int }
 
-func (p *countingProjection) Apply(*session.Record) error { p.calls++; return nil }
+func (p *countingProjection) Apply(context.Context, *session.Record) error { p.calls++; return nil }
 
 type sealingRawFile struct {
 	writes int
@@ -118,9 +136,10 @@ func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.
 		t.Fatal(err)
 	}
 	tracker := operator.NewTracker(store.SessionID(), now, 15*time.Second, func() time.Time { return now })
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(failingProjection{}))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithLiveProjections(failingProjection{}))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"map":{"game_time":1}}`))
 	if err != nil {
@@ -136,11 +155,26 @@ func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.
 		t.Fatal(err)
 	}
 	defer statusResp.Body.Close()
-	var status operator.Snapshot
+	var status struct {
+		operator.Snapshot
+		LiveProjection liveprojection.Health `json:"live_projection"`
+	}
 	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || status.ActiveFailures[operator.SubsystemLatest].Code != "latest_failed" {
+	deadline := time.Now().Add(time.Second)
+	for !status.LiveProjection.Degraded && time.Now().Before(deadline) {
+		statusResp.Body.Close()
+		time.Sleep(time.Millisecond)
+		statusResp, err = http.Get(server.URL + "/api/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || !status.LiveProjection.Degraded || status.LiveProjection.ProjectedSequence != 0 {
 		t.Fatalf("status = %#v", status)
 	}
 	encoded, _ := json.Marshal(status)
@@ -164,8 +198,7 @@ func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
 	now := time.Now().UTC()
 	tracker := operator.NewTracker("drain", now, time.Minute, time.Now)
 	entered, release := make(chan struct{}), make(chan struct{})
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(barrierProjection{entered, release}))
-	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithLiveProjections(barrierProjection{entered, release}))
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	response := make(chan string, 1)
@@ -180,18 +213,52 @@ func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
 		response <- string(body)
 	}()
 	<-entered
+	select {
+	case body := <-response:
+		if body != "ok\n" {
+			t.Fatalf("body=%q", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted response waited for blocked projection")
+	}
 	drained := make(chan struct{})
 	go func() { handler.Wait(); close(drained) }()
 	select {
 	case <-drained:
-		t.Fatal("Wait returned before projection/response")
+		t.Fatal("Wait returned before projector drain")
 	default:
 	}
 	close(release)
-	if body := <-response; body != "ok\n" {
-		t.Fatalf("body=%q", body)
-	}
 	<-drained
+}
+
+func TestServerWaitBoundsBlockedProjectorDrain(t *testing.T) {
+	store, _ := session.NewStore(t.TempDir(), session.WithSessionID("bounded-drain"))
+	entered, release := make(chan struct{}), make(chan struct{})
+	handler := gsi.NewServer(store, gsi.WithLiveProjections(stubbornProjection{entered, release}), gsi.WithProjectionDrainTimeout(20*time.Millisecond))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	<-entered
+	started := time.Now()
+	handler.Wait()
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded drain took %s", elapsed)
+	}
+	close(release)
+	cursorPath := filepath.Join(store.SessionDir(), "live_projection_cursor.json")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(cursorPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("projector did not finish after release")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestGSIPostRejectsMalformedJSONWithoutPersisting(t *testing.T) {
@@ -230,9 +297,11 @@ func TestGSIPostRejectsOversizedBodyWithoutRawOrProjection(t *testing.T) {
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projection := &countingProjection{}
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	processor := capture.NewProcessor(store, tracker)
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(projection))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(strings.Repeat("x", (10<<20)+1)))
 	if err != nil {
 		t.Fatal(err)
@@ -262,9 +331,11 @@ func TestRepeatedPostsAfterSealedFailureReturn503WithoutWritesOrProjections(t *t
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projection := &countingProjection{}
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection), capture.WithFailureLogger(func(string, string) {}))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	processor := capture.NewProcessor(store, tracker, capture.WithFailureLogger(func(string, string) {}))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(projection))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 	for i := 0; i < 3; i++ {
 		resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"attempt":1}`))
 		if err != nil {
@@ -350,6 +421,10 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("valid POST status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	deadline := time.Now().Add(time.Second)
+	for latest.Snapshot("latest-gsi").SnapshotCount != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 
 	resp, err = http.Get(server.URL + "/api/latest")
@@ -532,8 +607,10 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		t.Fatalf("NewStore returned error: %v", err)
 	}
 	engine := analytics.NewEngine()
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(engine)))
+	handler := gsi.NewServer(store, gsi.WithAnalytics(engine))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	first := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
 	second := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
@@ -544,6 +621,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		resp.Body.Close()
 	}
 	// First accepted snapshot must update tick count but derive no events.
+	waitForTickCount(t, engine, 1)
 	if got := engine.TickCount(); got != 1 {
 		t.Fatalf("tick count after first = %d, want 1", got)
 	}
@@ -556,6 +634,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	} else {
 		resp.Body.Close()
 	}
+	waitForTickCount(t, engine, 2)
 	if got := engine.TickCount(); got != 2 {
 		t.Fatalf("tick count after second = %d, want 2", got)
 	}
@@ -586,6 +665,143 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	// Analytics summary files are materialized under the session dir.
 	if _, err := os.Stat(filepath.Join(root, "analytics-live", "analytics_summary.md")); err != nil {
 		t.Fatalf("analytics summary not written: %v", err)
+	}
+}
+
+func TestRestartRebuildsFreshLiveAdaptersForEveryCursorState(t *testing.T) {
+	for _, tc := range []struct{ name, cursor string }{
+		{name: "valid", cursor: `{"session_id":"restart-live","sequence":2}`},
+		{name: "stale", cursor: `{"session_id":"restart-live","sequence":1}`},
+		{name: "missing"},
+		{name: "corrupt", cursor: `not-json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := session.NewStore(root, session.WithSessionID("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+			second := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+			if _, err := store.Append([]byte(first)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append([]byte(second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cursorPath := filepath.Join(root, "restart-live", "live_projection_cursor.json")
+			if tc.cursor != "" {
+				if err := os.WriteFile(cursorPath, []byte(tc.cursor), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reopened, err := session.NewStore(root, session.WithSessionID("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			latest := state.NewLatest()
+			profiler := profile.NewProfiler()
+			engine := analytics.NewEngine()
+			handler := gsi.NewServer(reopened, gsi.WithLatest(latest), gsi.WithProfiler(profiler), gsi.WithAnalytics(engine))
+			waitForTickCount(t, engine, 2)
+			if got := latest.Snapshot("restart-live"); got.Status != "ok" || got.SnapshotCount != 2 {
+				t.Fatalf("latest=%#v", got)
+			}
+			if got := profiler.Snapshot(); got.SnapshotCount != 2 {
+				t.Fatalf("profile=%#v", got)
+			}
+			if got := engine.Snapshot("restart-live"); got.TickCount != 2 || !containsEvent(got.RecentEvents, analytics.EventHeroDeath) {
+				t.Fatalf("analytics=%#v", got)
+			}
+			handler.Wait()
+			_ = reopened.Close()
+		})
+	}
+}
+
+func TestProfileRetryAfterSummaryFailureDoesNotDoubleApplyEvidence(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("profile-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(store.SessionDir(), "session_summary.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	profiler := profile.NewProfiler()
+	handler := gsi.NewServer(store, gsi.WithProfiler(profiler))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"hero":{"team2":{"player0":{"alive":true}}}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for profiler.Snapshot().SnapshotCount == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := profiler.Snapshot().SnapshotCount; got != 1 {
+		t.Fatalf("profile retry count=%d, want 1", got)
+	}
+	handler.Wait()
+	_ = store.Close()
+}
+
+func TestAnalyticsRetryAfterSummaryFailureDoesNotDoubleApplyTransition(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("analytics-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := analytics.NewEngine()
+	handler := gsi.NewServer(store, gsi.WithAnalytics(engine))
+	first := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+	second := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+	post := func(body string) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d", rec.Code)
+		}
+	}
+	post(first)
+	waitForTickCount(t, engine, 1)
+	summaryPath := filepath.Join(store.SessionDir(), "analytics_summary.json")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(summaryPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first summary not written")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(summaryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(summaryPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	post(second)
+	waitForTickCount(t, engine, 2)
+	time.Sleep(30 * time.Millisecond)
+	snap := engine.Snapshot("analytics-retry")
+	if snap.TickCount != 2 || snap.EventCounts[analytics.EventHeroDeath] != 1 {
+		t.Fatalf("analytics retry=%#v", snap)
+	}
+	handler.Wait()
+	_ = store.Close()
+}
+
+func waitForTickCount(t *testing.T, engine *analytics.Engine, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for engine.TickCount() != want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 }
 
