@@ -118,7 +118,7 @@ func NewServer(store *session.Store, opts ...Option) *Server {
 		projections = server.projectionOverrides
 	}
 	if len(projections) > 0 {
-		server.projector = liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "live_projection_cursor.json"), projections)
+		server.projector = liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "live_projection_cursor.json"), projections, liveprojection.WithHighWater(store.HighWater()))
 		projectorContext, cancel := context.WithCancel(context.Background())
 		server.projectorCancel = cancel
 		server.projectorDone = make(chan error, 1)

@@ -664,6 +664,135 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	}
 }
 
+func TestRestartRebuildsFreshLiveAdaptersForEveryCursorState(t *testing.T) {
+	for _, tc := range []struct{ name, cursor string }{
+		{name: "valid", cursor: `{"session_id":"restart-live","sequence":2}`},
+		{name: "stale", cursor: `{"session_id":"restart-live","sequence":1}`},
+		{name: "missing"},
+		{name: "corrupt", cursor: `not-json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := session.NewStore(root, session.WithSessionID("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+			second := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+			if _, err := store.Append([]byte(first)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append([]byte(second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cursorPath := filepath.Join(root, "restart-live", "live_projection_cursor.json")
+			if tc.cursor != "" {
+				if err := os.WriteFile(cursorPath, []byte(tc.cursor), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reopened, err := session.NewStore(root, session.WithSessionID("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			latest := state.NewLatest()
+			profiler := profile.NewProfiler()
+			engine := analytics.NewEngine()
+			handler := gsi.NewServer(reopened, gsi.WithLatest(latest), gsi.WithProfiler(profiler), gsi.WithAnalytics(engine))
+			waitForTickCount(t, engine, 2)
+			if got := latest.Snapshot("restart-live"); got.Status != "ok" || got.SnapshotCount != 2 {
+				t.Fatalf("latest=%#v", got)
+			}
+			if got := profiler.Snapshot(); got.SnapshotCount != 2 {
+				t.Fatalf("profile=%#v", got)
+			}
+			if got := engine.Snapshot("restart-live"); got.TickCount != 2 || !containsEvent(got.RecentEvents, analytics.EventHeroDeath) {
+				t.Fatalf("analytics=%#v", got)
+			}
+			handler.Wait()
+			_ = reopened.Close()
+		})
+	}
+}
+
+func TestProfileRetryAfterSummaryFailureDoesNotDoubleApplyEvidence(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("profile-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(store.SessionDir(), "session_summary.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	profiler := profile.NewProfiler()
+	handler := gsi.NewServer(store, gsi.WithProfiler(profiler))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"hero":{"team2":{"player0":{"alive":true}}}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for profiler.Snapshot().SnapshotCount == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := profiler.Snapshot().SnapshotCount; got != 1 {
+		t.Fatalf("profile retry count=%d, want 1", got)
+	}
+	handler.Wait()
+	_ = store.Close()
+}
+
+func TestAnalyticsRetryAfterSummaryFailureDoesNotDoubleApplyTransition(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("analytics-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := analytics.NewEngine()
+	handler := gsi.NewServer(store, gsi.WithAnalytics(engine))
+	first := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+	second := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+	post := func(body string) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d", rec.Code)
+		}
+	}
+	post(first)
+	waitForTickCount(t, engine, 1)
+	summaryPath := filepath.Join(store.SessionDir(), "analytics_summary.json")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(summaryPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first summary not written")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(summaryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(summaryPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	post(second)
+	waitForTickCount(t, engine, 2)
+	time.Sleep(30 * time.Millisecond)
+	snap := engine.Snapshot("analytics-retry")
+	if snap.TickCount != 2 || snap.EventCounts[analytics.EventHeroDeath] != 1 {
+		t.Fatalf("analytics retry=%#v", snap)
+	}
+	handler.Wait()
+	_ = store.Close()
+}
+
 func waitForTickCount(t *testing.T, engine *analytics.Engine, want uint64) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

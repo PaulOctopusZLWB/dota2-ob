@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,38 @@ type liveCursor struct {
 	SessionID string `json:"session_id"`
 	Sequence  uint64 `json:"sequence"`
 }
+type CursorFile interface {
+	io.Writer
+	Name() string
+	Chmod(os.FileMode) error
+	Close() error
+}
+type CursorIO interface {
+	CreateTemp(dir, pattern string) (CursorFile, error)
+	Remove(path string) error
+	Rename(oldPath, newPath string) error
+}
+type osCursorIO struct{}
+
+func (osCursorIO) CreateTemp(dir, pattern string) (CursorFile, error) {
+	return os.CreateTemp(dir, pattern)
+}
+func (osCursorIO) Remove(path string) error             { return os.Remove(path) }
+func (osCursorIO) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
+
+type LiveFollowerOption func(*LiveFollower)
+
+func WithCursorIO(ops CursorIO) LiveFollowerOption {
+	return func(f *LiveFollower) {
+		if ops != nil {
+			f.cursorIO = ops
+		}
+	}
+}
+func WithFollowerHighWater(highWater *HighWater) LiveFollowerOption {
+	return func(f *LiveFollower) { f.highWater = highWater }
+}
+
 type LiveFollower struct {
 	sessionID, rawPath, cursorPath string
 	projections                    []LiveProjection
@@ -40,14 +73,30 @@ type LiveFollower struct {
 	oldestLagAt                    time.Time
 	pendingSequence                uint64
 	nextProjection                 int
+	cachedSequence                 uint64
+	highWater                      *HighWater
+	cursorIO                       CursorIO
 }
 
-func NewLiveFollower(sessionID, rawPath, cursorPath string, projections []LiveProjection) *LiveFollower {
-	return &LiveFollower{sessionID: sessionID, rawPath: rawPath, cursorPath: cursorPath, projections: append([]LiveProjection(nil), projections...)}
+func NewLiveFollower(sessionID, rawPath, cursorPath string, projections []LiveProjection, opts ...LiveFollowerOption) *LiveFollower {
+	f := &LiveFollower{sessionID: sessionID, rawPath: rawPath, cursorPath: cursorPath, projections: append([]LiveProjection(nil), projections...), cursorIO: osCursorIO{}}
+	for _, opt := range opts {
+		opt(f)
+	}
+	if f.highWater != nil {
+		f.health.HighWater = f.highWater.Current().Sequence
+		f.health.LagCount = f.health.HighWater
+		f.health.Degraded = f.health.LagCount > 0
+		if f.health.HighWater > 0 {
+			f.oldestLagAt, _ = f.recordReceivedAt(1)
+		}
+	}
+	return f
 }
 func (f *LiveFollower) Health() LiveProjectionHealth {
 	f.healthMu.Lock()
 	defer f.healthMu.Unlock()
+	f.refreshHighWaterLocked()
 	health := f.health
 	if health.LagCount > 0 && !f.oldestLagAt.IsZero() {
 		health.OldestLagAge = time.Since(f.oldestLagAt)
@@ -64,16 +113,17 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 		return f.fail(ErrOutOfOrderHighWater)
 	}
 	if !f.loaded {
-		projected := f.loadCursor(highWater)
-		f.healthMu.Lock()
-		f.health.ProjectedSequence = projected
-		f.healthMu.Unlock()
+		// Cursor is a cache of completed work, not a durable adapter checkpoint.
+		// Rebuild fresh process-local adapters through it from authoritative raw,
+		// then resume durable cursor replacement at cached sequence + 1.
+		f.cachedSequence = f.loadCursor(highWater)
 		f.loaded = true
 	}
 	f.healthMu.Lock()
 	if highWater > f.health.HighWater {
 		f.health.HighWater = highWater
 	}
+	f.refreshHighWaterLocked()
 	f.updateLagLocked()
 	projected := f.health.ProjectedSequence
 	f.healthMu.Unlock()
@@ -85,6 +135,11 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 		return f.fail(err)
 	}
 	for _, record := range records {
+		f.healthMu.Lock()
+		if f.oldestLagAt.IsZero() {
+			f.oldestLagAt = record.ReceivedAt
+		}
+		f.healthMu.Unlock()
 		start := 0
 		if f.pendingSequence == record.Sequence {
 			start = f.nextProjection
@@ -101,14 +156,24 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 			}
 			f.nextProjection = index + 1
 		}
-		if err := f.writeCursor(record.Sequence); err != nil {
-			return f.fail(err)
+		if record.Sequence > f.cachedSequence {
+			if err := f.writeCursor(record.Sequence); err != nil {
+				return f.fail(err)
+			}
+			f.cachedSequence = record.Sequence
 		}
 		f.healthMu.Lock()
 		f.health.ProjectedSequence = record.Sequence
 		f.pendingSequence = 0
 		f.nextProjection = 0
 		f.health.LastError = ""
+		if record.Sequence < f.health.HighWater {
+			if at, err := f.recordReceivedAt(record.Sequence + 1); err == nil {
+				f.oldestLagAt = at
+			}
+		} else {
+			f.oldestLagAt = time.Time{}
+		}
 		f.updateLagLocked()
 		f.healthMu.Unlock()
 	}
@@ -195,7 +260,7 @@ func (f *LiveFollower) readRange(from, through uint64) ([]*Record, error) {
 	return records, nil
 }
 func (f *LiveFollower) writeCursor(sequence uint64) error {
-	tmp, err := os.CreateTemp(filepath.Dir(f.cursorPath), ".live-projection-cursor-*.tmp")
+	tmp, err := f.cursorIO.CreateTemp(filepath.Dir(f.cursorPath), ".live-projection-cursor-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create cursor temp: %w", err)
 	}
@@ -203,7 +268,7 @@ func (f *LiveFollower) writeCursor(sequence uint64) error {
 	remove := true
 	defer func() {
 		if remove {
-			_ = os.Remove(tmpPath)
+			_ = f.cursorIO.Remove(tmpPath)
 		}
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
@@ -212,7 +277,12 @@ func (f *LiveFollower) writeCursor(sequence uint64) error {
 	}
 	data, err := json.Marshal(liveCursor{SessionID: f.sessionID, Sequence: sequence})
 	if err == nil {
-		_, err = tmp.Write(append(data, '\n'))
+		line := append(data, '\n')
+		var n int
+		n, err = tmp.Write(line)
+		if err == nil && n != len(line) {
+			err = io.ErrShortWrite
+		}
 	}
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
@@ -220,7 +290,7 @@ func (f *LiveFollower) writeCursor(sequence uint64) error {
 	if err != nil {
 		return fmt.Errorf("write cursor: %w", err)
 	}
-	if err := os.Rename(tmpPath, f.cursorPath); err != nil {
+	if err := f.cursorIO.Rename(tmpPath, f.cursorPath); err != nil {
 		return fmt.Errorf("rename cursor: %w", err)
 	}
 	remove = false
@@ -237,6 +307,26 @@ func (f *LiveFollower) updateLagLocked() {
 		f.oldestLagAt = time.Time{}
 	}
 	f.health.Degraded = f.health.LagCount > 0 || f.health.LastError != ""
+}
+func (f *LiveFollower) refreshHighWaterLocked() {
+	if f.highWater != nil {
+		if current := f.highWater.Current().Sequence; current > f.health.HighWater {
+			f.health.HighWater = current
+		}
+	}
+	f.updateLagLocked()
+	if f.health.LagCount > 0 && f.oldestLagAt.IsZero() {
+		if at, err := f.recordReceivedAt(f.health.ProjectedSequence + 1); err == nil {
+			f.oldestLagAt = at
+		}
+	}
+}
+func (f *LiveFollower) recordReceivedAt(sequence uint64) (time.Time, error) {
+	records, err := f.readRange(sequence, sequence)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return records[0].ReceivedAt, nil
 }
 func (f *LiveFollower) fail(err error) error {
 	message := err.Error()

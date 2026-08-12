@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -166,8 +167,8 @@ func TestFollowerResumesAfterValidCursorAndDeduplicatesHighWater(t *testing.T) {
 	if err := follower.CatchUp(context.Background(), 3); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(projection.sequences, []uint64{3}) {
-		t.Fatalf("resume/deduplicate = %v", projection.sequences)
+	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2, 3}) {
+		t.Fatalf("fresh process rebuild/deduplicate = %v", projection.sequences)
 	}
 }
 
@@ -246,6 +247,161 @@ func TestFollowerHealthRemainsBoundedWhileProjectionIsBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFollowerHealthUsesCommittedStoreHighWaterAndAuthoritativeOldestLagAge(t *testing.T) {
+	root := t.TempDir()
+	receivedAt := time.Now().Add(-2 * time.Hour).UTC()
+	store, err := session.NewStore(root, session.WithSessionID("saturated"), session.WithClock(func() time.Time { return receivedAt }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "cursor.json"), []liveprojection.Projection{blockingProjection{entered, release}}, liveprojection.WithHighWater(store.HighWater()))
+	done := make(chan error, 1)
+	go func() { done <- follower.CatchUp(context.Background(), 1) }()
+	<-entered
+	if _, err := store.Append([]byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"sequence":3}`)); err != nil {
+		t.Fatal(err)
+	}
+	health := follower.Health()
+	if health.HighWater != 3 || health.ProjectedSequence != 0 || health.LagCount != 3 || health.OldestLagAge < 90*time.Minute || !health.Degraded {
+		t.Fatalf("saturated health=%#v", health)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFollowerRestartBacklogHealthUsesRawReceiveTimeBeforeProjectionStarts(t *testing.T) {
+	root := t.TempDir()
+	receivedAt := time.Now().Add(-3 * time.Hour).UTC()
+	store, err := session.NewStore(root, session.WithSessionID("restart-backlog"), session.WithClock(func() time.Time { return receivedAt }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendRecordsUsing(t, store, 2)
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "cursor.json"), []liveprojection.Projection{&recordingProjection{}}, liveprojection.WithHighWater(store.HighWater()))
+	health := follower.Health()
+	if health.HighWater != 2 || health.ProjectedSequence != 0 || health.LagCount != 2 || health.OldestLagAge < 150*time.Minute || !health.Degraded {
+		t.Fatalf("restart health=%#v", health)
+	}
+}
+
+type cursorFaultIO struct {
+	fault  string
+	target string
+	data   []byte
+}
+type cursorFaultFile struct{ owner *cursorFaultIO }
+
+func (f cursorFaultFile) Name() string            { return f.owner.target + ".tmp" }
+func (f cursorFaultFile) Chmod(os.FileMode) error { return nil }
+func (f cursorFaultFile) Write(p []byte) (int, error) {
+	if f.owner.fault == "write" {
+		return 0, errors.New("write failed")
+	}
+	if f.owner.fault == "short-write" {
+		f.owner.data = append([]byte(nil), p[:len(p)/2]...)
+		return len(p) / 2, nil
+	}
+	f.owner.data = append([]byte(nil), p...)
+	return len(p), nil
+}
+func (f cursorFaultFile) Close() error {
+	if f.owner.fault == "close" {
+		return errors.New("close failed")
+	}
+	return nil
+}
+func (o *cursorFaultIO) CreateTemp(string, string) (liveprojection.CursorFile, error) {
+	if o.fault == "create" {
+		return nil, errors.New("create failed")
+	}
+	return cursorFaultFile{o}, nil
+}
+func (o *cursorFaultIO) Remove(string) error { return nil }
+func (o *cursorFaultIO) Rename(string, string) error {
+	if o.fault == "rename" {
+		return errors.New("rename failed")
+	}
+	if o.fault == "interrupt" {
+		_ = os.Remove(o.target)
+		return errors.New("interrupted")
+	}
+	return os.WriteFile(o.target, o.data, 0o600)
+}
+
+func TestFollowerCursorReplacementFailuresLeaveOnlyOldNewOrMissingCache(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{name: "create", want: "old"}, {name: "write", want: "old"}, {name: "short-write", want: "old"}, {name: "close", want: "old"}, {name: "rename", want: "old"}, {name: "interrupt", want: "missing"}, {name: "success", want: "new"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := appendRecords(t, root, "cursor-fault", 1)
+			cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+			old := []byte(`{"session_id":"cursor-fault","sequence":0}`)
+			if err := os.WriteFile(cursorPath, old, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ops := &cursorFaultIO{fault: tc.name, target: cursorPath}
+			follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{&recordingProjection{}}, liveprojection.WithCursorIO(ops))
+			err := follower.CatchUp(context.Background(), 1)
+			if tc.want != "new" && err == nil {
+				t.Fatal("cursor fault succeeded")
+			}
+			data, readErr := os.ReadFile(cursorPath)
+			switch tc.want {
+			case "old":
+				if readErr != nil || !reflect.DeepEqual(data, old) {
+					t.Fatalf("outcome data=%q err=%v", data, readErr)
+				}
+			case "missing":
+				if !errors.Is(readErr, os.ErrNotExist) {
+					t.Fatalf("outcome data=%q err=%v", data, readErr)
+				}
+			case "new":
+				if err != nil || readErr != nil || reflect.DeepEqual(data, old) {
+					t.Fatalf("outcome data=%q read=%v catchup=%v", data, readErr, err)
+				}
+			}
+		})
+	}
+}
+
+func TestFollowerReconstructsThroughValidCursorWithoutReplacingIt(t *testing.T) {
+	root := t.TempDir()
+	store := appendRecords(t, root, "valid-cache", 2)
+	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+	old := []byte(`{"session_id":"valid-cache","sequence":2}`)
+	if err := os.WriteFile(cursorPath, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projection := &recordingProjection{}
+	ops := &cursorFaultIO{fault: "create", target: cursorPath}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithCursorIO(ops))
+	if err := follower.CatchUp(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2}) {
+		t.Fatalf("reconstruction=%v", projection.sequences)
+	}
+	data, err := os.ReadFile(cursorPath)
+	if err != nil || !reflect.DeepEqual(data, old) {
+		t.Fatalf("cursor data=%q err=%v", data, err)
+	}
+}
+
+var _ io.Writer = cursorFaultFile{}
 
 func appendRecordsUsing(t *testing.T, store *session.Store, count int) {
 	t.Helper()
