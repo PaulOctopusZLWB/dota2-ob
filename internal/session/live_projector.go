@@ -193,7 +193,11 @@ func (f *LiveFollower) Run(ctx context.Context, updates <-chan HighWaterMark) er
 				continue
 			}
 			for {
-				if err := f.CatchUp(ctx, mark.Sequence); err == nil {
+				target := mark.Sequence
+				if f.highWater != nil {
+					target = f.highWater.Current().Sequence
+				}
+				if err := f.CatchUp(ctx, target); err == nil {
 					break
 				}
 				timer := time.NewTimer(10 * time.Millisecond)

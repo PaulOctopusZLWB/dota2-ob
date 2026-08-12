@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,35 @@ import (
 type recordingProjection struct {
 	sequences []uint64
 	failAt    uint64
+}
+
+type recoverableProjection struct {
+	mu        sync.Mutex
+	failing   bool
+	calls     []uint64
+	successes []uint64
+}
+
+func (p *recoverableProjection) Apply(_ context.Context, record *session.Record) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, record.Sequence)
+	if p.failing {
+		return errors.New("temporary failure")
+	}
+	p.successes = append(p.successes, record.Sequence)
+	return nil
+}
+func (p *recoverableProjection) recover() { p.mu.Lock(); p.failing = false; p.mu.Unlock() }
+func (p *recoverableProjection) snapshot() []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]uint64(nil), p.calls...)
+}
+func (p *recoverableProjection) successful() []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]uint64(nil), p.successes...)
 }
 
 type blockingProjection struct{ entered, release chan struct{} }
@@ -221,6 +251,51 @@ func TestFollowerRunDrainsCoalescedHighWaterAndStopsBoundedly(t *testing.T) {
 	}
 	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2, 3}) {
 		t.Fatalf("run order = %v", projection.sequences)
+	}
+}
+
+func TestFollowerInternalRetryCatchesUpAfterHealthRefreshesNewerHighWater(t *testing.T) {
+	root := t.TempDir()
+	wake := session.NewHighWater("retry-health", 0)
+	store, err := session.NewStore(root, session.WithSessionID("retry-health"), session.WithHighWater(wake))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := &recoverableProjection{failing: true}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "cursor.json"), []liveprojection.Projection{projection}, liveprojection.WithHighWater(store.HighWater()))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- follower.Run(ctx, wake.C()) }()
+	if _, err := store.Append([]byte(`{"sequence":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(projection.snapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := store.Append([]byte(`{"sequence":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	health := follower.Health()
+	if health.HighWater != 2 || health.ProjectedSequence != 0 || health.LagCount != 2 {
+		t.Fatalf("health=%#v", health)
+	}
+	projection.recover()
+	deadline = time.Now().Add(time.Second)
+	for follower.Health().ProjectedSequence != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	health = follower.Health()
+	if health.HighWater != 2 || health.ProjectedSequence != 2 || health.LagCount != 0 || health.Degraded || health.LastError == liveprojection.ErrOutOfOrderHighWater.Error() {
+		t.Fatalf("recovered health=%#v calls=%v", health, projection.snapshot())
+	}
+	if successes := projection.successful(); !reflect.DeepEqual(successes, []uint64{1, 2}) {
+		t.Fatalf("successful order=%v all calls=%v", successes, projection.snapshot())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

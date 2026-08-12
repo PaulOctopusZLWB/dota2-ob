@@ -422,6 +422,10 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("valid POST status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
+	deadline := time.Now().Add(time.Second)
+	for latest.Snapshot("latest-gsi").SnapshotCount != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 
 	resp, err = http.Get(server.URL + "/api/latest")
 	if err != nil {
