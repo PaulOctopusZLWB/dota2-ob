@@ -38,14 +38,18 @@ Source of truth:
 - Two real current-patch professional replays downloaded from Valve's public
   replay CDN, discovered through the OpenDota public metadata API:
 
-  | match_id | league | patch | duration | compressed bytes | decompressed bytes |
-  |---|---|---|---|---|---|
-  | 8941092540 | EPL Masters 2026 (professional) | 22 (build 6896) | 3297s | 79,166,058 | 134,628,308 |
-  | 8940891805 | EPL Masters 2026 (professional) | 22 (build 6896) | 2807s | 65,070,664 | 112,605,718 |
+  | match_id | league | gameplay patch | replay format ver | duration | compressed bytes | decompressed bytes |
+  |---|---|---|---|---|---|---|
+  | 8941092540 | EPL Masters 2026 (professional) | 60 / Dota 7.41 | 22 | 3297s | 79,166,058 | 134,628,308 |
+  | 8940891805 | EPL Masters 2026 (professional) | 60 / Dota 7.41 | 22 | 2807s | 65,070,664 | 112,605,718 |
 
-  Raw `.dem`/`.dem.bz2` files stay under `data/replays/` (git-ignored) and are
-  never committed or attached; only the measurements and their content hashes
-  are reported here.
+  Provenance note: OpenDota metadata exposes two distinct version fields.
+  `patch` (id 60) is the gameplay patch, resolved through the OpenDota patch
+  catalog (`/api/constants/patch`) to Dota **7.41** (released 2026-03-24).
+  `version` (22) is the per-replay demo protocol/format revision, **not** the
+  gameplay patch. Raw `.dem`/`.dem.bz2` files stay under `data/replays/`
+  (git-ignored) and are never committed or attached; only the measurements and
+  their content hashes are reported here.
 
 - OpenDota match metadata API: `https://api.opendota.com/api/matches/<matchID>`
   returns `replay_url`, `cluster`, `version`, league tier, team names, duration,
@@ -83,9 +87,32 @@ replay-decryption salts do not apply. The spike uses no Game Coordinator login,
 no Steam password, no cookies, no replay-salt automation, no Dota UI automation,
 and no packet or memory access. This stays inside the accepted safety boundary.
 
+### Untrusted-input boundary (acquisition hardening)
+
+The acquisition surface treats OpenDota metadata and the Valve CDN as
+untrusted input and defends it explicitly (reviewed hardening):
+
+- `matchID` is validated as numeric and length-bounded so it cannot carry path
+  separators or escape the `data/replays/<matchID>.dem` filename slot.
+- The `replay_url` from OpenDota is validated before any fetch: scheme must be
+  `http`/`https` and the host must match the Valve replay CDN allowlist
+  `replay<digits>.valve.net` exactly, so a malicious redirect to an untrusted
+  host is rejected before download.
+- All HTTP calls go through one bounded client (90s timeout) with bounded bodies:
+  metadata/patch-catalog ≤ 4 MiB, download ≤ 1 GiB compressed,
+  decompression ≤ 4 GiB decompressed. A zstd bomb or oversized response is
+  rejected by the limit, not by disk exhaustion.
+- Download and decompression stream to exclusive `*.tmp` files (never the final
+  path), validate magic (zstd `28 b5 2f fd`, then `PBDEMS2`) and content
+  SHA-256, fsync/close, and only then atomically rename over the canonical path.
+  Any failure removes the temp file so a short/oversized/rewind body never looks
+  canonical. Partial cleanup runs on every failure path.
+- This is testable without network via `cmd/replay-spike/main_test.go`
+  (numeric-matchID, host allowlist/scheme, and magic validation).
+
 ## Parser Evaluation
 
-| Parser | Language | License | Maintained | Source 2 / patch 22 | Choice |
+| Parser | Language | License | Maintained | Source 2 / Dota 7.41 | Choice |
 |---|---|---|---|---|---|
 | `dotabuff/manta` v1.5.0 | Go | MIT | pushed 2026-07-01, not archived | yes (verified) | **selected** |
 | `skadistats/clarity` | Java | BSD-2 | yes | yes | unavailable (no JVM on PaulPC4090) |
@@ -154,43 +181,78 @@ Unavailable inside the safety boundary:
 Both replays were parsed twice; the second pass produced a byte-identical
 content hash each time.
 
-| match_id | raw bytes | facts JSON bytes | facts sha256 (pass 1 = pass 2) | elapsed | peak heap | GC | combat entries | heroes | timeline |
-|---|---|---|---|---|---|---|---|---|---|
-| 8941092540 | 134,628,308 | 17,955 | `04b4af44a9692c28311e21060656d42960f39e0009b6d73b38e5c51998c26951` | ~1.63s | 59-63 MiB | 36 | 115,165 | 10 | 67 |
-| 8940891805 | 112,605,718 | 15,413 | `f6b01a82d3446a74b008628a06f5904acacb3596e6961b0dc6f620e3867f2b1e` | ~1.34s | 56-60 MiB | 32 | 96,196 | 10 | 53 |
+| match_id | raw bytes | facts JSON bytes | facts sha256 (pass 1 = pass 2) | elapsed | user CPU | system CPU | peak heap | GC | combat entries | heroes | timeline |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 8941092540 | 134,628,308 | 18,130 | `d53feb20765a20f8731342770f9644a021d87d8fe6e9e8cd5ba550c2510b59d5` | ~1.64s | ~2.08s | ~0.07s | 62-64 MiB | 36 | 115,165 | 10 | 67 |
+| 8940891805 | 112,605,718 | 15,588 | `3dd6d472a2d20472d75bdecf0bd7e12fc8ffc29978f3bc47917c0dd8fa73c143` | ~1.37s | ~1.73s | ~0.06s | 56-60 MiB | 32 | 96,196 | 10 | 53 |
 
-`deterministic: true` on both. Parse cost is small and single-threaded; on a
-32-core/61 GiB host this is far below any live-process contention risk, which
-was a program principle (replay work must not compete with the live broadcast).
+`deterministic: true` on both. CPU is process-level user/system seconds from
+`getrusage(RUSAGE_SELF)`, measured across the parse call only (the 25ms heap
+sampler goroutine is joined before return so resource cleanup is deterministic).
+On a 32-core/61 GiB host this is far below any live-process contention risk,
+which was a program principle (replay work must not compete with the live
+broadcast).
 
-## Batch Behavior (resume, dedupe, terminal failure)
+## Batch Behavior (resume, dedupe, terminal failure, checkpoint safety)
 
 `internal/replay/batch.go` implements an idempotent, manifest-driven state
 machine with explicit `queued / running / succeeded / failed_terminal` states,
 content-addressed dedupe, bounded retries, and a dead-letter (terminal) state.
-State is persisted after every entry so an interruption resumes without
-duplicate work or duplicate facts.
+State is persisted via atomic write (temp file, fsync, rename) after every
+state transition, and any checkpoint failure is propagated (not ignored)
+because resume safety is lost if the on-disk state diverges from in-memory
+state.
+
+Content identity is enforced, not assumed: on resume a succeeded entry is
+re-hashed and the fresh SHA-256 is compared with the stored digest; a changed
+file is reprocessed rather than silently skipped. A terminal entry is skipped
+before hashing on resume (no re-attempt, no re-increment). The manifest is
+validated up front: empty entries, empty identities/paths, and duplicate
+`match_id` values (which would collide in the state map) are rejected.
 
 Evidence run over a four-entry manifest (two matches, one duplicate of the first
 demo, one missing path):
 
 ```
-8940891805           succeeded        attempts=1 facts=f6b01a82d344 content=fd166d89374d err=""
-8941092540           succeeded        attempts=1 facts=04b4af44a969 content=3b100ca7c930 err=""
-8941092540_dup       succeeded        attempts=0 facts=04b4af44a969 content=3b100ca7c930 err=""
+batch error: replay: terminal failures for 1 entry(ies): missing_demo
+8940891805           succeeded        attempts=1 facts=3dd6d472a2d2 content=fd166d89374d err=""
+8941092540           succeeded        attempts=1 facts=d53feb20765a content=3b100ca7c930 err=""
+8941092540_dup       succeeded        attempts=0 facts=d53feb20765a content=3b100ca7c930 err=""
 missing_demo         failed_terminal  attempts=1 facts= content= err="verify: open data/replays/does_not_exist.dem: no such file or directory"
 summary: succeeded=3 queued=0 running=0 failed=1
 ```
 
+- The CLI exits **nonzero (1)** whenever the final state holds any terminal
+  entry, on both the first run and a resume re-run, so `failed=1` does not read
+  as success to an operator or CI. The whole bounded manifest is processed
+  before the aggregate terminal error is returned (a terminal entry does not
+  skip later entries).
 - The duplicate input (`8941092540_dup`) reused the first parse (`attempts=0`,
   identical facts hash and content hash) and produced no second facts artifact.
-- Exactly two content-addressed facts files were written (one per distinct
-  content), total `data/replay-facts/` size 92 KiB.
+- Exactly two content-addressed facts files plus two provenance sidecars were
+  written (one per distinct content), total `data/replay-facts/` size ~37 KiB.
 - The missing demo reached `failed_terminal` after the bounded attempt with a
   terminal reason. A resume re-run left both succeeded and terminal entries
-  unchanged and rewrote no facts file (mtimes unchanged), proving no duplicate
-  work on resume. The no-duplicate-work guarantee is additionally covered by
-  focused unit tests (`internal/replay/batch_test.go`).
+  unchanged (`attempts` stable) and rewrote no facts file, proving no duplicate
+  work on resume. The no-duplicate-work, content-change-detection,
+  checkpoint-propagation, aggregate-terminal, and manifest-validation
+  guarantees are covered by focused unit tests (`internal/replay/batch_test.go`).
+
+## Provenance And Self-Describing Facts
+
+`ReplayFactsV1` (schema `replay.facts.spike.v2`) embeds a `Provenance` envelope
+pinning `dotabuff/manta v1.5.0`, `internal/replay spike.v2`, and the schema
+version inside the deterministic output, so a parser/adapter/schema upgrade
+changes the content hash. The facts hold no wall clock and no input digest, so
+the content hash is still a deterministic function of (demo bytes, pinned
+versions).
+
+The batch runner also writes a `ProvenanceSidecar` (`<full-sha256>.provenance.json`)
+alongside each facts artifact, keyed by the **full** decompressed-demo SHA-256
+with the matching facts hash, match id, and pinned parser/adapter/schema
+versions, plus a wall-clock `generated_at` for human inspection. Facts and
+sidecar filenames use the full digest (not a truncated prefix) to avoid
+collisions and to keep the input identity recoverable from the filesystem.
 
 ## Storage Recommendation
 
@@ -242,8 +304,10 @@ git diff --check
 ```
 
 Expected: all packages pass; `internal/replay` covers deterministic aggregation,
-hero/name filtering, timeline ordering, batch resume, dedupe, terminal failure,
-and idempotent restore.
+hero/name filtering, timeline ordering, batch resume, content-change detection,
+checkpoint-failure propagation, aggregate terminal signaling, manifest
+validation, and idempotent restore. `cmd/replay-spike` covers numeric-matchID,
+Valve-host allowlist/scheme, and magic validation (no network).
 
 Manual reproducible spike (requires network + ~300 MiB local; raw files stay
 git-ignored under `data/`):
@@ -262,15 +326,17 @@ JSON
 ./spike batch ./data/replay-facts/manifest.json --max-retries 1
 ```
 
-Expected: `deterministic: true` for each `parse --twice`; batch `succeeded=`
-count meeting the manifest; resume re-runs leave succeeded entries and fact
-artifacts unchanged.
+Expected: `deterministic: true` for each `parse --twice`; `acquire` prints
+`replay_format_version=22 patch_id=60 patch_name="7.41"`; batch `succeeded=`
+count meeting the manifest and exits nonzero when the final state holds a
+terminal entry; resume re-runs leave succeeded entries and fact artifacts
+unchanged.
 
 ## Acceptance Mapping
 
 - At least two safely available current-patch professional replays parse twice
-  with deterministic normalized output: met (8941092540 and 8940891805, patch
-  22, `deterministic: true`).
+  with deterministic normalized output: met (8941092540 and 8940891805, gameplay
+  patch 60 / Dota 7.41, replay format version 22, `deterministic: true`).
 - Acquisition/parser/storage decisions evidence-backed; no GC credential or
   account automation: met (OpenDota metadata + Valve public CDN + manta; no
   credentials, no GC, no salts/automation).

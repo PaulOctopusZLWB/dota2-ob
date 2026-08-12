@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/dotabuff/manta"
@@ -13,8 +14,13 @@ import (
 )
 
 // Metrics are the measured parse costs reported alongside the facts.
+// UserCPUSec/SystemCPUSec are process CPU seconds from getrusage(RUSAGE_SELF),
+// measured across the parse call only, so multi-process hosts do not inflate
+// them. PeakHeapMiB is the largest Alloc observed by the 25ms sampler.
 type Metrics struct {
 	ElapsedSec      float64 `json:"elapsed_sec"`
+	UserCPUSec      float64 `json:"user_cpu_sec"`
+	SystemCPUSec    float64 `json:"system_cpu_sec"`
 	PeakHeapMiB     uint64  `json:"peak_heap_mib"`
 	NumGC           uint32  `json:"num_gc"`
 	Goroutines      int     `json:"goroutines"`
@@ -86,8 +92,10 @@ func ParseStream(reader io.Reader, rawDecompressedBytes int64) (*ParseResult, er
 	})
 
 	stop := make(chan struct{})
+	stopped := make(chan struct{})
 	var peak uint64
 	go func() {
+		defer close(stopped)
 		t := time.NewTicker(25 * time.Millisecond)
 		defer t.Stop()
 		var s runtime.MemStats
@@ -104,17 +112,32 @@ func ParseStream(reader io.Reader, rawDecompressedBytes int64) (*ParseResult, er
 		}
 	}()
 
+	var ru0 syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru0); err != nil {
+		ru0 = syscall.Rusage{}
+	}
 	t0 := time.Now()
 	perr := p.Start()
-	close(stop)
 	elapsed := time.Since(t0)
+	close(stop)
+	<-stopped // join the sampler goroutine so resource cleanup is deterministic
+
+	var ru1 syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru1); err != nil {
+		ru1 = syscall.Rusage{}
+	}
 
 	c.LastTick = p.Tick
 	c.LastNetTick = p.NetTick
 	c.GameBuild = p.GameBuild
 	c.MaxTimestamp = maxTs
 
-	m := Metrics{ElapsedSec: elapsed.Seconds(), RawDecompressed: rawDecompressedBytes}
+	m := Metrics{
+		ElapsedSec:      elapsed.Seconds(),
+		UserCPUSec:      rusageSeconds(ru1.Utime, ru0.Utime),
+		SystemCPUSec:    rusageSeconds(ru1.Stime, ru0.Stime),
+		RawDecompressed: rawDecompressedBytes,
+	}
 	if peak > 0 {
 		m.PeakHeapMiB = atomic.LoadUint64(&peak) / (1 << 20)
 	} else {
@@ -156,4 +179,11 @@ func ParseFile(path string) (*ParseResult, error) {
 	}
 	defer f.Close()
 	return ParseStream(f, info.Size())
+}
+
+// rusageSeconds returns the CPU seconds used between two timeval values
+// (tv_sec + tv_usec/1e6). rusage Utime/Stime are syscall.Timeval on Linux.
+func rusageSeconds(end, start syscall.Timeval) float64 {
+	us := int64(end.Sec-start.Sec)*1_000_000 + int64(end.Usec-start.Usec)
+	return float64(us) / 1_000_000.0
 }

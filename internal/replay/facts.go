@@ -8,8 +8,6 @@ import (
 	"strings"
 )
 
-const FactsSchemaVersion = "replay.facts.spike.v1"
-
 const heroPrefix = "npc_dota_hero_"
 
 // Availability records which fact families the spike successfully extracted
@@ -58,23 +56,38 @@ type TimelineEvent struct {
 	Value     int64   `json:"value"`
 }
 
+// Provenance pins the code that produced the facts inside the deterministic
+// output, so a parser/adapter/schema upgrade changes the content hash. It
+// carries no wall clock and no input digest; the input digest is recorded in
+// the separate ProvenanceSidecar persisted by the batch runner, keyed by the
+// full SHA-256 of the decompressed demo.
+type Provenance struct {
+	ParserName     string `json:"parser_name"`
+	ParserVersion  string `json:"parser_version"`
+	AdapterName    string `json:"adapter_name"`
+	AdapterVersion string `json:"adapter_version"`
+	SchemaVersion  string `json:"schema_version"`
+}
+
 // ReplayFactsV1 is the spike-level normalized fact set produced from one
-// decompressed Source 2 replay. It is derived purely from the demo bytes and
-// contains no acquisition metadata, so a deterministic parse of identical
-// bytes yields byte-identical JSON and an identical content hash.
+// decompressed Source 2 replay. It is derived purely from the demo bytes plus
+// the pinned parser/adapter/schema versions, and contains no acquisition
+// metadata or wall clock, so a deterministic parse of identical bytes with the
+// same code yields byte-identical JSON and an identical content hash.
 //
 // This is provisional M0 feasibility evidence. It is NOT the accepted
 // HistoricalBaselineV1 contract, which is owned by a separate contract track.
 type ReplayFactsV1 struct {
-	SchemaVersion        string            `json:"schema_version"`
-	Availability         Availability      `json:"availability"`
-	Meta                 MatchMeta          `json:"meta"`
-	MessageCounts        map[string]uint64 `json:"message_counts"`
-	CombatLogTotal       uint64            `json:"combat_log_total"`
-	CombatLogTypeCounts  map[string]uint64 `json:"combat_log_type_counts"`
-	Heroes               []HeroFacts        `json:"heroes"`
-	ItemUses             map[string]uint64 `json:"item_uses"`
-	Timeline             []TimelineEvent   `json:"timeline"`
+	SchemaVersion       string            `json:"schema_version"`
+	Provenance          Provenance        `json:"provenance"`
+	Availability        Availability      `json:"availability"`
+	Meta                MatchMeta          `json:"meta"`
+	MessageCounts       map[string]uint64 `json:"message_counts"`
+	CombatLogTotal      uint64            `json:"combat_log_total"`
+	CombatLogTypeCounts map[string]uint64 `json:"combat_log_type_counts"`
+	Heroes              []HeroFacts        `json:"heroes"`
+	ItemUses            map[string]uint64 `json:"item_uses"`
+	Timeline            []TimelineEvent   `json:"timeline"`
 }
 
 // CombatEvent is one combat-log entry collected by the parser adapter with
@@ -108,7 +121,14 @@ func isHero(name string) bool { return strings.HasPrefix(name, heroPrefix) }
 // All maps and slices are sorted before returning so serialization is stable.
 func BuildFacts(c *Collected) *ReplayFactsV1 {
 	f := &ReplayFactsV1{
-		SchemaVersion: FactsSchemaVersion,
+		SchemaVersion: FactsSchema,
+		Provenance: Provenance{
+			ParserName:     ParserName,
+			ParserVersion:  ParserVersion,
+			AdapterName:    AdapterName,
+			AdapterVersion: AdapterVersion,
+			SchemaVersion:  FactsSchema,
+		},
 		Availability: Availability{
 			Available: []string{
 				"match_header",
