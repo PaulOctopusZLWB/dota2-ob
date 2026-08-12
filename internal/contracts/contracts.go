@@ -427,7 +427,7 @@ func (v HistoricalSnapshotManifestV1) Validate() error {
 	if v.SchemaVersion != HistoricalSnapshotManifestSchemaV1 {
 		return schemaError(HistoricalSnapshotManifestSchemaV1, v.SchemaVersion)
 	}
-	if v.SnapshotID == "" || v.SnapshotID != v.ContentSHA256 || v.TournamentScopeID == "" || !isSHA(v.TournamentScopeSHA256) || v.Binding.SessionID == "" || v.Binding.ActiveMatchID == "" || v.Binding.SessionStartTime.IsZero() || v.Binding.TournamentScopeID != v.TournamentScopeID || v.Binding.TournamentScopeSHA256 != v.TournamentScopeSHA256 || v.CutoffTime.IsZero() || v.MaximumSourceEventTime.IsZero() || v.MaximumSourceEventTime.After(v.CutoffTime) || v.SealedAt.IsZero() || v.SealedAt.After(v.Binding.SessionStartTime) || !isSHA(v.DiscoveryManifestSHA256) || !isSHA(v.InputManifestSHA256) || v.ParserVersion == "" || v.AggregateVersion == "" || len(v.IncludedMatches) == 0 || len(v.BaselineContentSHA256) == 0 {
+	if v.SnapshotID == "" || v.SnapshotID != v.ContentSHA256 || v.TournamentScopeID == "" || !isSHA(v.TournamentScopeSHA256) || v.Binding.SessionID == "" || v.Binding.ActiveMatchID == "" || v.Binding.SessionStartTime.IsZero() || v.Binding.TournamentScopeID != v.TournamentScopeID || v.Binding.TournamentScopeSHA256 != v.TournamentScopeSHA256 || v.CutoffTime.IsZero() || v.MaximumSourceEventTime.IsZero() || v.MaximumSourceEventTime.After(v.CutoffTime) || v.SealedAt.IsZero() || !v.SealedAt.Before(v.Binding.SessionStartTime) || !isSHA(v.DiscoveryManifestSHA256) || !isSHA(v.InputManifestSHA256) || v.ParserVersion == "" || v.AggregateVersion == "" || len(v.IncludedMatches) == 0 || len(v.BaselineContentSHA256) == 0 {
 		return errors.New("invalid historical snapshot provenance")
 	}
 	included := map[string]bool{}
@@ -761,6 +761,11 @@ func (v OperatorCommandResultV1) Validate() error {
 	if v.Status == CommandAccepted && v.ResultingRevision != v.PreviousRevision+1 {
 		return errors.New("accepted command revision is not monotonic")
 	}
+	for i, id := range v.DecisionIDs {
+		if id == "" || (i > 0 && id <= v.DecisionIDs[i-1]) {
+			return errors.New("decision IDs are not unique canonical order")
+		}
+	}
 	return validateSize(v, 32<<10)
 }
 
@@ -879,21 +884,28 @@ func (v PolicyCheckpointV1) Validate() error {
 		return errors.New("invalid policy checkpoint")
 	}
 	seen := map[string]bool{}
-	last := uint64(0)
+	revision := uint64(0)
+	lastCommandID := ""
 	for i, x := range v.CommandResults {
-		if err := x.Validate(); err != nil || x.SessionID != v.SessionID || seen[x.CommandID] || x.ResultingRevision < last {
+		if err := x.Validate(); err != nil || x.SessionID != v.SessionID || seen[x.CommandID] || x.PreviousRevision != revision || x.ResultingRevision > v.PolicyRevision || (i > 0 && x.PreviousRevision == v.CommandResults[i-1].PreviousRevision && x.ResultingRevision == v.CommandResults[i-1].ResultingRevision && x.CommandID <= lastCommandID) {
 			return fmt.Errorf("command_results[%d] invalid", i)
 		}
 		seen[x.CommandID] = true
-		last = x.ResultingRevision
+		revision = x.ResultingRevision
+		lastCommandID = x.CommandID
 	}
-	for _, x := range v.Cooldowns {
-		if x.RuleID == "" || x.UntilPolicyTimeMS < 0 {
+	for i, id := range v.PreviewCandidateIDs {
+		if id == "" || (i > 0 && id <= v.PreviewCandidateIDs[i-1]) {
+			return errors.New("preview candidate IDs are not unique canonical order")
+		}
+	}
+	for i, x := range v.Cooldowns {
+		if x.RuleID == "" || x.UntilPolicyTimeMS < 0 || (i > 0 && x.RuleID <= v.Cooldowns[i-1].RuleID) {
 			return errors.New("invalid cooldown")
 		}
 	}
-	for _, x := range v.Pins {
-		if x.CandidateID == "" || x.DecisionID == "" {
+	for i, x := range v.Pins {
+		if x.CandidateID == "" || x.DecisionID == "" || (i > 0 && x.CandidateID <= v.Pins[i-1].CandidateID) {
 			return errors.New("invalid pin")
 		}
 	}
@@ -917,7 +929,7 @@ func (v PolicyCheckpointV1) ValidateAgainstCommit(commit PolicyCommitV1) error {
 }
 
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var decimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)\.[0-9]{3}$`)
+var decimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 var assetPattern = regexp.MustCompile(`^$|^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
 var commandActions = map[string]bool{ActionApprove: true, ActionShow: true, ActionReject: true, ActionPin: true, ActionUnpin: true, ActionEmergencyHide: true, ActionClearEmergencyHide: true, ActionDisableRule: true, ActionEnableRule: true}
 var decisionStates = map[string]bool{DecisionQueued: true, DecisionShown: true, DecisionRejected: true, DecisionSuperseded: true, DecisionExpired: true, DecisionPinned: true, DecisionEmergencyHidden: true}

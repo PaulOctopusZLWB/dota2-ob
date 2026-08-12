@@ -7,15 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // MarshalCanonical emits UTF-8 RFC 8785 JSON. V1 domain numbers are integers;
-// fractional quantities are fixed-scale Decimal strings.
+// fractional quantities are lossless source-token Decimal strings.
 func MarshalCanonical(value any) ([]byte, error) {
+	if err := validateUTF8Value(reflect.ValueOf(value), map[utf8Visit]bool{}); err != nil {
+		return nil, err
+	}
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
@@ -31,6 +36,73 @@ func MarshalCanonical(value any) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+type utf8Visit struct {
+	typ reflect.Type
+	ptr uintptr
+}
+
+func validateUTF8Value(v reflect.Value, seen map[utf8Visit]bool) error {
+	if !v.IsValid() {
+		return nil
+	}
+	for v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		visit := utf8Visit{typ: v.Type(), ptr: v.Pointer()}
+		if seen[visit] {
+			return nil
+		}
+		seen[visit] = true
+		return validateUTF8Value(v.Elem(), seen)
+	}
+	if v.Kind() == reflect.Map || v.Kind() == reflect.Slice {
+		if v.IsNil() {
+			return nil
+		}
+		visit := utf8Visit{typ: v.Type(), ptr: v.Pointer()}
+		if seen[visit] {
+			return nil
+		}
+		seen[visit] = true
+	}
+	switch v.Kind() {
+	case reflect.String:
+		if !utf8.ValidString(v.String()) {
+			return errors.New("contract contains invalid UTF-8")
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if err := validateUTF8Value(v.Field(i), seen); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if err := validateUTF8Value(v.Index(i), seen); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			if err := validateUTF8Value(iter.Key(), seen); err != nil {
+				return err
+			}
+			if err := validateUTF8Value(iter.Value(), seen); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 func CanonicalSHA256(value any) (string, error) {
 	b, err := MarshalCanonical(value)

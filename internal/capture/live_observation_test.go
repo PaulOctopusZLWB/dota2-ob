@@ -44,7 +44,7 @@ func TestMapLiveObservationPreservesPublicNormalizedFields(t *testing.T) {
 		t.Fatalf("participants=%d", len(observation.Participants))
 	}
 	p := observation.Participants[0]
-	if p.Gold.State != contracts.ValuePresent || p.Gold.Value == nil || *p.Gold.Value != contracts.Decimal("0.000") {
+	if p.Gold.State != contracts.ValuePresent || p.Gold.Value == nil || *p.Gold.Value != contracts.Decimal("0") {
 		t.Fatalf("present zero lost: %+v", p.Gold)
 	}
 	if p.Alive.State != contracts.ValuePresent || p.Alive.Value == nil || *p.Alive.Value {
@@ -77,7 +77,7 @@ func TestMapLiveObservationPreservesPublicNormalizedFields(t *testing.T) {
 }
 
 func TestCanonicalPathTenPlayerFullFieldEquivalenceAndPrivacy(t *testing.T) {
-	root := map[string]any{"provider": map[string]any{"name": "Dota 2", "appid": 570, "version": 1, "timestamp": 123}, "league": map[string]any{"match_id": "42"}, "map": map[string]any{"clock_time": 0, "game_time": 1, "game_state": "playing", "paused": false, "daytime": true, "nightstalker_night": false, "win_team": "none", "radiant_score": 1, "dire_score": 2, "radiant_glyph_cooldown": 3.125, "dire_glyph_cooldown": 4.125, "radiant_scan_charges": 1, "dire_scan_charges": 2, "radiant_lotus_pool_count": 3, "dire_lotus_pool_count": 4, "radiant_ward_purchase_cooldown": 5.125, "dire_ward_purchase_cooldown": 6.125, "roshan_state": "alive", "roshan_state_end_seconds": 7.125, "tormentor_state": "alive", "tormentor_state_location": "radiant", "tormentor_state_end_seconds": 8.125}, "player": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "hero": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "items": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "abilities": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "buildings": map[string]any{"radiant": map[string]any{"tower": map[string]any{"health": 100.125, "max_health": 200.125}}}}
+	root := map[string]any{"provider": map[string]any{"name": "Dota 2", "appid": 570, "version": 1, "timestamp": 123}, "league": map[string]any{"match_id": "42"}, "map": map[string]any{"clock_time": 0, "game_time": 1, "game_state": "playing", "paused": false, "daytime": true, "nightstalker_night": false, "win_team": "none", "radiant_score": 1, "dire_score": 2, "radiant_glyph_cooldown": 0.0004, "dire_glyph_cooldown": 4.125, "radiant_scan_charges": 1, "dire_scan_charges": 2, "radiant_lotus_pool_count": 3, "dire_lotus_pool_count": 4, "radiant_ward_purchase_cooldown": 5.125, "dire_ward_purchase_cooldown": 6.125, "roshan_state": "alive", "roshan_state_end_seconds": 7.125, "tormentor_state": "alive", "tormentor_state_location": "radiant", "tormentor_state_end_seconds": 8.125}, "player": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "hero": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "items": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "abilities": map[string]any{"team2": map[string]any{}, "team3": map[string]any{}}, "buildings": map[string]any{"radiant": map[string]any{"tower": map[string]any{"health": 100.125, "max_health": 200.125}}}}
 	for i := 0; i < 10; i++ {
 		team := "team2"
 		slot := fmt.Sprintf("player%d", i)
@@ -85,7 +85,7 @@ func TestCanonicalPathTenPlayerFullFieldEquivalenceAndPrivacy(t *testing.T) {
 			team = "team3"
 		}
 		root["player"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{"accountid": fmt.Sprintf("private-account-%d", i), "steamid": fmt.Sprintf("private-steam-%d", i), "name": fmt.Sprintf("private-name-%d", i), "team_name": team, "player_slot": i, "gold": float64(i) + 0.125, "net_worth": 1000.125, "gpm": 500, "xpm": 600, "gold_reliable": 10.125, "gold_unreliable": 20.125, "kills": 1, "deaths": 2, "assists": 3, "last_hits": 4, "denies": 5, "wards_placed": 6, "wards_destroyed": 7, "wards_purchased": 8}
-		root["hero"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{"name": "npc_dota_hero_axe", "id": 2, "xpos": 1.125, "ypos": 2.125, "health": 3.125, "max_health": 4.125, "health_percent": 5.125, "mana": 6.125, "max_mana": 7.125, "mana_percent": 8.125, "alive": i%2 == 0, "respawn_seconds": 9.125, "level": 10, "xp": 11.125, "buyback_cost": 12.125, "buyback_cooldown": 13.125, "stunned": false, "silenced": false, "disarmed": false, "hexed": false, "muted": false, "break": false, "has_debuff": false, "magicimmune": false, "smoked": false}
+		root["hero"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{"name": "npc_dota_hero_axe", "id": 2, "xpos": 1.23456, "ypos": 2.125, "health": 3.125, "max_health": 4.125, "health_percent": 5.125, "mana": 6.125, "max_mana": 7.125, "mana_percent": 8.125, "alive": i%2 == 0, "respawn_seconds": 9.125, "level": 10, "xp": 11.125, "buyback_cost": 12.125, "buyback_cooldown": 13.125, "stunned": false, "silenced": false, "disarmed": false, "hexed": false, "muted": false, "break": false, "has_debuff": false, "magicimmune": false, "smoked": false}
 		root["items"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{"slot0": map[string]any{"name": "item_blink", "item_level": 1, "cooldown": 1.125, "max_cooldown": 2.125, "can_cast": true, "charges": 3, "passive": false}}
 		root["abilities"].(map[string]any)[team].(map[string]any)[slot] = map[string]any{"ability0": map[string]any{"name": "axe_berserkers_call", "level": 1, "cooldown": 1.125, "max_cooldown": 2.125, "can_cast": true, "passive": false, "ultimate": false}}
 	}
@@ -106,6 +106,9 @@ func TestCanonicalPathTenPlayerFullFieldEquivalenceAndPrivacy(t *testing.T) {
 	}
 	if len(observation.Participants) != 10 {
 		t.Fatalf("participants=%d", len(observation.Participants))
+	}
+	if observation.Map.RadiantGlyphCooldown.Value == nil || *observation.Map.RadiantGlyphCooldown.Value != contracts.Decimal("0.0004") || observation.Participants[0].XPos.Value == nil || *observation.Participants[0].XPos.Value != contracts.Decimal("1.23456") {
+		t.Fatalf("source numeric tokens were not preserved: cooldown=%+v xpos=%+v", observation.Map.RadiantGlyphCooldown, observation.Participants[0].XPos)
 	}
 	encoded, _ := contracts.MarshalCanonical(observation)
 	for i := 0; i < 10; i++ {
@@ -131,7 +134,7 @@ func TestCanonicalPathTenPlayerFullFieldEquivalenceAndPrivacy(t *testing.T) {
 }
 
 func TestCanonicalRebuildIsByteCompatible(t *testing.T) {
-	raw := []byte(`{"provider":{"name":"Dota 2","version":1},"map":{"matchid":"42","clock_time":1},"player":{"team2":{"player0":{"accountid":"private","name":"handle","gold":1.125}}},"hero":{"team2":{"player0":{"name":"npc_dota_hero_axe","alive":true}}}}`)
+	raw := []byte(`{"provider":{"name":"Dota 2","version":1},"map":{"matchid":"42","clock_time":1,"radiant_glyph_cooldown":0.0004},"player":{"team2":{"player0":{"accountid":"private","name":"handle","gold":1.23456}}},"hero":{"team2":{"player0":{"name":"npc_dota_hero_axe","alive":true,"xpos":1.23456}}}}`)
 	var payload any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()

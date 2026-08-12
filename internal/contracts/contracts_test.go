@@ -99,6 +99,24 @@ func TestCanonicalReaderCompatibilityAndFloatRejection(t *testing.T) {
 	}
 }
 
+func TestCanonicalRejectsInvalidUTF8BeforeEncodingOrHashing(t *testing.T) {
+	bad := string([]byte{0xff})
+	decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: "d", SessionID: "s", PolicyRevision: 1, PriorState: contracts.DecisionQueued, ResultingState: contracts.DecisionShown, PolicyTimeMS: 1, Reason: bad}
+	value := contracts.PolicyCommitV1{Decisions: []contracts.BroadcastDecisionV1{decision}}
+	if _, err := contracts.MarshalCanonical(value); err == nil {
+		t.Fatal("invalid UTF-8 was rewritten during canonical encoding")
+	}
+	if _, err := contracts.CanonicalSHA256(value); err == nil {
+		t.Fatal("invalid UTF-8 received a canonical identity")
+	}
+	if _, err := contracts.MarshalCanonical(map[string]string{bad: "value"}); err == nil {
+		t.Fatal("invalid UTF-8 map key was rewritten")
+	}
+	if err := decision.Validate(); err == nil {
+		t.Fatal("invalid UTF-8 contract was accepted for persistence")
+	}
+}
+
 func TestGoldenCrossContractBindingsAndRecovery(t *testing.T) {
 	var scope contracts.TournamentScopeV1
 	readGolden(t, "tournament_scope_v1.json", &scope)

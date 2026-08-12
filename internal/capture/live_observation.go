@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"math"
 	"sort"
 	"strconv"
 
@@ -157,11 +157,44 @@ func observedDecimal(m map[string]any, key string) contracts.ObservedV1[contract
 	if !ok {
 		return contracts.Absent[contracts.Decimal]()
 	}
-	n, ok := number(v)
+	d, ok := sourceDecimal(v)
 	if !ok {
 		return contracts.ObservedV1[contracts.Decimal]{State: contracts.ValueInvalid}
 	}
-	return contracts.Present(contracts.Decimal(fmt.Sprintf("%.3f", n)))
+	return contracts.Present(d)
+}
+
+func sourceDecimal(v any) (contracts.Decimal, bool) {
+	var token string
+	switch x := v.(type) {
+	case json.Number:
+		token = x.String()
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return "", false
+		}
+		token = strconv.FormatFloat(x, 'g', -1, 64)
+	case float32:
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return "", false
+		}
+		token = strconv.FormatFloat(float64(x), 'g', -1, 32)
+	case int:
+		token = strconv.FormatInt(int64(x), 10)
+	case int64:
+		token = strconv.FormatInt(x, 10)
+	case int32:
+		token = strconv.FormatInt(int64(x), 10)
+	case uint64:
+		token = strconv.FormatUint(x, 10)
+	case string:
+		token = x
+	default:
+		return "", false
+	}
+	d := contracts.Decimal(token)
+	n, err := strconv.ParseFloat(token, 64)
+	return d, err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) && d.Valid()
 }
 func number(v any) (float64, bool) {
 	switch x := v.(type) {

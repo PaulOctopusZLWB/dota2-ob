@@ -1,6 +1,7 @@
 package architecture_test
 
 import (
+	"fmt"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -13,20 +14,29 @@ import (
 
 const modulePrefix = "github.com/PaulOctopusZLWB/dota2-ob/"
 
-// These are the frozen M0 ownership roots. Every root must exist and contain
-// examined production Go source; recursive subpackages inherit the same rule.
+type importRule struct {
+	standard map[string]bool
+	internal []string
+}
+
+// These are the frozen M0 ownership roots. Standard-library and internal
+// imports both fail closed: adding a dependency requires an explicit rule
+// change that is visible in review. Recursive subpackages inherit the rule.
+var ownershipRules = map[string]importRule{
+	"contracts": {
+		standard: stringSet("bytes", "crypto/sha256", "encoding/hex", "encoding/json", "errors", "fmt", "io", "reflect", "regexp", "sort", "strconv", "strings", "time", "unicode", "unicode/utf16", "unicode/utf8"),
+	},
+	"liveprojection": {standard: stringSet(), internal: []string{"internal/contracts", "internal/session"}},
+	"history":        {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"insight":        {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"policy":         {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"delivery":       {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"presentation":   {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"obscontrol":     {standard: stringSet(), internal: []string{"internal/contracts"}},
+}
+
 func TestTrackImportGraphUsesExplicitDirections(t *testing.T) {
-	rules := map[string][]string{
-		"contracts":      {},
-		"liveprojection": {"internal/contracts", "internal/session"},
-		"history":        {"internal/contracts"},
-		"insight":        {"internal/contracts"},
-		"policy":         {"internal/contracts"},
-		"delivery":       {"internal/contracts"},
-		"presentation":   {"internal/contracts"},
-		"obscontrol":     {"internal/contracts"},
-	}
-	for root, allowed := range rules {
+	for root, rule := range ownershipRules {
 		rootPath := filepath.Join("..", root)
 		info, err := os.Stat(rootPath)
 		if err != nil || !info.IsDir() {
@@ -51,25 +61,8 @@ func TestTrackImportGraphUsesExplicitDirections(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if !strings.HasPrefix(imp, modulePrefix) {
-					if strings.Contains(strings.Split(imp, "/")[0], ".") {
-						t.Errorf("internal/%s imports unapproved third-party package %s", root, imp)
-					}
-					continue
-				}
-				rel := strings.TrimPrefix(imp, modulePrefix)
-				if strings.HasPrefix(rel, "internal/"+root+"/") || rel == "internal/"+root {
-					continue
-				}
-				ok := false
-				for _, prefix := range allowed {
-					if rel == prefix || strings.HasPrefix(rel, prefix+"/") {
-						ok = true
-						break
-					}
-				}
-				if !ok {
-					t.Errorf("internal/%s imports disallowed internal package %s", root, rel)
+				if err := checkImport(root, imp, rule); err != nil {
+					t.Errorf("%s: %v", path, err)
 				}
 			}
 			return nil
@@ -81,4 +74,59 @@ func TestTrackImportGraphUsesExplicitDirections(t *testing.T) {
 			t.Errorf("required ownership root internal/%s has no examined production Go files", root)
 		}
 	}
+}
+
+func TestTrackImportGraphRejectsForbiddenDependencyFixtures(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"http", "net/http"},
+		{"filesystem", "io/fs"},
+		{"operating_system", "os"},
+		{"database", "database/sql"},
+		{"replay", modulePrefix + "internal/replay"},
+		{"presentation", modulePrefix + "internal/presentation"},
+		{"adapter", modulePrefix + "internal/capture"},
+	}
+	for root, rule := range ownershipRules {
+		root, rule := root, rule
+		for _, tc := range cases {
+			if tc.path == modulePrefix+"internal/"+root {
+				continue
+			}
+			t.Run(root+"/"+tc.name, func(t *testing.T) {
+				if err := checkImport(root, tc.path, rule); err == nil {
+					t.Fatalf("forbidden import %q accepted for internal/%s", tc.path, root)
+				}
+			})
+		}
+	}
+}
+
+func checkImport(root, imp string, rule importRule) error {
+	if !strings.HasPrefix(imp, modulePrefix) {
+		if !rule.standard[imp] {
+			return fmt.Errorf("internal/%s imports unapproved external or standard package %s", root, imp)
+		}
+		return nil
+	}
+	rel := strings.TrimPrefix(imp, modulePrefix)
+	if rel == "internal/"+root || strings.HasPrefix(rel, "internal/"+root+"/") {
+		return nil
+	}
+	for _, prefix := range rule.internal {
+		if rel == prefix || strings.HasPrefix(rel, prefix+"/") {
+			return nil
+		}
+	}
+	return fmt.Errorf("internal/%s imports disallowed internal package %s", root, rel)
+}
+
+func stringSet(values ...string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
 }

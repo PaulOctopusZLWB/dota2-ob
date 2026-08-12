@@ -76,6 +76,9 @@ func TestTournamentScopeAndHistoricalSnapshotEligibility(t *testing.T) {
 		{"sealed after session", func(v *contracts.HistoricalSnapshotManifestV1) {
 			v.SealedAt = v.Binding.SessionStartTime.Add(time.Millisecond)
 		}},
+		{"sealed at session start", func(v *contracts.HistoricalSnapshotManifestV1) {
+			v.SealedAt = v.Binding.SessionStartTime
+		}},
 		{"identity quarantined", func(v *contracts.HistoricalSnapshotManifestV1) {
 			v.IncludedMatches[0].IdentityStatus = contracts.IdentityQuarantined
 		}},
@@ -177,6 +180,57 @@ func TestPolicyCheckpointCarriesBoundedRestartState(t *testing.T) {
 	v.PreviewCandidateIDs = make([]string, 65)
 	if err := v.Validate(); err == nil {
 		t.Fatal("unbounded preview queue accepted")
+	}
+}
+
+func TestPolicyCheckpointRejectsIncoherentReplayState(t *testing.T) {
+	result := func(id string, previous, resulting uint64) contracts.OperatorCommandResultV1 {
+		return contracts.OperatorCommandResultV1{SchemaVersion: contracts.OperatorCommandResultSchemaV1, CommandID: id, SessionID: "s", Status: contracts.CommandAccepted, PreviousRevision: previous, ResultingRevision: resulting, DecisionIDs: []string{"d"}, Reason: "approved"}
+	}
+	base := contracts.PolicyCheckpointV1{SchemaVersion: contracts.PolicyCheckpointSchemaV1, SessionID: "s", CommitSequence: 3, PolicyRevision: 2, RuleVersion: "rules.v1", ConfigVersion: "config.v1", StateHash: strings.Repeat("a", 64), ReferencedCommitSHA256: strings.Repeat("b", 64), CreatedTimeMS: 1, CommandResults: []contracts.OperatorCommandResultV1{result("a", 0, 1), result("b", 1, 2)}, PreviewCandidateIDs: []string{"a", "b"}, Cooldowns: []contracts.RuleCooldownV1{{RuleID: "a", UntilPolicyTimeMS: 1}, {RuleID: "b", UntilPolicyTimeMS: 2}}, Pins: []contracts.PolicyPinV1{{CandidateID: "a", DecisionID: "d1"}, {CandidateID: "b", DecisionID: "d2"}}}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*contracts.PolicyCheckpointV1)
+	}{
+		{"ahead revision", func(v *contracts.PolicyCheckpointV1) {
+			v.PolicyRevision = 0
+			v.CommandResults = []contracts.OperatorCommandResultV1{result("a", 0, 1)}
+		}},
+		{"revision gap", func(v *contracts.PolicyCheckpointV1) {
+			v.CommandResults = []contracts.OperatorCommandResultV1{result("a", 0, 1), result("b", 2, 3)}
+			v.PolicyRevision = 3
+		}},
+		{"unordered commands", func(v *contracts.PolicyCheckpointV1) {
+			v.CommandResults[0], v.CommandResults[1] = v.CommandResults[1], v.CommandResults[0]
+		}},
+		{"duplicate result decision", func(v *contracts.PolicyCheckpointV1) { v.CommandResults[0].DecisionIDs = []string{"d", "d"} }},
+		{"unordered result decisions", func(v *contracts.PolicyCheckpointV1) { v.CommandResults[0].DecisionIDs = []string{"z", "a"} }},
+		{"duplicate preview", func(v *contracts.PolicyCheckpointV1) { v.PreviewCandidateIDs = []string{"a", "a"} }},
+		{"unordered preview", func(v *contracts.PolicyCheckpointV1) { v.PreviewCandidateIDs = []string{"b", "a"} }},
+		{"duplicate cooldown", func(v *contracts.PolicyCheckpointV1) {
+			v.Cooldowns = []contracts.RuleCooldownV1{{RuleID: "a", UntilPolicyTimeMS: 1}, {RuleID: "a", UntilPolicyTimeMS: 2}}
+		}},
+		{"unordered cooldown", func(v *contracts.PolicyCheckpointV1) { v.Cooldowns[0], v.Cooldowns[1] = v.Cooldowns[1], v.Cooldowns[0] }},
+		{"duplicate pin", func(v *contracts.PolicyCheckpointV1) {
+			v.Pins = []contracts.PolicyPinV1{{CandidateID: "a", DecisionID: "d1"}, {CandidateID: "a", DecisionID: "d2"}}
+		}},
+		{"unordered pin", func(v *contracts.PolicyCheckpointV1) { v.Pins[0], v.Pins[1] = v.Pins[1], v.Pins[0] }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := base
+			v.CommandResults = append([]contracts.OperatorCommandResultV1(nil), base.CommandResults...)
+			v.PreviewCandidateIDs = append([]string(nil), base.PreviewCandidateIDs...)
+			v.Cooldowns = append([]contracts.RuleCooldownV1(nil), base.Cooldowns...)
+			v.Pins = append([]contracts.PolicyPinV1(nil), base.Pins...)
+			tc.mutate(&v)
+			if err := v.Validate(); err == nil {
+				t.Fatal("incoherent checkpoint accepted")
+			}
+		})
 	}
 }
 
