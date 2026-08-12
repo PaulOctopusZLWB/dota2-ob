@@ -1,6 +1,7 @@
 package gsi_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -24,17 +26,33 @@ import (
 
 type failingProjection struct{}
 
-func (failingProjection) Apply(*session.Record) error {
+func (failingProjection) Apply(context.Context, *session.Record) error {
 	return errors.New("do not expose this path /home/private")
 }
 
 type barrierProjection struct{ entered, release chan struct{} }
 
-func (p barrierProjection) Apply(*session.Record) error { close(p.entered); <-p.release; return nil }
+func (p barrierProjection) Apply(ctx context.Context, _ *session.Record) error {
+	close(p.entered)
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type stubbornProjection struct{ entered, release chan struct{} }
+
+func (p stubbornProjection) Apply(context.Context, *session.Record) error {
+	close(p.entered)
+	<-p.release
+	return nil
+}
 
 type countingProjection struct{ calls int }
 
-func (p *countingProjection) Apply(*session.Record) error { p.calls++; return nil }
+func (p *countingProjection) Apply(context.Context, *session.Record) error { p.calls++; return nil }
 
 type sealingRawFile struct {
 	writes int
@@ -118,9 +136,10 @@ func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.
 		t.Fatal(err)
 	}
 	tracker := operator.NewTracker(store.SessionID(), now, 15*time.Second, func() time.Time { return now })
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(failingProjection{}))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithLiveProjections(failingProjection{}))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"map":{"game_time":1}}`))
 	if err != nil {
@@ -136,11 +155,26 @@ func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.
 		t.Fatal(err)
 	}
 	defer statusResp.Body.Close()
-	var status operator.Snapshot
+	var status struct {
+		operator.Snapshot
+		LiveProjection liveprojection.Health `json:"live_projection"`
+	}
 	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || status.ActiveFailures[operator.SubsystemLatest].Code != "latest_failed" {
+	deadline := time.Now().Add(time.Second)
+	for !status.LiveProjection.Degraded && time.Now().Before(deadline) {
+		statusResp.Body.Close()
+		time.Sleep(time.Millisecond)
+		statusResp, err = http.Get(server.URL + "/api/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || !status.LiveProjection.Degraded || status.LiveProjection.ProjectedSequence != 0 {
 		t.Fatalf("status = %#v", status)
 	}
 	encoded, _ := json.Marshal(status)
@@ -164,8 +198,7 @@ func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
 	now := time.Now().UTC()
 	tracker := operator.NewTracker("drain", now, time.Minute, time.Now)
 	entered, release := make(chan struct{}), make(chan struct{})
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(barrierProjection{entered, release}))
-	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithLiveProjections(barrierProjection{entered, release}))
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	response := make(chan string, 1)
@@ -180,18 +213,52 @@ func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
 		response <- string(body)
 	}()
 	<-entered
+	select {
+	case body := <-response:
+		if body != "ok\n" {
+			t.Fatalf("body=%q", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted response waited for blocked projection")
+	}
 	drained := make(chan struct{})
 	go func() { handler.Wait(); close(drained) }()
 	select {
 	case <-drained:
-		t.Fatal("Wait returned before projection/response")
+		t.Fatal("Wait returned before projector drain")
 	default:
 	}
 	close(release)
-	if body := <-response; body != "ok\n" {
-		t.Fatalf("body=%q", body)
-	}
 	<-drained
+}
+
+func TestServerWaitBoundsBlockedProjectorDrain(t *testing.T) {
+	store, _ := session.NewStore(t.TempDir(), session.WithSessionID("bounded-drain"))
+	entered, release := make(chan struct{}), make(chan struct{})
+	handler := gsi.NewServer(store, gsi.WithLiveProjections(stubbornProjection{entered, release}), gsi.WithProjectionDrainTimeout(20*time.Millisecond))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	<-entered
+	started := time.Now()
+	handler.Wait()
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded drain took %s", elapsed)
+	}
+	close(release)
+	cursorPath := filepath.Join(store.SessionDir(), "live_projection_cursor.json")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(cursorPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("projector did not finish after release")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestGSIPostRejectsMalformedJSONWithoutPersisting(t *testing.T) {
@@ -230,9 +297,11 @@ func TestGSIPostRejectsOversizedBodyWithoutRawOrProjection(t *testing.T) {
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projection := &countingProjection{}
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	processor := capture.NewProcessor(store, tracker)
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(projection))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(strings.Repeat("x", (10<<20)+1)))
 	if err != nil {
 		t.Fatal(err)
@@ -262,9 +331,11 @@ func TestRepeatedPostsAfterSealedFailureReturn503WithoutWritesOrProjections(t *t
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projection := &countingProjection{}
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection), capture.WithFailureLogger(func(string, string) {}))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	processor := capture.NewProcessor(store, tracker, capture.WithFailureLogger(func(string, string) {}))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(projection))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 	for i := 0; i < 3; i++ {
 		resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"attempt":1}`))
 		if err != nil {
@@ -532,8 +603,10 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		t.Fatalf("NewStore returned error: %v", err)
 	}
 	engine := analytics.NewEngine()
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(engine)))
+	handler := gsi.NewServer(store, gsi.WithAnalytics(engine))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	first := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
 	second := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
@@ -544,6 +617,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		resp.Body.Close()
 	}
 	// First accepted snapshot must update tick count but derive no events.
+	waitForTickCount(t, engine, 1)
 	if got := engine.TickCount(); got != 1 {
 		t.Fatalf("tick count after first = %d, want 1", got)
 	}
@@ -556,6 +630,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	} else {
 		resp.Body.Close()
 	}
+	waitForTickCount(t, engine, 2)
 	if got := engine.TickCount(); got != 2 {
 		t.Fatalf("tick count after second = %d, want 2", got)
 	}
@@ -586,6 +661,14 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	// Analytics summary files are materialized under the session dir.
 	if _, err := os.Stat(filepath.Join(root, "analytics-live", "analytics_summary.md")); err != nil {
 		t.Fatalf("analytics summary not written: %v", err)
+	}
+}
+
+func waitForTickCount(t *testing.T, engine *analytics.Engine, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for engine.TickCount() != want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 }
 
