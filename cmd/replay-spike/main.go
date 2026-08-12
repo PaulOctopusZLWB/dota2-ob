@@ -31,23 +31,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay"
 	"github.com/klauspost/compress/zstd"
 )
 
 const (
-	opendotaMatchURL     = "https://api.opendota.com/api/matches/%s"
+	opendotaMatchURL        = "https://api.opendota.com/api/matches/%s"
 	opendotaPatchCatalogURL = "https://api.opendota.com/api/constants/patch"
 	// Bounds defending an untrusted-input acquisition surface.
-	maxMatchIDLen    = 20  // Steam match IDs are uint64 <= 20 digits
-	maxCompressedBytes  = 1 << 30 // 1 GiB compressed replay ceiling
+	maxMatchIDLen        = 20      // Steam match IDs are uint64 <= 20 digits
+	maxCompressedBytes   = 1 << 30 // 1 GiB compressed replay ceiling
 	maxDecompressedBytes = 4 << 30 // 4 GiB decompressed demo ceiling
 	maxMetadataBytes     = 4 << 20 // 4 MiB metadata/patch-catalog body ceiling
+	maxReplayRedirects   = 5
 )
 
 var (
-	zstdMagic      = []byte{0x28, 0xb5, 0x2f, 0xfd}
-	pbDEMS2Magic   = []byte{'P', 'B', 'D', 'E', 'M', 'S', '2', 0x00}
+	zstdMagic    = []byte{0x28, 0xb5, 0x2f, 0xfd}
+	pbDEMS2Magic = []byte{'P', 'B', 'D', 'E', 'M', 'S', '2', 0x00}
 	// httpClient is the single bounded client used for all acquisition calls.
 	httpClient = &http.Client{Timeout: 90 * time.Second}
 )
@@ -140,32 +142,32 @@ func printOne(path, out string) string {
 }
 
 type acquireRecord struct {
-	MatchID             string    `json:"match_id"`
-	Source              string    `json:"source"`
-	ReplayURL           string    `json:"replay_url"`
-	Cluster             int64     `json:"cluster"`
+	MatchID   string `json:"match_id"`
+	Source    string `json:"source"`
+	ReplayURL string `json:"replay_url"`
+	Cluster   int64  `json:"cluster"`
 	// ReplayFormatVersion is OpenDota's per-replay `version` field (the demo
 	// protocol/format revision), NOT the gameplay patch. It is retained for
 	// provenance because it identifies the replay-binary format.
-	ReplayFormatVersion int64     `json:"replay_format_version"`
+	ReplayFormatVersion int64 `json:"replay_format_version"`
 	// PatchID is OpenDota's gameplay `patch` catalog id; PatchName is its
 	// human-readable Dota version (e.g. id 60 -> "7.41"). These are the
 	// authoritative gameplay-patch fields.
-	PatchID             int64     `json:"patch_id"`
-	PatchName           string    `json:"patch_name"`
-	League              string    `json:"league"`
-	LeagueTier          string    `json:"league_tier"`
-	RadiantTeam         string    `json:"radiant_team"`
-	DireTeam            string    `json:"dire_team"`
-	DurationSec         int64     `json:"duration_sec"`
-	PlayerCount         int       `json:"player_count"`
-	CompressedBytes     int64     `json:"compressed_bytes"`
-	DecompressedBytes   int64     `json:"decompressed_bytes"`
+	PatchID            int64     `json:"patch_id"`
+	PatchName          string    `json:"patch_name"`
+	League             string    `json:"league"`
+	LeagueTier         string    `json:"league_tier"`
+	RadiantTeam        string    `json:"radiant_team"`
+	DireTeam           string    `json:"dire_team"`
+	DurationSec        int64     `json:"duration_sec"`
+	PlayerCount        int       `json:"player_count"`
+	CompressedBytes    int64     `json:"compressed_bytes"`
+	DecompressedBytes  int64     `json:"decompressed_bytes"`
 	CompressedSHA256   string    `json:"compressed_sha256"`
 	DecompressedSHA256 string    `json:"decompressed_sha256"`
-	CompressionActual   string    `json:"compression_actual"`
-	DownloadedAt        time.Time `json:"downloaded_at"`
-	DecompressedAt      time.Time `json:"decompressed_at"`
+	CompressionActual  string    `json:"compression_actual"`
+	DownloadedAt       time.Time `json:"downloaded_at"`
+	DecompressedAt     time.Time `json:"decompressed_at"`
 }
 
 func cmdAcquire(args []string) {
@@ -200,28 +202,22 @@ func cmdAcquire(args []string) {
 	demPath := filepath.Join(replaysDir, matchID+".dem")
 	dlAt := time.Now().UTC()
 	if err := boundedDownload(meta.ReplayURL, bz2Path, maxCompressedBytes); err != nil {
-		removePartial(bz2Path)
 		fail("download: %v", err)
 	}
 	if err := validateMagic(bz2Path, zstdMagic); err != nil {
-		removePartial(bz2Path)
 		fail("download magic: %v", err)
 	}
 	cBytes, cSHA, err := hashAndSize(bz2Path)
 	if err != nil {
-		removePartial(bz2Path)
 		fail("hash compressed: %v", err)
 	}
 
 	decompAt := time.Now().UTC()
 	dBytes, dSHA, compression, err := zstdDecompressBounded(bz2Path, demPath, maxDecompressedBytes)
 	if err != nil {
-		removePartial(demPath)
-		removePartial(demPath + ".tmp")
 		fail("decompress: %v", err)
 	}
 	if err := validateMagic(demPath, pbDEMS2Magic); err != nil {
-		removePartial(demPath)
 		fail("decompressed magic: %v", err)
 	}
 
@@ -229,7 +225,7 @@ func cmdAcquire(args []string) {
 		MatchID: matchID, Source: "opendota-metadata+valve-public-cdn",
 		ReplayURL: meta.ReplayURL, Cluster: meta.Cluster,
 		ReplayFormatVersion: meta.ReplayFormatVersion,
-		PatchID: meta.PatchID, PatchName: meta.PatchName,
+		PatchID:             meta.PatchID, PatchName: meta.PatchName,
 		League: meta.LeagueName, LeagueTier: meta.LeagueTier,
 		RadiantTeam: meta.RadiantName, DireTeam: meta.DireName,
 		DurationSec: meta.Duration, PlayerCount: meta.PlayerCount,
@@ -238,8 +234,7 @@ func cmdAcquire(args []string) {
 		CompressionActual: compression, DownloadedAt: dlAt, DecompressedAt: decompAt,
 	}
 	recPath := filepath.Join(factsDir, matchID+".acquire.json")
-	rb, _ := json.MarshalIndent(rec, "", "  ")
-	if err := os.WriteFile(recPath, append(rb, '\n'), 0o644); err != nil {
+	if err := writeAcquireRecord(recPath, rec); err != nil {
 		fail("write acquire record: %v", err)
 	}
 	fmt.Printf("acquired match %s\n", matchID)
@@ -283,6 +278,9 @@ func cmdBatch(args []string) {
 		fmt.Fprintf(os.Stderr, "batch error: %v\n", e)
 	}
 	fmt.Printf("batch manifest=%s entries=%d\n", manifestPath, len(man.Entries))
+	if st == nil {
+		os.Exit(1)
+	}
 	counts := map[replay.StageStatus]int{}
 	for _, id := range st.SortedKeys() {
 		e := st.Entries[id]
@@ -301,8 +299,8 @@ func cmdBatch(args []string) {
 type matchMeta struct {
 	ReplayURL           string
 	Cluster             int64
-	ReplayFormatVersion int64 // OpenDota `version`: demo protocol/format revision
-	PatchID             int64 // OpenDota `patch`: gameplay patch catalog id
+	ReplayFormatVersion int64  // OpenDota `version`: demo protocol/format revision
+	PatchID             int64  // OpenDota `patch`: gameplay patch catalog id
 	PatchName           string // resolved from /api/constants/patch (e.g. "7.41")
 	LeagueName          string
 	LeagueTier          string
@@ -385,55 +383,72 @@ func fetchPatchName(patchID int64) (string, error) {
 	return "", nil
 }
 
-// boundedDownload streams url to a temp file at dest+".tmp" with a hard size
-// limit, fsyncs, closes, and atomically renames over dest. Partial temp files
-// are removed on any failure path so a short/oversized body never looks
-// canonical.
-func boundedDownload(url, dest string, maxBytes int64) error {
-	resp, err := httpClient.Get(url)
+// boundedDownload streams a validated Valve replay URL to a randomized,
+// exclusive adjacent temp file with a hard size limit. Every redirect and the
+// final URL are allowlisted. The temp is hashed, magic-validated, fsynced, and
+// closed before atomic rename; the parent directory is then fsynced.
+func boundedDownload(rawURL, dest string, maxBytes int64) error {
+	if err := validateReplayURL(rawURL); err != nil {
+		return err
+	}
+	client := *httpClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxReplayRedirects {
+			return fmt.Errorf("too many redirects (max %d)", maxReplayRedirects)
+		}
+		if err := validateReplayURL(req.URL.String()); err != nil {
+			return fmt.Errorf("redirect URL: %w", err)
+		}
+		return nil
+	}
+	resp, err := client.Get(rawURL)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	finalURL := rawURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	if err := validateReplayURL(finalURL); err != nil {
+		return fmt.Errorf("final response URL: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("valve cdn status %d", resp.StatusCode)
 	}
-	tmp := dest + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := atomicfile.NewTemp(dest, 0o644)
 	if err != nil {
 		return err
 	}
-	cleanup := func() { _ = os.Remove(tmp) }
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	tmp := f.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
-		f.Close()
-		cleanup()
 		return err
 	}
 	if n > maxBytes {
-		f.Close()
-		cleanup()
 		return fmt.Errorf("download exceeds %d bytes (got %d)", maxBytes, n)
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		cleanup()
+	_ = h.Sum(nil) // force the full-stream digest before canonical replacement
+	if err := atomicfile.Commit(f, dest, func(path string) error {
+		return validateMagic(path, zstdMagic)
+	}); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := os.Rename(tmp, dest); err != nil {
-		cleanup()
-		return err
-	}
+	committed = true
 	return nil
 }
 
-// zstdDecompressBounded streams src (zstd) to dst with a hard decompressed-size
-// limit, fsyncs, closes, and atomically renames. A zstd bomb is rejected when
-// the decompressed stream exceeds maxBytes.
+// zstdDecompressBounded streams src (zstd) to a randomized adjacent temp with a
+// hard decompressed-size limit. It hashes and PBDEMS2-validates the temp before
+// durable atomic replacement. A zstd bomb is rejected at maxBytes.
 func zstdDecompressBounded(src, dst string, maxBytes int64) (int64, string, string, error) {
 	in, err := os.Open(src)
 	if err != nil {
@@ -445,44 +460,42 @@ func zstdDecompressBounded(src, dst string, maxBytes int64) (int64, string, stri
 		return 0, "", "", err
 	}
 	defer zr.Close()
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	out, err := atomicfile.NewTemp(dst, 0o644)
 	if err != nil {
 		return 0, "", "", err
 	}
-	cleanup := func() { _ = os.Remove(tmp) }
-	n, err := io.Copy(out, io.LimitReader(zr, maxBytes+1))
+	tmp := out.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = out.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(zr, maxBytes+1))
 	if err != nil {
-		out.Close()
-		cleanup()
 		return 0, "", "", err
 	}
 	if n > maxBytes {
-		out.Close()
-		cleanup()
 		return 0, "", "", fmt.Errorf("decompressed exceeds %d bytes (got %d)", maxBytes, n)
 	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		cleanup()
+	dSHA := hex.EncodeToString(h.Sum(nil))
+	if err := atomicfile.Commit(out, dst, func(path string) error {
+		return validateMagic(path, pbDEMS2Magic)
+	}); err != nil {
 		return 0, "", "", err
 	}
-	if err := out.Close(); err != nil {
-		cleanup()
-		return 0, "", "", err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		cleanup()
-		return 0, "", "", err
-	}
-	dBytes, dSHA, err := hashAndSize(dst)
-	if err != nil {
-		return 0, "", "", err
-	}
-	if dBytes != n {
-		return 0, "", "", fmt.Errorf("size mismatch %d vs %d", n, dBytes)
-	}
+	committed = true
 	return n, dSHA, "zstd (file suffix .bz2 is historical)", nil
+}
+
+func writeAcquireRecord(path string, rec acquireRecord) error {
+	b, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(path, append(b, '\n'), 0o644)
 }
 
 func hashAndSize(path string) (int64, string, error) {
@@ -570,15 +583,6 @@ func validateMagic(path string, magic []byte) error {
 		return fmt.Errorf("magic mismatch: got %x, want %x", buf, magic)
 	}
 	return nil
-}
-
-func removePartial(path string) {
-	if path == "" {
-		return
-	}
-	if _, err := os.Stat(path); err == nil {
-		_ = os.Remove(path)
-	}
 }
 
 func shortHash(s string) string {

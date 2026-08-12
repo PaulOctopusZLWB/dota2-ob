@@ -94,21 +94,25 @@ untrusted input and defends it explicitly (reviewed hardening):
 
 - `matchID` is validated as numeric and length-bounded so it cannot carry path
   separators or escape the `data/replays/<matchID>.dem` filename slot.
-- The `replay_url` from OpenDota is validated before any fetch: scheme must be
-  `http`/`https` and the host must match the Valve replay CDN allowlist
-  `replay<digits>.valve.net` exactly, so a malicious redirect to an untrusted
-  host is rejected before download.
+- The `replay_url` from OpenDota, every redirect destination, and the final
+  response URL are validated: scheme must be `http`/`https` and the host must
+  match the Valve replay CDN allowlist `replay<digits>.valve.net` exactly.
+  Redirects are capped at five, and a cross-host redirect is rejected before
+  its destination is fetched.
 - All HTTP calls go through one bounded client (90s timeout) with bounded bodies:
   metadata/patch-catalog ≤ 4 MiB, download ≤ 1 GiB compressed,
   decompression ≤ 4 GiB decompressed. A zstd bomb or oversized response is
   rejected by the limit, not by disk exhaustion.
-- Download and decompression stream to exclusive `*.tmp` files (never the final
+- Download and decompression stream to randomized exclusive adjacent temporary files (never the final
   path), validate magic (zstd `28 b5 2f fd`, then `PBDEMS2`) and content
-  SHA-256, fsync/close, and only then atomically rename over the canonical path.
+  SHA-256, fsync/close, and only then atomically rename over the canonical path
+  and fsync its parent directory. Acquisition records use the same protocol.
   Any failure removes the temp file so a short/oversized/rewind body never looks
   canonical. Partial cleanup runs on every failure path.
-- This is testable without network via `cmd/replay-spike/main_test.go`
-  (numeric-matchID, host allowlist/scheme, and magic validation).
+- This is testable without network via `cmd/replay-spike/main_test.go` and
+  `internal/atomicfile/atomicfile_test.go` (numeric match ID, redirect
+  allowlist/count, validate-before-replace, atomic acquisition record, and
+  injected file-sync/rename/directory-sync failures).
 
 ## Parser Evaluation
 
@@ -198,7 +202,8 @@ broadcast).
 `internal/replay/batch.go` implements an idempotent, manifest-driven state
 machine with explicit `queued / running / succeeded / failed_terminal` states,
 content-addressed dedupe, bounded retries, and a dead-letter (terminal) state.
-State is persisted via atomic write (temp file, fsync, rename) after every
+State is persisted via atomic write (random exclusive temp file, file fsync,
+rename, parent-directory fsync) after every
 state transition, and any checkpoint failure is propagated (not ignored)
 because resume safety is lost if the on-disk state diverges from in-memory
 state.
@@ -306,8 +311,10 @@ git diff --check
 Expected: all packages pass; `internal/replay` covers deterministic aggregation,
 hero/name filtering, timeline ordering, batch resume, content-change detection,
 checkpoint-failure propagation, aggregate terminal signaling, manifest
-validation, and idempotent restore. `cmd/replay-spike` covers numeric-matchID,
-Valve-host allowlist/scheme, and magic validation (no network).
+validation, and idempotent restore. `cmd/replay-spike` covers numeric match ID,
+Valve-host redirects, malformed-manifest CLI behavior, retry-all terminal exit,
+and validate-before-replace acquisition (no network); `internal/atomicfile`
+covers injected durability failures.
 
 Manual reproducible spike (requires network + ~300 MiB local; raw files stay
 git-ignored under `data/`):

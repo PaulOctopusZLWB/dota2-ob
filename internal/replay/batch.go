@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 )
 
 // StageStatus is the explicit batch state for one manifest entry.
@@ -136,22 +138,12 @@ func (r *Runner) SaveState(s *BatchState) error {
 	if r.StatePath == "" {
 		return nil
 	}
-	if dir := filepath.Dir(r.StatePath); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("replay: state dir: %w", err)
-		}
-	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := r.StatePath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("replay: write state tmp: %w", err)
-	}
-	if err := os.Rename(tmp, r.StatePath); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("replay: rename state: %w", err)
+	if err := atomicfile.WriteFile(r.StatePath, b, 0o644); err != nil {
+		return fmt.Errorf("replay: persist state: %w", err)
 	}
 	return nil
 }
@@ -321,11 +313,9 @@ func (r *Runner) Run(m *Manifest) (*BatchState, []error) {
 	// failures newly produced this run, so a resume over a state that still
 	// holds terminal entries does not read as success to an operator or CI.
 	finalTerminal := []string{}
-	if !r.RetryAll {
-		for _, id := range state.SortedKeys() {
-			if state.Entries[id].Status == StatusFailedTerminal {
-				finalTerminal = append(finalTerminal, id)
-			}
+	for _, id := range state.SortedKeys() {
+		if state.Entries[id].Status == StatusFailedTerminal {
+			finalTerminal = append(finalTerminal, id)
 		}
 	}
 	if len(finalTerminal) > 0 {
@@ -399,38 +389,8 @@ func (r *Runner) persistFactsAndSidecar(matchID, contentSHA string, pr *ParseRes
 	return nil
 }
 
-// atomicWrite writes data to path+".tmp", fsyncs, then renames over path. It
-// removes the temp file on any failure path so partials never look canonical.
+// atomicWrite durably replaces path through the shared exclusive-temp,
+// file-sync, rename, and parent-directory-sync protocol.
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	cleanup := func() { _ = os.Remove(tmp) }
-	n, err := f.Write(data)
-	if err != nil {
-		f.Close()
-		cleanup()
-		return err
-	}
-	if n != len(data) {
-		f.Close()
-		cleanup()
-		return fmt.Errorf("short write %d of %d", n, len(data))
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		cleanup()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		cleanup()
-		return err
-	}
-	return nil
+	return atomicfile.WriteFile(path, data, 0o644)
 }

@@ -296,6 +296,24 @@ func TestBatchRetryAllReprocesses(t *testing.T) {
 	}
 }
 
+func TestBatchRetryAllStillReportsFinalTerminalState(t *testing.T) {
+	r, dir, _, _ := newRunner(t, nil)
+	r.RetryAll = true
+	r.MaxRetries = 1
+	m := &Manifest{Entries: []ManifestEntry{{
+		MatchID: "missing",
+		DemPath: filepath.Join(dir, "missing.dem"),
+	}}}
+
+	st, errs := r.Run(m)
+	if st == nil || st.Entries["missing"].Status != StatusFailedTerminal {
+		t.Fatalf("missing entry must be terminal: %+v", st)
+	}
+	if len(errs) == 0 || !strings.Contains(errs[len(errs)-1].Error(), "terminal failures") {
+		t.Fatalf("retry-all must still report final terminal state, got %v", errs)
+	}
+}
+
 func TestBatchRunIsIdempotentAcrossRestore(t *testing.T) {
 	calls := 0
 	makeRunner := func(state string) *Runner {
