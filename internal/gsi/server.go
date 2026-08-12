@@ -1,16 +1,19 @@
 package gsi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -20,18 +23,23 @@ import (
 const maxSnapshotBytes = 10 << 20
 
 type Server struct {
-	store        *session.Store
-	latest       *state.Latest
-	profiler     *profile.Profiler
-	engine       *analytics.Engine
-	processor    *capture.Processor
-	tracker      *operator.Tracker
-	dashboard    http.Handler
-	mux          *http.ServeMux
-	inflightMu   sync.Mutex
-	inflightCond *sync.Cond
-	inflight     int
-	stopping     bool
+	store               *session.Store
+	latest              *state.Latest
+	profiler            *profile.Profiler
+	engine              *analytics.Engine
+	processor           *capture.Processor
+	tracker             *operator.Tracker
+	dashboard           http.Handler
+	mux                 *http.ServeMux
+	inflightMu          sync.Mutex
+	inflightCond        *sync.Cond
+	inflight            int
+	stopping            bool
+	projector           *liveprojection.Follower
+	projectorCancel     context.CancelFunc
+	projectorDone       chan error
+	projectionDrain     time.Duration
+	projectionOverrides []liveprojection.Projection
 }
 
 type Option func(*Server)
@@ -67,10 +75,23 @@ func WithTracker(tracker *operator.Tracker) Option {
 	return func(server *Server) { server.tracker = tracker }
 }
 
+func WithLiveProjections(projections ...liveprojection.Projection) Option {
+	return func(server *Server) {
+		server.projectionOverrides = append([]liveprojection.Projection(nil), projections...)
+	}
+}
+
+func WithProjectionDrainTimeout(timeout time.Duration) Option {
+	return func(server *Server) {
+		if timeout > 0 {
+			server.projectionDrain = timeout
+		}
+	}
+}
+
 func NewServer(store *session.Store, opts ...Option) *Server {
 	server := &Server{
-		store: store,
-		mux:   http.NewServeMux(),
+		store: store, mux: http.NewServeMux(), projectionDrain: 10 * time.Second,
 	}
 	server.inflightCond = sync.NewCond(&server.inflightMu)
 	for _, opt := range opts {
@@ -81,17 +102,28 @@ func NewServer(store *session.Store, opts ...Option) *Server {
 		server.tracker = operator.NewTracker(store.SessionID(), now, 15*time.Second, time.Now)
 	}
 	if server.processor == nil {
-		var processorOpts []capture.Option
-		if server.latest != nil {
-			processorOpts = append(processorOpts, capture.WithLatest(capture.NewLatestProjection(server.latest)))
-		}
-		if server.profiler != nil {
-			processorOpts = append(processorOpts, capture.WithProfile(capture.NewProfileProjection(server.profiler, store.SessionDir())))
-		}
-		if server.engine != nil {
-			processorOpts = append(processorOpts, capture.WithAnalytics(capture.NewAnalyticsProjection(server.engine, store.SessionDir(), store.SessionID())))
-		}
-		server.processor = capture.NewProcessor(store, server.tracker, processorOpts...)
+		server.processor = capture.NewProcessor(store, server.tracker)
+	}
+	var projections []liveprojection.Projection
+	if server.latest != nil {
+		projections = append(projections, trackedProjection{capture.NewLatestProjection(server.latest), server.tracker, operator.SubsystemLatest, "latest_failed"})
+	}
+	if server.profiler != nil {
+		projections = append(projections, trackedProjection{capture.NewProfileProjection(server.profiler, store.SessionDir()), server.tracker, operator.SubsystemProfile, "profile_failed"})
+	}
+	if server.engine != nil {
+		projections = append(projections, trackedProjection{capture.NewAnalyticsProjection(server.engine, store.SessionDir(), store.SessionID()), server.tracker, operator.SubsystemAnalytics, "analytics_failed"})
+	}
+	if server.projectionOverrides != nil {
+		projections = server.projectionOverrides
+	}
+	if len(projections) > 0 {
+		server.projector = liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "live_projection_cursor.json"), projections, liveprojection.WithHighWater(store.HighWater()))
+		projectorContext, cancel := context.WithCancel(context.Background())
+		server.projectorCancel = cancel
+		server.projectorDone = make(chan error, 1)
+		go func() { server.projectorDone <- server.projector.Run(projectorContext, store.HighWater().C()) }()
+		store.HighWater().Wake()
 	}
 	server.routes()
 	return server
@@ -122,6 +154,20 @@ func (s *Server) Wait() {
 		s.inflightCond.Wait()
 	}
 	s.inflightMu.Unlock()
+	if s.projector != nil {
+		s.projectorCancel()
+		stopped := false
+		select {
+		case <-s.projectorDone:
+			stopped = true
+		case <-time.After(s.projectionDrain):
+		}
+		if stopped {
+			ctx, cancel := context.WithTimeout(context.Background(), s.projectionDrain)
+			_ = s.projector.CatchUp(ctx, s.store.HighWater().Current().Sequence)
+			cancel()
+		}
+	}
 }
 
 func (s *Server) routes() {
@@ -185,8 +231,55 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(s.tracker.Snapshot()); err != nil {
+	projectionHealth := liveprojection.Health{}
+	if s.projector != nil {
+		projectionHealth = s.projector.Health()
+	}
+	trackerSnapshot := s.tracker.Snapshot()
+	if projectionHealth.Degraded {
+		trackerSnapshot.State = operator.StateDegraded
+	}
+	status := struct {
+		operator.Snapshot
+		LiveProjection liveprojection.Health `json:"live_projection"`
+	}{Snapshot: trackerSnapshot, LiveProjection: projectionHealth}
+	if err := json.NewEncoder(w).Encode(status); err != nil {
 		http.Error(w, "failed to encode status", http.StatusInternalServerError)
+	}
+}
+
+type trackedProjection struct {
+	projection      capture.Projection
+	tracker         *operator.Tracker
+	subsystem, code string
+}
+
+func (p trackedProjection) Apply(ctx context.Context, record *session.Record) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := p.projection.Apply(record); err != nil {
+		p.tracker.Failure(p.subsystem, p.code, safeProjectionMessage(p.code))
+		return errors.New(p.code)
+	}
+	if p.subsystem == operator.SubsystemAnalytics {
+		p.tracker.AnalyticsSuccess(record.ReceivedAt)
+	} else {
+		p.tracker.Success(p.subsystem)
+	}
+	return nil
+}
+
+func safeProjectionMessage(code string) string {
+	switch code {
+	case "latest_failed":
+		return "latest projection failed"
+	case "profile_failed":
+		return "profile projection failed"
+	case "analytics_failed":
+		return "analytics projection failed"
+	default:
+		return "projection failed"
 	}
 }
 

@@ -89,9 +89,20 @@ type trackedAppender struct {
 func (a *trackedAppender) Append(raw []byte) (*session.Record, error) { return a.store.Append(raw) }
 func (a *trackedAppender) Close() error                               { a.calls++; close(a.closed); return a.store.Close() }
 
-type requestBarrier struct{ entered, release chan struct{} }
+type requestBarrier struct {
+	entered, release chan struct{}
+	once             *sync.Once
+}
 
-func (b requestBarrier) Apply(*session.Record) error { close(b.entered); <-b.release; return nil }
+func (b requestBarrier) Apply(ctx context.Context, _ *session.Record) error {
+	b.once.Do(func() { close(b.entered) })
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 type observedServer struct {
 	*http.Server
@@ -111,9 +122,9 @@ func (s *failingHTTPServer) Shutdown(ctx context.Context) error {
 	if s.shutdownCalls.Add(1) == 1 {
 		failedCtx, cancel := context.WithCancel(context.Background())
 		cancel()
-		err := s.Server.Shutdown(failedCtx)
+		_ = s.Server.Shutdown(failedCtx)
 		close(s.shutdownReturned)
-		return err
+		return context.DeadlineExceeded
 	}
 	close(s.retryShutdownStarted)
 	err := s.Server.Shutdown(ctx)
@@ -221,8 +232,8 @@ func TestRunnerSignalsDrainBarrierBlockedAcceptedResponseBeforeOnceOnlyClose(t *
 			now := time.Now().UTC()
 			tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 			entered, release := make(chan struct{}), make(chan struct{})
-			processor := capture.NewProcessor(appender, tracker, capture.WithLatest(requestBarrier{entered, release}))
-			handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+			processor := capture.NewProcessor(appender, tracker)
+			handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(requestBarrier{entered: entered, release: release, once: &sync.Once{}}))
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -246,6 +257,9 @@ func TestRunnerSignalsDrainBarrierBlockedAcceptedResponseBeforeOnceOnlyClose(t *
 				response <- string(body)
 			}()
 			<-entered
+			if body := <-response; body != "ok\n" {
+				t.Fatalf("body=%q", body)
+			}
 			signals <- stopSignal
 			<-shutdownStarted
 			select {
@@ -254,9 +268,6 @@ func TestRunnerSignalsDrainBarrierBlockedAcceptedResponseBeforeOnceOnlyClose(t *
 			default:
 			}
 			close(release)
-			if body := <-response; body != "ok\n" {
-				t.Fatalf("body=%q", body)
-			}
 			if err := <-result; err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -276,8 +287,8 @@ func TestRunnerShutdownFailureGracefullyFlushesRawCommittedResponseBeforeForceCl
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projectionEntered, releaseProjection := make(chan struct{}), make(chan struct{})
-	processor := capture.NewProcessor(appender, tracker, capture.WithLatest(requestBarrier{projectionEntered, releaseProjection}))
-	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+	processor := capture.NewProcessor(appender, tracker)
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(requestBarrier{entered: projectionEntered, release: releaseProjection, once: &sync.Once{}}))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
