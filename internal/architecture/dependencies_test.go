@@ -35,6 +35,11 @@ var ownershipRules = map[string]importRule{
 	"obscontrol":     {standard: stringSet(), internal: []string{"internal/contracts"}},
 }
 
+var policyCommitLogRule = importRule{
+	standard: stringSet("bytes", "crypto/sha256", "encoding/binary", "encoding/hex", "errors", "fmt", "io", "os", "path/filepath", "sort", "strings", "sync"),
+	internal: []string{"internal/contracts"},
+}
+
 func TestTrackImportGraphUsesExplicitDirections(t *testing.T) {
 	for root, rule := range ownershipRules {
 		rootPath := filepath.Join("..", root)
@@ -56,12 +61,16 @@ func TestTrackImportGraphUsesExplicitDirections(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			fileRule := rule
+			if root == "policy" && strings.HasPrefix(filepath.ToSlash(path), "../policy/commitlog/") {
+				fileRule = policyCommitLogRule
+			}
 			for _, spec := range file.Imports {
 				imp, err := strconv.Unquote(spec.Path.Value)
 				if err != nil {
 					return err
 				}
-				if err := checkImport(root, imp, rule); err != nil {
+				if err := checkImport(root, imp, fileRule); err != nil {
 					t.Errorf("%s: %v", path, err)
 				}
 			}
@@ -101,6 +110,22 @@ func TestTrackImportGraphRejectsForbiddenDependencyFixtures(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPolicyCommitLogAdapterHasNarrowFilesystemRule(t *testing.T) {
+	for _, allowed := range []string{"crypto/sha256", "encoding/binary", "os", "path/filepath", modulePrefix + "internal/contracts"} {
+		if err := checkImport("policy", allowed, policyCommitLogRule); err != nil {
+			t.Fatalf("policy commit-log import %q rejected: %v", allowed, err)
+		}
+	}
+	for _, forbidden := range []string{"net/http", "database/sql", modulePrefix + "internal/capture", modulePrefix + "internal/presentation"} {
+		if err := checkImport("policy", forbidden, policyCommitLogRule); err == nil {
+			t.Fatalf("policy commit-log forbidden import %q accepted", forbidden)
+		}
+	}
+	if err := checkImport("policy", "os", ownershipRules["policy"]); err == nil {
+		t.Fatal("pure policy core accepted filesystem import")
 	}
 }
 
