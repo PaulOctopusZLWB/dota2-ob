@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -10,8 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/preflight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -27,6 +31,19 @@ type commandAddress string
 
 func (a commandAddress) Network() string { return "tcp" }
 func (a commandAddress) String() string  { return string(a) }
+
+type failingDeliveryListener struct {
+	address net.Addr
+	failed  chan struct{}
+	once    sync.Once
+}
+
+func (l *failingDeliveryListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.failed) })
+	return nil, errors.New("delivery serve failed")
+}
+func (l *failingDeliveryListener) Close() error   { return nil }
+func (l *failingDeliveryListener) Addr() net.Addr { return l.address }
 
 func TestRunRejectsUnsafeNormalAddressBeforeCreatingDataRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "must-not-exist")
@@ -142,22 +159,98 @@ func TestRunRejectsCollidingCaptureAndDeliveryAddressesBeforeDataSideEffects(t *
 	}
 }
 
-func TestPairedServerPropagatesDeliveryServeFailure(t *testing.T) {
+func TestRunDeliveryBindFailureLeavesCapturePersistingGSI(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	deps := defaultRunDependencies()
+	deps.newTokenFile = func(string) (string, string, func(), error) {
+		return "test-only-operator-token", "", func() {}, nil
+	}
+	listenCalls := 0
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		listenCalls++
+		if listenCalls == 2 {
+			return nil, errors.New("delivery address already in use")
+		}
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, _ lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		store := appender.(*session.Store)
+		request := httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`))
+		response := httptest.NewRecorder()
+		server.(*pairedHTTPServer).capture.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("POST /gsi status=%d body=%q", response.Code, response.Body.String())
+		}
+		if data, err := os.ReadFile(store.RawPath()); err != nil || !bytes.Contains(data, []byte(`"game_time":41`)) {
+			t.Fatalf("persisted raw=%q err=%v", data, err)
+		}
+		return appender.Close()
+	}
+
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root}, &output, deps); code != 0 {
+		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+	if !strings.Contains(output.String(), "delivery_listen_failed") {
+		t.Fatalf("missing observable delivery failure: %q", output.String())
+	}
+}
+
+func TestDeliveryServeFailureLeavesCapturePersistingGSI(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("delivery-failure"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	captureListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer captureListener.Close()
+	deliveryListener := &failingDeliveryListener{
+		address: commandAddress("127.0.0.1:43211"),
+		failed:  make(chan struct{}),
+	}
+	deliveryFailures := make(chan string, 1)
+	handler := gsi.NewServer(store)
 	servers := &pairedHTTPServer{
-		capture:          &http.Server{Handler: http.NotFoundHandler()},
-		delivery:         &http.Server{Handler: http.NotFoundHandler()},
-		deliveryListener: commandListener{address: commandAddress("127.0.0.1:43211")},
+		capture:               &http.Server{Handler: handler},
+		delivery:              &http.Server{Handler: http.NotFoundHandler()},
+		deliveryListener:      deliveryListener,
+		reportDeliveryFailure: func(code string) { deliveryFailures <- code },
 	}
-	err = servers.Serve(captureListener)
-	if err == nil || !strings.Contains(err.Error(), "unused") {
-		t.Fatalf("serve error=%v", err)
+	signals := make(chan os.Signal, 1)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- lifecycle.Run(servers, captureListener, store, handler, signals, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), time.Second)
+		})
+	}()
+
+	<-deliveryListener.failed
+	if code := <-deliveryFailures; code != "delivery_serve_failed" {
+		t.Fatalf("delivery failure code=%q", code)
 	}
-	_ = servers.Close()
+	select {
+	case err := <-runDone:
+		t.Fatalf("delivery failure terminated capture lifecycle: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	response, err := http.Post("http://"+captureListener.Addr().String()+"/gsi", "application/json", strings.NewReader(`{"map":{"game_time":42}}`))
+	if err != nil {
+		t.Fatalf("POST /gsi after delivery failure: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("POST /gsi status=%d", response.StatusCode)
+	}
+	if data, err := os.ReadFile(store.RawPath()); err != nil || !bytes.Contains(data, []byte(`"game_time":42`)) {
+		t.Fatalf("persisted raw=%q err=%v", data, err)
+	}
+
+	signals <- os.Interrupt
+	if err := <-runDone; err != nil {
+		t.Fatalf("capture shutdown after isolated delivery failure: %v", err)
+	}
 }
 
 func TestRunCreatesPrivateEphemeralTokenAndProductionCaptureProfile(t *testing.T) {

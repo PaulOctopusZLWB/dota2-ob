@@ -133,10 +133,8 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	}
 	deliveryListener, err := deps.listen("tcp", normalizedDelivery)
 	if err != nil {
-		_ = listener.Close()
-		_ = store.Close()
 		logger.Printf("delivery_listen_failed")
-		return 1
+		deliveryListener = nil
 	}
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, *staleThreshold, time.Now)
@@ -152,19 +150,24 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	}
 	handler := gsi.NewServer(store, captureOptions...)
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-	gateway, err := delivery.NewGateway(delivery.Config{
-		BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
-		Commands: unavailableCommands{}, Overlay: unavailableOverlay{}, ReadAsset: webassets.ReadAsset, Now: time.Now,
-	})
-	if err != nil {
-		_ = deliveryListener.Close()
-		_ = listener.Close()
-		_ = store.Close()
-		logger.Printf("delivery_config_failed")
-		return 1
+	var deliveryServer *http.Server
+	if deliveryListener != nil {
+		gateway, gatewayErr := delivery.NewGateway(delivery.Config{
+			BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
+			Commands: unavailableCommands{}, Overlay: unavailableOverlay{}, ReadAsset: webassets.ReadAsset, Now: time.Now,
+		})
+		if gatewayErr != nil {
+			_ = deliveryListener.Close()
+			deliveryListener = nil
+			logger.Printf("delivery_config_failed")
+		} else {
+			deliveryServer = &http.Server{Handler: gateway, ReadHeaderTimeout: 5 * time.Second}
+		}
 	}
-	deliveryServer := &http.Server{Handler: gateway, ReadHeaderTimeout: 5 * time.Second}
-	servers := &pairedHTTPServer{capture: server, delivery: deliveryServer, deliveryListener: deliveryListener}
+	servers := &pairedHTTPServer{
+		capture: server, delivery: deliveryServer, deliveryListener: deliveryListener,
+		reportDeliveryFailure: func(code string) { logger.Printf("%s", code) },
+	}
 	logger.Printf("server_started addr=%s delivery_addr=%s session_id=%s capture_target=%s", normalized, normalizedDelivery, store.SessionID(), filepath.Join(store.SessionID(), "raw.jsonl"))
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -181,26 +184,48 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 }
 
 type pairedHTTPServer struct {
-	capture          *http.Server
-	delivery         *http.Server
-	deliveryListener net.Listener
+	capture               *http.Server
+	delivery              *http.Server
+	deliveryListener      net.Listener
+	reportDeliveryFailure func(string)
 }
 
 func (s *pairedHTTPServer) Serve(captureListener net.Listener) error {
-	results := make(chan error, 2)
-	go func() { results <- s.capture.Serve(captureListener) }()
-	go func() { results <- s.delivery.Serve(s.deliveryListener) }()
-	return <-results
+	if s.delivery != nil && s.deliveryListener != nil {
+		go func() {
+			if err := s.delivery.Serve(s.deliveryListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.reportDelivery("delivery_serve_failed")
+			}
+		}()
+	}
+	return s.capture.Serve(captureListener)
 }
 
 func (s *pairedHTTPServer) Shutdown(ctx context.Context) error {
-	deliveryErr := s.delivery.Shutdown(ctx)
 	captureErr := s.capture.Shutdown(ctx)
-	return errors.Join(deliveryErr, captureErr)
+	if s.delivery != nil {
+		if err := s.delivery.Shutdown(ctx); err != nil {
+			s.reportDelivery("delivery_shutdown_failed")
+			_ = s.delivery.Close()
+		}
+	}
+	return captureErr
 }
 
 func (s *pairedHTTPServer) Close() error {
-	return errors.Join(s.delivery.Close(), s.capture.Close())
+	captureErr := s.capture.Close()
+	if s.delivery != nil {
+		if err := s.delivery.Close(); err != nil {
+			s.reportDelivery("delivery_close_failed")
+		}
+	}
+	return captureErr
+}
+
+func (s *pairedHTTPServer) reportDelivery(code string) {
+	if s.reportDeliveryFailure != nil {
+		s.reportDeliveryFailure(code)
+	}
 }
 
 type unavailableCommands struct{}
