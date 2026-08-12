@@ -2,12 +2,17 @@ package gsi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +35,7 @@ type Server struct {
 	processor           *capture.Processor
 	tracker             *operator.Tracker
 	dashboard           http.Handler
+	diagnostics         *DiagnosticConfig
 	mux                 *http.ServeMux
 	inflightMu          sync.Mutex
 	inflightCond        *sync.Cond
@@ -44,6 +50,11 @@ type Server struct {
 
 type Option func(*Server)
 
+type DiagnosticConfig struct {
+	BearerToken   string
+	AllowedOrigin string
+}
+
 func WithLatest(latest *state.Latest) Option {
 	return func(server *Server) {
 		server.latest = latest
@@ -54,6 +65,33 @@ func WithDashboard(handler http.Handler) Option {
 	return func(server *Server) {
 		server.dashboard = handler
 	}
+}
+
+// WithDiagnostics re-enables the deprecated capture-owned GET surfaces. An
+// empty token or origin leaves them disabled (the production default).
+func WithDiagnostics(config DiagnosticConfig) Option {
+	return func(server *Server) {
+		if strings.TrimSpace(config.BearerToken) != "" && validDiagnosticOrigin(config.AllowedOrigin) {
+			config.AllowedOrigin = strings.TrimRight(config.AllowedOrigin, "/")
+			server.diagnostics = &config
+		}
+	}
+}
+
+func validDiagnosticOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	host, portText, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return false
+	}
+	return strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
 }
 
 func WithProfiler(profiler *profile.Profiler) Option {
@@ -172,15 +210,61 @@ func (s *Server) Wait() {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
-	s.mux.HandleFunc("/api/latest", s.handleLatest)
-	s.mux.HandleFunc("/api/profile", s.handleProfile)
-	s.mux.HandleFunc("/api/analytics", s.handleAnalytics)
-	s.mux.HandleFunc("/api/events", s.handleEvents)
 	s.mux.HandleFunc("/api/status", s.handleStatus)
 	s.mux.HandleFunc("/gsi", s.handleGSI)
-	if s.dashboard != nil {
-		s.mux.Handle("/", s.dashboard)
+	if s.diagnostics != nil {
+		s.mux.Handle("/api/latest", s.diagnostic(http.HandlerFunc(s.handleLatest)))
+		s.mux.Handle("/api/profile", s.diagnostic(http.HandlerFunc(s.handleProfile)))
+		s.mux.Handle("/api/analytics", s.diagnostic(http.HandlerFunc(s.handleAnalytics)))
+		s.mux.Handle("/api/events", s.diagnostic(http.HandlerFunc(s.handleEvents)))
+		if s.dashboard != nil {
+			s.mux.Handle("/", s.diagnostic(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
+				s.dashboard.ServeHTTP(w, r)
+			})))
+		}
 	}
+}
+
+func (s *Server) diagnostic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setDiagnosticHeaders(w)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !diagnosticBearerMatches(r.Header.Get("Authorization"), s.diagnostics.BearerToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		origin := strings.TrimRight(r.Header.Get("Origin"), "/")
+		if origin == "null" || (origin != "" && origin != s.diagnostics.AllowedOrigin) {
+			http.Error(w, "origin rejected", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func setDiagnosticHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+func diagnosticBearerMatches(header, token string) bool {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	provided := strings.TrimPrefix(header, prefix)
+	return len(provided) == len(token) && subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

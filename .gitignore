@@ -14,3 +14,6 @@
 /data/*.log
 /spikes/obs-overlay/node_modules/
 /spikes/obs-overlay/test-results/
+/web/browser/node_modules/
+/web/browser/test-results/
+/web/browser/playwright-report/
