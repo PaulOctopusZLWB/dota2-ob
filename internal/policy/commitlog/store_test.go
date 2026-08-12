@@ -32,7 +32,8 @@ func validCommit(sequence, prior, resulting uint64, commandID string) contracts.
 func TestAppendReturnsOnlyAfterSegmentSyncAndDuplicateReplaysStoredResult(t *testing.T) {
 	var synced bool
 	hooks := commitlog.Hooks{SyncFile: func(*os.File) error { synced = true; return nil }}
-	store, state, err := commitlog.Open(t.TempDir(), "session", commitlog.WithHooks(hooks))
+	root := t.TempDir()
+	store, state, err := commitlog.Open(root, "session", commitlog.WithHooks(hooks))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +53,11 @@ func TestAppendReturnsOnlyAfterSegmentSyncAndDuplicateReplaysStoredResult(t *tes
 	if committed.Hash == "" || committed.Commit.CommandResult == nil {
 		t.Fatalf("incomplete committed value: %#v", committed)
 	}
+	segment := filepath.Join(root, "session", "00000000000000000001.pcl")
+	before, err := os.Stat(segment)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	synced = false
 	replay, err := store.Append(commit)
@@ -63,6 +69,13 @@ func TestAppendReturnsOnlyAfterSegmentSyncAndDuplicateReplaysStoredResult(t *tes
 	}
 	if replay.Hash != committed.Hash || !reflect.DeepEqual(replay.Commit.CommandResult, committed.Commit.CommandResult) {
 		t.Fatal("duplicate did not return exact stored terminal result")
+	}
+	after, err := os.Stat(segment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("live duplicate appended bytes: %d -> %d", before.Size(), after.Size())
 	}
 }
 

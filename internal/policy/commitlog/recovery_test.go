@@ -417,3 +417,56 @@ func TestRecoveryCapacityCountsOnlyCommittedBytesAfterTailTruncation(t *testing.
 		t.Fatalf("tail size=%d, want %d", info.Size(), clean.Size())
 	}
 }
+
+func TestRecoveryRejectsFullyFramedDuplicateCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*contracts.PolicyCommitV1)
+	}{
+		{name: "identical terminal result"},
+		{name: "conflicting terminal result", mutate: func(commit *contracts.PolicyCommitV1) {
+			commit.CommandResult.Reason = "session_command_limit"
+			commit.AuditEvents[0].Reason = "session_command_limit"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, _, err := commitlog.Open(root, "session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := store.Append(rejectedCommit(1, 0, "duplicate-command"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpoint := checkpointFor(first)
+			if err = store.WriteCheckpoint(checkpoint); err != nil {
+				t.Fatal(err)
+			}
+			_ = store.Close()
+
+			duplicate := rejectedCommit(2, 0, "duplicate-command")
+			if tc.mutate != nil {
+				tc.mutate(&duplicate)
+			}
+			path := onlySegment(t, root)
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = file.Write(testFrame(t, duplicate)); err != nil {
+				t.Fatal(err)
+			}
+			_ = file.Close()
+			before, _ := os.ReadFile(path)
+
+			if _, _, err = commitlog.Open(root, "session"); !errors.Is(err, commitlog.ErrCorrupt) || !strings.Contains(err.Error(), "duplicate command") {
+				t.Fatalf("Open error=%v", err)
+			}
+			after, _ := os.ReadFile(path)
+			if !bytes.Equal(after, before) {
+				t.Fatal("terminated duplicate corruption was mutated")
+			}
+		})
+	}
+}

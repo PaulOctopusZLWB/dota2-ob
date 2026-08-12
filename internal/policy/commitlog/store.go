@@ -622,9 +622,21 @@ func (s *Store) recoverSegment(path string, last bool, state *State) error {
 		if err := validateNext(*state, c); err != nil {
 			return fmt.Errorf("%w: sequence", ErrCorrupt)
 		}
+		if c.CommandID != "" && containsCommand(state.Commits, c.CommandID) {
+			return fmt.Errorf("%w: duplicate command %q", ErrCorrupt, c.CommandID)
+		}
 		apply(state, Committed{Commit: c, Payload: append([]byte(nil), payload...), Hash: hex.EncodeToString(sum[:])})
 	}
 	return nil
+}
+
+func containsCommand(commits []Committed, commandID string) bool {
+	for _, commit := range commits {
+		if commit.Commit.CommandID == commandID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) reopenLastSegment() error {
