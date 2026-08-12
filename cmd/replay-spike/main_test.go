@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,11 +66,98 @@ func TestValidateReplayURLAcceptlist(t *testing.T) {
 		"http://replay273.valve.net/571/123_456.dem.bz2",
 		"http://replay273.valve.net/570/abc_456.dem.bz2",
 		"http://replay273.valve.net/570/123_salt.dem.bz2",
+		"http://replay1.valve.net/570/123_456.dem.bz2?",
+		"http://replay1.valve.net/570/123_456.dem.bz2#",
+		"http://replay1.valve.net:/570/123_456.dem.bz2",
 	}
 	for _, u := range bad {
 		if err := validateReplayURL(u, ""); err == nil {
 			t.Errorf("validateReplayURL(%q) expected rejection, got nil", u)
 		}
+	}
+}
+
+func TestBoundedDownloadRejectsExactShapeBypassesAtInitialBoundary(t *testing.T) {
+	bad := []string{
+		"http://replay1.valve.net/570/123_456.dem.bz2?",
+		"http://replay1.valve.net/570/123_456.dem.bz2#",
+		"http://replay1.valve.net:/570/123_456.dem.bz2",
+	}
+	for _, rawURL := range bad {
+		t.Run(rawURL, func(t *testing.T) {
+			requests := 0
+			withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				return response(http.StatusOK, "", append(zstdMagic, 1)), nil
+			})})
+			err := boundedDownload(rawURL, filepath.Join(t.TempDir(), "replay"), 1024, "123")
+			if err == nil || requests != 0 {
+				t.Fatalf("initial URL bypass reached transport: requests=%d err=%v", requests, err)
+			}
+		})
+	}
+}
+
+func TestBoundedDownloadRejectsExactShapeBypassesAtRedirectBoundary(t *testing.T) {
+	bad := []string{
+		"http://replay1.valve.net/570/123_456.dem.bz2?",
+		"http://replay1.valve.net/570/123_456.dem.bz2#",
+		"http://replay1.valve.net:/570/123_456.dem.bz2",
+	}
+	for _, location := range bad {
+		t.Run(location, func(t *testing.T) {
+			requests := 0
+			withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				if requests == 1 {
+					return response(http.StatusFound, location, nil), nil
+				}
+				return response(http.StatusOK, "", append(zstdMagic, 1)), nil
+			})})
+			err := boundedDownload("http://replay1.valve.net/570/123_456.dem.bz2", filepath.Join(t.TempDir(), "replay"), 1024, "123")
+			if err == nil || requests != 1 {
+				t.Fatalf("redirect bypass was fetched: requests=%d err=%v", requests, err)
+			}
+		})
+	}
+}
+
+func TestBoundedDownloadRejectsExactShapeBypassesAtFinalBoundary(t *testing.T) {
+	bad := []string{
+		"http://replay1.valve.net/570/123_456.dem.bz2?",
+		"http://replay1.valve.net:/570/123_456.dem.bz2",
+	}
+	for _, finalURL := range bad {
+		t.Run(finalURL, func(t *testing.T) {
+			withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				u, err := url.Parse(finalURL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp := response(http.StatusOK, "", append(zstdMagic, 1))
+				resp.Request = &http.Request{URL: u}
+				return resp, nil
+			})})
+			err := boundedDownload("http://replay1.valve.net/570/123_456.dem.bz2", filepath.Join(t.TempDir(), "replay"), 1024, "123")
+			if err == nil || !strings.Contains(err.Error(), "final response URL") {
+				t.Fatalf("final URL bypass accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestBoundedDownloadAcceptsCanonicalMeasuredShape(t *testing.T) {
+	withHTTPClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		resp := response(http.StatusOK, "", append(zstdMagic, 1))
+		resp.Request = req
+		return resp, nil
+	})})
+	err := boundedDownload(
+		"http://replay273.valve.net/570/8941092540_1595018738.dem.bz2",
+		filepath.Join(t.TempDir(), "replay.dem.bz2"), 1024, "8941092540",
+	)
+	if err != nil {
+		t.Fatalf("canonical measured URL rejected: %v", err)
 	}
 }
 

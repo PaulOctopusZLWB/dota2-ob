@@ -416,6 +416,14 @@ func boundedDownload(rawURL, dest string, maxBytes int64, expectedMatchID string
 		if len(via) >= maxReplayRedirects {
 			return fmt.Errorf("too many redirects (max %d)", maxReplayRedirects)
 		}
+		// Validate the raw Location value before net/http normalization can erase
+		// an empty query, fragment, or port delimiter.
+		if req.Response != nil {
+			location := req.Response.Header.Get("Location")
+			if err := validateReplayURL(location, expectedMatchID); err != nil {
+				return fmt.Errorf("redirect Location: %w", err)
+			}
+		}
 		if err := validateReplayURL(req.URL.String(), expectedMatchID); err != nil {
 			return fmt.Errorf("redirect URL: %w", err)
 		}
@@ -585,15 +593,15 @@ func validateReplayURL(rawURL, expectedMatchID string) error {
 	if u.User != nil {
 		return fmt.Errorf("embedded credentials not allowed")
 	}
-	if u.Port() != "" {
-		return fmt.Errorf("nonstandard or explicit port not allowed")
-	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	if u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || strings.Contains(rawURL, "#") {
 		return fmt.Errorf("query and fragment not allowed")
 	}
 	host := u.Hostname()
 	if !looksLikeValveReplayHost(host) {
 		return fmt.Errorf("host %q not in Valve replay CDN allowlist", host)
+	}
+	if u.Host != host {
+		return fmt.Errorf("authority %q must equal approved hostname %q with no explicit port", u.Host, host)
 	}
 	matchID, err := replayPathMatchID(u.EscapedPath())
 	if err != nil {

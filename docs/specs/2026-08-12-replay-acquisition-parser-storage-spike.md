@@ -100,7 +100,8 @@ untrusted input and defends it explicitly (reviewed hardening):
   HTTP exception. The initial URL, every redirect, and final response must use
   one unchanged scheme and match exactly `replay<digits>.valve.net` plus
   `/570/<requested-match-id>_<numeric-salt>.dem.bz2`. Embedded credentials,
-  explicit/nonstandard ports, queries, fragments, malformed paths, mismatched
+  explicit/nonstandard ports (including an empty `host:` delimiter), queries or
+  fragments (including empty `?`/`#` delimiters), malformed paths, mismatched
   match IDs, other hosts, and HTTP/HTTPS cross-policy redirects are rejected.
   Redirects remain capped at five.
 - HTTP provides no authenticated transport. An on-path party can substitute
