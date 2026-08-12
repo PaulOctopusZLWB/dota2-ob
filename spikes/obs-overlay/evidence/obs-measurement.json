@@ -1,5 +1,6 @@
 {
-  "measuredAt": "2026-08-12T18:53:25+08:00",
+  "measuredAt": "2026-08-12T19:20:29+08:00",
+  "evidenceRun": "DOT34-rerun-20260812T191444+0800",
   "host": {
     "os": "Ubuntu 24.04.4 LTS",
     "session": "X11",
@@ -39,9 +40,9 @@
   },
   "failureRecovery": {
     "pollIntervalMs": 250,
-    "measurementSamplingApproxMs": 235,
-    "connectionLossToHiddenObservedMs": 1428,
-    "serverRecoveryToVisibleObservedMs": 477,
+    "measurementSamplingApproxMs": 181,
+    "connectionLossToHiddenObservedMs": 1455,
+    "serverRecoveryToVisibleObservedMs": 366,
     "staleHidden": true,
     "disconnectedHidden": true,
     "emergencyHidden": true,
@@ -49,33 +50,46 @@
   },
   "steady1440p": {
     "warmupSeconds": 10,
-    "sampleSeconds": 30,
+    "sampleSeconds": 30.324313,
     "sampleIntervalSeconds": 5,
-    "obsCpuPercent": 2.43,
-    "activeBrowserCpuPercent": 1.27,
-    "overlayServerCpuPercent": 0.07,
-    "obsAndBrowserPssKiB": 721321,
+    "obsCpuPercent": 2.87,
+    "activeBrowserCpuPercent": 1.15,
+    "obsAndBrowserPssKiB": 704104,
+    "obsAndBrowserPssMinKiB": 701668,
+    "obsAndBrowserPssMaxKiB": 704104,
     "gpuFramebufferMiB": 59,
     "previewFps": 60,
-    "graphicsThreadP99Ms": 0.506,
-    "graphicsThreadPercentUnderFrameBudget": 99.9523
+    "graphicsThreadP99Ms": 0.751,
+    "graphicsThreadPercentUnderFrameBudget": 99.9605
   },
   "recording1440p": {
-    "durationSeconds": 17.941,
+    "durationSeconds": 22.017,
     "encoder": "NVENC H.264",
-    "framesOutput": 1076,
-    "drawnFrames": 1058,
-    "attemptedFrames": 1099,
+    "framesOutput": 1295,
+    "drawnFrames": 1280,
+    "attemptedFrames": 1321,
     "renderLaggedFrames": 41,
-    "renderLagPercent": 3.7,
-    "encodingSkippedFrames": 41,
-    "encodingAttemptedFrames": 1093,
-    "encodingSkipPercent": 3.8
+    "renderLagPercent": 3.1,
+    "encodingSkippedFrames": 36,
+    "encodingAttemptedFrames": 1313,
+    "encodingSkipPercent": 2.7
   },
   "network": {
     "isolation": "unprivileged network namespace with loopback as the only route",
     "browserConnections": ["127.0.0.1:18838"],
     "remoteConnectionsPossible": false,
     "obsRemoteUpdateAttemptsBlocked": true
+  },
+  "supersededUntraceableRun": {
+    "reason": "The first disposable runtime was deleted before review; these values are retained only to identify the claims replaced by this rerun.",
+    "connectionLossToHiddenObservedMs": 1428,
+    "serverRecoveryToVisibleObservedMs": 477,
+    "obsAndBrowserPssKiB": 721321,
+    "recordingFramesOutput": 1076,
+    "recordingDrawnFrames": 1058,
+    "recordingAttemptedFrames": 1099,
+    "recordingRenderLaggedFrames": 41,
+    "recordingEncodingSkippedFrames": 41,
+    "recordingEncodingAttemptedFrames": 1093
   }
 }

@@ -109,19 +109,20 @@ emergency fixtures hid the complete card; Playwright retains malformed-schema
 coverage.
 
 After a healthy warmup, killing the loopback server hid the OBS card in an
-observed 1,428 ms and restarting it restored the card in 477 ms. The capture
-probe sampled about every 235 ms, so these are conservative observed bounds,
+observed 1,455 ms and restarting it restored the card in 366 ms. The capture
+probe sampled about every 181 ms, so these are conservative observed bounds,
 not exact renderer callback durations.
 
-The final 1440p steady sample used a 10-second warmup and a 30-second window at
-five-second intervals. OBS averaged 2.43% CPU and active CEF processes 1.27%; the
-combined OBS/CEF process tree used 721,321 KiB PSS and 59 MiB GPU framebuffer.
-Preview held 60/60 FPS. The complete non-recording run reported a 0.506 ms
-graphics-thread p99 and 99.9523% of calls below the 16.667 ms frame budget.
+The final 1440p steady sample used a 10-second warmup and a 30.324-second window
+at five-second intervals. OBS averaged 2.87% CPU and active CEF processes 1.15%;
+the combined OBS/CEF process tree grew from 701,668 to 704,104 KiB PSS and used
+59 MiB GPU framebuffer. Preview held 60/60 FPS. The complete non-recording run
+reported a 0.751 ms graphics-thread p99 and 99.9605% of calls below the 16.667
+ms frame budget.
 
-A separate 17.941-second 2560x1440 NVENC recording made output counters
-observable: 1,076 frames were output, 1,058 of 1,099 attempted frames were
-drawn, 41 frames (3.7%) lagged in rendering, and 41 of 1,093 frames (3.8%) were
+A separate 22.017-second 2560x1440 NVENC recording made output counters
+observable: 1,295 frames were output, 1,280 of 1,321 attempted frames were
+drawn, 41 frames (3.1%) lagged in rendering, and 36 of 1,313 frames (2.7%) were
 skipped for encoding lag. The recorded frame is correct, but this short
 startup-inclusive result is a residual performance risk for the later M3
 60-minute recording gate.
@@ -132,7 +133,11 @@ contained loopback only. CEF connections were exclusively to
 route existed. The overlay server still exposes only GET/HEAD fixture and
 static routes, so the page cannot call a state-changing operator endpoint.
 Sanitized measurements are committed in
-`spikes/obs-overlay/evidence/obs-measurement.json`.
+`spikes/obs-overlay/evidence/obs-measurement.json`. The exact disposable
+profile generator, runbook, sanitized source excerpts, and artifact checksums
+are committed beside it. They supersede the first run's untraceable 1,428/477
+ms, 721,321 KiB PSS, and recording-counter claims, whose runtime had been
+deleted before independent review.
 
 ## Consequences
 

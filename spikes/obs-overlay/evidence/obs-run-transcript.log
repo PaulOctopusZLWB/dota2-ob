@@ -1,0 +1,185 @@
+DOT-34 SANITIZED REAL-OBS TRANSCRIPT
+run_id=DOT34-rerun-20260812T191444+0800
+source_pr_head=289e7cafb591097195fc45fa62e2a363e9a288fe
+runbook=spikes/obs-overlay/OBS_RUNBOOK.md
+profile_generator=spikes/obs-overlay/prepare_obs_profile.py
+
+[identity]
+command=flatpak info --user com.obsproject.Studio
+installation=user
+ref=app/com.obsproject.Studio/x86_64/stable
+version=32.2.1
+runtime=org.freedesktop.Platform/x86_64/25.08
+flatpak_commit=a3a5cbd575a1ab74c239cd3fd6903377377a43ef65e936271f655d458dc520b4
+command=flatpak run --user --command=obs com.obsproject.Studio --version
+obs_version=OBS Studio - 32.2.1
+obs_log_1080=2026-08-12 19-14-44.txt (sanitized excerpts below)
+obs_log_steady_1440=2026-08-12 19-15-30.txt (sanitized excerpts below)
+obs_log_recording_1440=2026-08-12 19-19-59.txt (sanitized excerpts below)
+
+[isolation_and_launch]
+command=unshare -Urn --map-root-user bash
+command=ip link set lo up
+command=ip -brief address show lo
+lo_state=UNKNOWN 127.0.0.1/8 ::1/128
+command=ip route show table all
+route=local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1
+route=local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1
+route=broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1
+route=local ::1 dev lo table local proto kernel metric 0 pref medium
+namespace_default_route=none
+server_command=$RUN_ROOT/obs-overlay -addr 127.0.0.1:18838
+inner_flatpak_command=flatpak run --user --command=sh com.obsproject.Studio -c 'export XDG_CONFIG_HOME="$1/config" XDG_DATA_HOME="$1/data" XDG_CACHE_HOME="$1/cache"; exec obs --multi --profile "$2" --collection "$2" --scene "DOT34 Scene" --disable-missing-files-check --verbose' sh "$RUN_ROOT" PROFILE
+xdg_config=$RUN_ROOT/config
+xdg_data=$RUN_ROOT/data
+xdg_cache=$RUN_ROOT/cache
+existing_profile_read=false
+obs_websocket_configured=false
+audio_devices=none
+
+[profile_and_scene_1080]
+profile=DOT34-1080p
+collection=DOT34-1080p
+scene=DOT34 Scene
+base=1920x1080
+output=1920x1080
+fps=60/1
+browser_source=DOT34 Browser
+browser_source_url=http://127.0.0.1:18838/?fixture=item-timing-long
+browser_source_dimensions=1920x1080
+known_color_dimensions=1920x1080
+obs_log=base resolution: 1920x1080
+obs_log=output resolution: 1920x1080
+obs_log=OBS 32.2.1 (linux)
+obs_log=[obs-browser]: Version 2.26.9
+obs_log=[obs-browser]: CEF Version 127.0.6533.120 (runtime)
+obs_log=[obs-browser]: Blacklisted driver detected, disabling browser source hardware acceleration.
+
+[profile_and_scene_1440]
+profile=DOT34-1440p
+collection=DOT34-1440p
+scene=DOT34 Scene
+base=2560x1440
+output=2560x1440
+fps=60/1
+browser_source=DOT34 Browser
+browser_source_url=http://127.0.0.1:18838/?fixture=item-timing-long
+browser_source_dimensions=2560x1440
+known_color_dimensions=2560x1440
+obs_log=base resolution: 2560x1440
+obs_log=output resolution: 2560x1440
+obs_log=fps: 60/1
+obs_log=OpenGL loaded successfully, version 3.3.0 NVIDIA 595.84
+preview_status=60.00 / 60.00 FPS
+
+[timing_probe]
+command=xwd -silent -id $OBS_WINDOW_ID -out $RUN_ROOT/timing/SAMPLE.xwd
+conversion=Flatpak-bundled ffmpeg converts XWD to PNG
+comparison=Pillow RGB crop (900,130,1220,340), changed pixel threshold max-channel delta > 20
+requested_sleep_ms=150
+sampling_median_approx_ms=181
+loss_epoch_ns=1786533479655728121
+loss_06_epoch_ns=1786533480746692386
+loss_06_changed_pixels=0
+loss_07_epoch_ns=1786533480927901933
+loss_07_changed_pixels=34672
+loss_07_state=opacity transition in progress
+loss_08_epoch_ns=1786533481110655870
+loss_08_changed_pixels=34865
+loss_08_state=fully hidden plateau
+hide_observed_ms=1455
+recovery_epoch_ns=1786533482371377436
+recovery_00_epoch_ns=1786533482374673374
+recovery_00_changed_pixels=34865
+recovery_01_epoch_ns=1786533482555703915
+recovery_01_changed_pixels=34649
+recovery_01_state=opacity transition in progress
+recovery_02_epoch_ns=1786533482737537400
+recovery_02_changed_pixels=0
+recovery_02_state=fully visible and byte-identical to healthy capture
+recovery_observed_ms=366
+
+[steady_1440_resource_window]
+warmup_seconds=10
+sample_interval_seconds=5
+sample_count=7
+sample=0 epoch_ns=1786533386477435914 tree_pss_kib=701668
+sample=1 epoch_ns=1786533391524311004 tree_pss_kib=702020
+sample=2 epoch_ns=1786533396572449967 tree_pss_kib=702416
+sample=3 epoch_ns=1786533401617008956 tree_pss_kib=702960
+sample=4 epoch_ns=1786533406662767699 tree_pss_kib=703344
+sample=5 epoch_ns=1786533411709764810 tree_pss_kib=703716
+sample=6 epoch_ns=1786533416755354193 tree_pss_kib=704104
+elapsed_seconds=30.324313
+cpu_formula=(end_proc_ticks-start_proc_ticks)*100/(CLK_TCK*elapsed_seconds)
+obs_cpu_percent=2.87
+browser_cpu_percent=1.15
+tree_pss_min_kib=701668
+tree_pss_kib=704104
+gpu_command=nvidia-smi pmon -c 1 -s m
+gpu_obs_framebuffer_mib=53
+gpu_cef_framebuffer_mib=6
+gpu_framebuffer_mib=59
+graphics_thread_p99_ms=0.751
+graphics_thread_percent_under_16_667_ms=99.9605
+
+[socket_inspection_inside_namespace]
+command=ss -Hntp
+cef_local=127.0.0.1:<ephemeral>
+cef_peer=127.0.0.1:18838
+cef_local=127.0.0.1:<ephemeral>
+cef_peer=127.0.0.1:18838
+server_local=127.0.0.1:18838
+server_peer=127.0.0.1:<ephemeral>
+server_local=127.0.0.1:18838
+server_peer=127.0.0.1:<ephemeral>
+non_loopback_socket_count=0
+
+[recording_1440]
+launch_suffix=DOT34-1440p --startrecording
+encoder=NVIDIA NVENC H.264
+recording_start=19:20:07.164
+recording_stop=19:20:29.181
+duration_seconds=22.017
+frames_output=1295
+drawn_frames=1280
+attempted_frames=1321
+render_lagged_frames=41
+render_lag_percent=3.1
+encoding_skipped_frames=36
+encoding_attempted_frames=1313
+encoding_skip_percent=2.7
+source_log=Output 'adv_file_output': Total frames output: 1295
+source_log=Output 'adv_file_output': Total drawn frames: 1280 (1321 attempted)
+source_log=Output 'adv_file_output': Number of lagged frames due to rendering lag/stalls: 41 (3.1%)
+source_log=Video stopped, number of skipped frames due to encoding lag: 36/1313 (2.7%)
+
+[selected_external_evidence]
+evidence_location=DOT-34 reply attachments; generated media is intentionally not committed
+file=obs-1080p-rerun.png sha256=6d47a5d988266adb75774fa4e200e9983eb4bf8dfd0bb5ee850fa57640126f2a
+file=obs-1440p-rerun.png sha256=bb946e725d5ae6661d8431fd99962ab454d3c3d5ee8d1cac86078b7554650e88
+file=obs-1440p-hidden-rerun.png sha256=4c7d1d65340e3afa1f0a6b06f8adb620e5534edf1a352ca91987acd57fb60806
+recovered_1440_sha256=bb946e725d5ae6661d8431fd99962ab454d3c3d5ee8d1cac86078b7554650e88
+healthy_and_recovered_byte_identical=true
+
+[superseded_first_run]
+reason=The first disposable runtime was deleted before independent review, so its raw sources cannot be reconstructed. The rerun above replaces, rather than retroactively validates, those claims.
+old_hide_observed_ms=1428
+old_recovery_observed_ms=477
+old_tree_pss_kib=721321
+old_gpu_framebuffer_mib=59
+old_recording_frames_output=1076
+old_recording_drawn_attempted=1058/1099
+old_recording_render_lagged=41
+old_recording_encoding_skipped_attempted=41/1093
+
+[safety_and_cleanup]
+acceptance_root_inode=37107528
+acceptance_root_mtime=2026-08-12T16:41:01.033976696+08:00
+acceptance_root_before_after_equal=true
+credentials_collected=false
+account-identifiers-collected=false
+raw_telemetry_collected=false
+generated_profiles_committed=false
+recording_committed=false
+cleanup=kill OBS and fixture server; exit namespace; verify no process/listener; rm -rf -- $RUN_ROOT

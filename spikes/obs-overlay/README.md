@@ -65,7 +65,10 @@ DOT-34 completed this procedure with user Flatpak OBS 32.2.1 and Browser Source
 2.26.9 on PaulPC4090. The exact measured package commit, CEF/GPU versions,
 failure timing, resource sample, output-frame counters, and residual risks are
 recorded in `docs/adr/2026-08-12-obs-overlay-spike.md` and
-`evidence/obs-measurement.json`. Do not modify an existing broadcast
+`evidence/obs-measurement.json`. The exact isolated launch, settings,
+collection commands, sanitized source excerpts, and checksums are in
+[`OBS_RUNBOOK.md`](OBS_RUNBOOK.md), `evidence/obs-run-transcript.log`, and
+`evidence/obs-run-manifest.json`. Do not modify an existing broadcast
 collection when repeating it.
 
 1. Start the loopback server with the command above.
