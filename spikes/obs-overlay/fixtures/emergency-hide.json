@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": true, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "teamfight-readiness",
+    "kicker": "禁止显示",
+    "title": "紧急隐藏必须覆盖健康分析",
+    "body": "该字段仅用于验证失败关闭边界，不得渲染。",
+    "evidence": "人工紧急隐藏",
+    "confidenceLabel": "已隐藏",
+    "sourceLabel": "操作员状态",
+    "ageLabel": "立即",
+    "asset": null
+  }
+}

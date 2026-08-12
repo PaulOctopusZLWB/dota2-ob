@@ -1,3 +1,5 @@
 /data/sessions/*
 !/data/sessions/.gitkeep
 /data/*.log
+/spikes/obs-overlay/node_modules/
+/spikes/obs-overlay/test-results/
