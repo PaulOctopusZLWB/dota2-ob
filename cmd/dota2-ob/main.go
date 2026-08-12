@@ -282,17 +282,15 @@ func createEphemeralTokenFile(explicitPath string) (string, string, func(), erro
 	if info, err := os.Stat(directory); err != nil || info.Mode().Perm()&0o077 != 0 {
 		return "", "", nil, errors.New("default operator token directory must be user-only")
 	}
-	cleanup := func() { _ = os.Remove(filepath.Join(directory, operatorTokenFilename)) }
 	token, err := newEphemeralToken()
 	if err != nil {
-		cleanup()
 		return "", "", nil, err
 	}
 	filename := filepath.Join(directory, operatorTokenFilename)
 	if err := writePrivateToken(filename, token); err != nil {
-		cleanup()
 		return "", "", nil, err
 	}
+	cleanup := func() { _ = os.Remove(filename) }
 	return token, filename, cleanup, nil
 }
 

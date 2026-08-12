@@ -392,6 +392,11 @@ func TestRunCreatesPrivateEphemeralTokenAndProductionCaptureProfile(t *testing.T
 }
 
 func TestRunDiagnosticModeUsesSameEphemeralBearer(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	root := filepath.Join(t.TempDir(), "sessions")
 	deps := defaultRunDependencies()
 	createTokenFile := deps.newTokenFile
@@ -427,6 +432,34 @@ func TestRunDiagnosticModeUsesSameEphemeralBearer(t *testing.T) {
 	var output bytes.Buffer
 	if code := runWithDependencies([]string{"--data-dir", root, "--diagnostic-mode"}, &output, deps); code != 0 {
 		t.Fatalf("code=%d output=%q", code, output.String())
+	}
+}
+
+func TestDefaultTokenCollisionDoesNotRemoveAnotherInstanceToken(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	tokenDir := filepath.Join(runtimeDir, "dota2-ob", "runtime")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(tokenDir, operatorTokenFilename)
+	want := []byte("another-live-instance-token\n")
+	if err := os.WriteFile(tokenPath, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := createEphemeralTokenFile(""); err == nil {
+		t.Fatal("default token collision unexpectedly succeeded")
+	}
+	got, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("existing token was removed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("existing token changed: got=%q want=%q", got, want)
 	}
 }
 

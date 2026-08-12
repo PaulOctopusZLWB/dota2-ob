@@ -530,8 +530,10 @@ func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
 	}
 	profiler := profile.NewProfiler()
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithProfiler(profiler), diagnosticOption()))
+	handler := gsi.NewServer(store, gsi.WithProfiler(profiler), diagnosticOption())
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"provider":{"name":"Dota 2"},"map":{"game_time":123},"hero":{"team2":{"player0":{"xpos":100,"ypos":200}}}}`))
 	if err != nil {
@@ -540,6 +542,10 @@ func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /gsi status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	deadline := time.Now().Add(time.Second)
+	for profiler.Snapshot().SnapshotCount != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 
 	resp = diagnosticGet(t, server.URL+"/api/profile")
