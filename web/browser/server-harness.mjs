@@ -17,15 +17,27 @@ export function createOwnedRuntime() {
 export function removeOwnedRuntime(runtimeRoot) {
   if (!runtimeRoot) return;
   const resolved = path.resolve(runtimeRoot);
-  if (path.dirname(resolved) !== path.resolve(os.tmpdir()) || !path.basename(resolved).startsWith(runtimePrefix)) {
-    throw new Error("refusing to remove an unowned browser-test runtime");
-  }
   if (!fs.existsSync(resolved)) return;
-  const marker = path.join(resolved, ownershipMarker);
-  if (!fs.existsSync(marker) || fs.readFileSync(marker, "utf8") !== "owned\n") {
-    throw new Error("refusing to remove an unowned browser-test runtime");
-  }
+  validateOwnedRuntime(resolved);
   fs.rmSync(resolved, { recursive: true, force: true });
+}
+
+function validateOwnedRuntime(runtimeRoot) {
+  const resolved = path.resolve(runtimeRoot);
+  const marker = path.join(resolved, ownershipMarker);
+  if (path.dirname(resolved) !== path.resolve(os.tmpdir()) ||
+      !path.basename(resolved).startsWith(runtimePrefix) ||
+      !fs.existsSync(marker) || fs.readFileSync(marker, "utf8") !== "owned\n") {
+    throw new Error("refusing to use an unowned browser-test runtime");
+  }
+  return resolved;
+}
+
+export function requireOwnedRuntime(environment) {
+  if (!environment.DOTA2_OB_BROWSER_RUNTIME) {
+    throw new Error("browser-test runtime is required");
+  }
+  return validateOwnedRuntime(environment.DOTA2_OB_BROWSER_RUNTIME);
 }
 
 export function ownedRuntimePaths(runtimeRoot) {
@@ -36,13 +48,15 @@ export function ownedRuntimePaths(runtimeRoot) {
 }
 
 async function run() {
-  const runtimeRoot = createOwnedRuntime();
+  const runtimeRoot = requireOwnedRuntime(process.env);
   const { binary, sessions } = ownedRuntimePaths(runtimeRoot);
   try {
     const build = spawnSync("go", ["build", "-o", binary, "../../cmd/dota2-ob"], { stdio: "inherit" });
     if (build.error) throw build.error;
-    if (build.status !== 0) process.exitCode = build.status ?? 1;
-    if (process.exitCode) return;
+    if (build.status !== 0) {
+      process.exitCode = build.status ?? 1;
+      return;
+    }
 
     const server = spawn(binary, [
       "--addr", "127.0.0.1:18839",

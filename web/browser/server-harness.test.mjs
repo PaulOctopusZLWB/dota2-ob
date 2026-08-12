@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createOwnedRuntime, ownedRuntimePaths, removeOwnedRuntime } from "./server-harness.mjs";
+import { createOwnedRuntime, ownedRuntimePaths, removeOwnedRuntime, requireOwnedRuntime } from "./server-harness.mjs";
 
 test("owned runtime is unique, private, and cleanup leaves the canonical token untouched", () => {
   const canonicalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dota2-ob-canonical-test-"));
@@ -40,6 +40,19 @@ test("cleanup refuses a prefixed directory without the harness ownership marker"
     assert.throws(() => removeOwnedRuntime(unowned), /unowned browser-test runtime/);
     assert.equal(fs.existsSync(unowned), true);
   } finally {
+    fs.rmSync(unowned, { recursive: true, force: true });
+  }
+});
+
+test("managed server accepts only the exact marked runtime supplied by the suite owner", () => {
+  const owned = createOwnedRuntime();
+  const unowned = fs.mkdtempSync(path.join(os.tmpdir(), "dota2-ob-browser-unowned-"));
+  try {
+    assert.equal(requireOwnedRuntime({ DOTA2_OB_BROWSER_RUNTIME: owned }), owned);
+    assert.throws(() => requireOwnedRuntime({}), /runtime is required/);
+    assert.throws(() => requireOwnedRuntime({ DOTA2_OB_BROWSER_RUNTIME: unowned }), /unowned browser-test runtime/);
+  } finally {
+    removeOwnedRuntime(owned);
     fs.rmSync(unowned, { recursive: true, force: true });
   }
 });
