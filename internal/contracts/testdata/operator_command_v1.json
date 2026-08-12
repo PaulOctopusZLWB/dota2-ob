@@ -1,0 +1,1 @@
+{"schema_version":"operator_command.v1","command_id":"command-1","session_id":"session-1","action":"approve","target_candidate_id":"candidate-1","expected_policy_revision":0,"policy_time_ms":2000}

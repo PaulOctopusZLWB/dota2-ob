@@ -1,0 +1,1 @@
+{"schema_version":"broadcast_decision.v1","decision_id":"decision-1","session_id":"session-1","policy_revision":1,"candidate_id":"candidate-1","prior_state":"queued","resulting_state":"shown","policy_time_ms":2000,"reason":"operator_approved"}
