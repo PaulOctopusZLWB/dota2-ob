@@ -129,3 +129,62 @@ func TestApplicationRejectsMismatchedObservationAndArtifacts(t *testing.T) {
 		})
 	}
 }
+
+func TestApplicationRejectsMissingTargetDespiteUnrelatedExpiryAndRecoversExactly(t *testing.T) {
+	config := policy.DefaultConfig()
+	log := &recordingLog{lookup: map[string]contracts.PolicyCommitV2{}}
+	app := policy.NewApplication(policy.New("session", config), log)
+	active := candidate("active", "draft.v1", "high", 1, 20)
+	active.ExpiryTimeMS = 100
+	sealTestCandidate(&active)
+	unrelated := candidate("unrelated", "lane.v1", "medium", 1, 10)
+	unrelated.ExpiryTimeMS = 5
+	sealTestCandidate(&unrelated)
+	queued, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{active, unrelated}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	show := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "show-active", SessionID: "session", Action: contracts.ActionShow, TargetCandidateID: active.CandidateID, ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
+	shown, err := app.ApplyCommand(show)
+	if err != nil || shown.Publication != contracts.PublicationPublish {
+		t.Fatalf("active setup failed: %#v %v", shown, err)
+	}
+	missing := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "missing-target", SessionID: "session", Action: contracts.ActionShow, TargetCandidateID: "never-existed", ExpectedPolicyRevision: shown.ResultingPolicyRevision, PolicyTimeMS: 5}
+	rejected, err := app.ApplyCommand(missing)
+	if err != nil || rejected.CommandResult.Status != contracts.CommandRejected || rejected.CommandResult.Reason != "invalid_target" || rejected.Publication != contracts.PublicationSuppressedV2 || len(log.commits) != 3 {
+		t.Fatalf("missing target was rewritten or not persisted: %#v %v", rejected, err)
+	}
+	if err := rejected.Validate(); err != nil || len(rejected.Decisions) != 1 || rejected.Decisions[0].CandidateID != unrelated.CandidateID || app.State().ActivePrimary == nil || app.State().ActivePrimary.Candidate.CandidateID != active.CandidateID {
+		t.Fatalf("persisted rejection incoherent: %#v %v", rejected, err)
+	}
+
+	replayed := policy.New("session", config)
+	if err := replayed.ReplayCommit(log.commits[0], []contracts.InsightCandidateV1{active, unrelated}); err != nil {
+		t.Fatal(err)
+	}
+	if err := replayed.ReplayCommit(log.commits[1], nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := replayed.ReplayCommit(log.commits[2], nil); err != nil || replayed.StateHash() != app.StateHash() {
+		t.Fatalf("replay diverged: %v", err)
+	}
+
+	state := app.State()
+	locators := make([]contracts.PolicyCommandLocatorV2, len(state.CommandResults))
+	for i, result := range state.CommandResults {
+		locators[i] = contracts.PolicyCommandLocatorV2{CommandID: result.CommandID, SegmentID: "segment-1", FrameOffset: int64(i), CommitSequence: uint64(i + 2), FrameSHA256: hash('f')}
+	}
+	cp := contracts.PolicyCheckpointV2{SchemaVersion: contracts.PolicyCheckpointSchemaV2, LineageManifestID: config.LineageID, LineageManifestSHA256: config.LineageID, SessionID: "session", CommitSequence: rejected.CommitSequence, ReferencedCommitSHA256: hash('f'), LastObservationSequence: state.LastObservationSequence, PolicyRevision: state.PolicyRevision, LastPolicyTimeMS: state.LastPolicyTimeMS, StateHash: app.StateHash(), CreatedTimeMS: 5, Preview: state.Preview, DisabledRuleIDs: state.DisabledRuleIDs, Cooldowns: state.Cooldowns, Pins: state.Pins, EmergencyHide: state.EmergencyHide, ActivePrimary: state.ActivePrimary, CommandResults: state.CommandResults, CommandLocators: locators, CandidateTombstones: state.CandidateTombstones}
+	restartedEngine, err := policy.NewFromCheckpoint(cp, config)
+	if err != nil || restartedEngine.StateHash() != app.StateHash() {
+		t.Fatalf("restart state diverged: %v", err)
+	}
+	log.lookup[missing.CommandID] = rejected
+	restarted := policy.NewApplication(restartedEngine, log)
+	duplicate, err := restarted.ApplyCommand(missing)
+	want, _ := contracts.MarshalCanonical(rejected)
+	got, _ := contracts.MarshalCanonical(duplicate)
+	if err != nil || !bytes.Equal(want, got) || restarted.StateHash() != app.StateHash() {
+		t.Fatalf("restart duplicate diverged: %v", err)
+	}
+}
