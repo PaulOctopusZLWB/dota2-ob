@@ -254,6 +254,63 @@ func TestPolicyCheckpointV2RoundTripsCompleteContinuationState(t *testing.T) {
 	}
 }
 
+func TestPolicyCheckpointV2RuleVersionOrderingIsStableAcrossRepeatAndRestart(t *testing.T) {
+	candidates := []contracts.InsightCandidateV1{
+		validCandidateV2("candidate-draft", 100),
+		validCandidateV2("candidate-economy-v1", 100),
+		validCandidateV2("candidate-a", 100),
+		validCandidateV2("candidate-b", 100),
+	}
+	candidates[0].RuleVersion = "draft-alpha.v1"
+	candidates[1].RuleVersion = "economy.v1"
+	candidates[2].RuleVersion = "economy.v2"
+	candidates[3].RuleVersion = "economy.v2"
+
+	cp := validCheckpointV2()
+	cp.Preview = candidates
+	cp.StateHash, _ = cp.ComputeStateHash()
+	if err := cp.Validate(); err != nil {
+		t.Fatalf("accepted rule-version order: %v", err)
+	}
+
+	for i := 0; i < len(candidates)-1; i++ {
+		inverted := cp
+		inverted.Preview = append([]contracts.InsightCandidateV1(nil), candidates...)
+		inverted.Preview[i], inverted.Preview[i+1] = inverted.Preview[i+1], inverted.Preview[i]
+		inverted.StateHash, _ = inverted.ComputeStateHash()
+		if err := inverted.Validate(); err == nil {
+			t.Fatalf("adjacent inversion %d accepted: %#v", i, inverted.Preview)
+		}
+	}
+
+	first, err := contracts.MarshalCanonical(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := contracts.MarshalCanonical(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restarted contracts.PolicyCheckpointV2
+	if err := contracts.DecodeStrict(first, &restarted); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Validate(); err != nil {
+		t.Fatalf("restarted checkpoint: %v", err)
+	}
+	restartedBytes, err := contracts.MarshalCanonical(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedHash, err := restarted.ComputeStateHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, repeated) || !bytes.Equal(first, restartedBytes) || restartedHash != cp.StateHash {
+		t.Fatalf("rule-version order changed across repeat/restart: state=%s restarted=%s", cp.StateHash, restartedHash)
+	}
+}
+
 func TestRejectedAdmittedCommandChangesOnlySemanticIndexHash(t *testing.T) {
 	cp := validCheckpointV2()
 	cp.PolicyRevision = 7

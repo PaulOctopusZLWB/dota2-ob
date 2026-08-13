@@ -25,7 +25,7 @@ func TestV2SealsManifestBeforeFirstCommitAndConstructsWithoutHashCycle(t *testin
 	}
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, state, err := commitlog.OpenV2(root, "session", manifest, commitlog.WithV2Hooks(hooks))
+	store, state, err := verifiedOpenV2(root, "session", manifest, commitlog.WithV2Hooks(hooks))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestV2SealsManifestBeforeFirstCommitAndConstructsWithoutHashCycle(t *testin
 func TestV2DuplicateLookupReturnsExactFrameAfterRestart(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, err := commitlog.OpenV2(root, "session", manifest)
+	store, _, err := verifiedOpenV2(root, "session", manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestV2DuplicateLookupReturnsExactFrameAfterRestart(t *testing.T) {
 	}
 	_ = store.Close()
 
-	reopened, state, err := commitlog.OpenV2(root, "session", manifest)
+	reopened, state, err := verifiedOpenV2(root, "session", manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestV2DuplicateLookupReturnsExactFrameAfterRestart(t *testing.T) {
 func TestV2CheckpointValidatesLocatorsAndReplaysLaterFrames(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, err := commitlog.OpenV2(root, "session", manifest)
+	store, _, err := verifiedOpenV2(root, "session", manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestV2CheckpointValidatesLocatorsAndReplaysLaterFrames(t *testing.T) {
 func TestV2MissingOrSyntacticallyCorruptCheckpointFallsBackToFullReplay(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, _ := commitlog.OpenV2(root, "session", manifest)
+	store, _, _ := verifiedOpenV2(root, "session", manifest)
 	commit, checkpoint := firstV2CommandAndCheckpoint(t, manifest)
 	first, err := store.Append(commit)
 	if err != nil {
@@ -159,7 +159,7 @@ func TestV2CheckpointLocatorMissingDuplicateSubstitutionOrCorruptionFailsClosed(
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			manifest := validManifestForStore()
-			store, _, _ := commitlog.OpenV2(root, "session", manifest)
+			store, _, _ := verifiedOpenV2(root, "session", manifest)
 			commit, cp := firstV2CommandAndCheckpoint(t, manifest)
 			first, err := store.Append(commit)
 			if err != nil {
@@ -188,13 +188,13 @@ func TestV2RecoveryRejectsMixedLineageAndTruncatesTornTail(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = v1.Close()
-		if _, _, err := commitlog.OpenV2(root, "session", manifest); !errors.Is(err, commitlog.ErrMixedLineage) {
+		if _, _, err := verifiedOpenV2(root, "session", manifest); !errors.Is(err, commitlog.ErrMixedLineage) {
 			t.Fatalf("mixed lineage error = %v", err)
 		}
 	})
 	t.Run("torn v2 tail", func(t *testing.T) {
 		root := t.TempDir()
-		store, _, _ := commitlog.OpenV2(root, "session", manifest)
+		store, _, _ := verifiedOpenV2(root, "session", manifest)
 		commit, _ := firstV2CommandAndCheckpoint(t, manifest)
 		first, _ := store.Append(commit)
 		_ = store.Close()
@@ -203,7 +203,7 @@ func TestV2RecoveryRejectsMixedLineageAndTruncatesTornTail(t *testing.T) {
 		if err := os.WriteFile(path, append(clean, []byte{0, 0, 1}...), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		reopened, state, err := commitlog.OpenV2(root, "session", manifest)
+		reopened, state, err := verifiedOpenV2(root, "session", manifest)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -236,7 +236,7 @@ func TestV2ReplayVerifiesObservationSourceBeforeEvaluation(t *testing.T) {
 func TestV2RejectedAdmittedCommandPersistsIndexWithoutRevisionOrTimeAdvance(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, _ := commitlog.OpenV2(root, "session", manifest)
+	store, _, _ := verifiedOpenV2(root, "session", manifest)
 	defer store.Close()
 	first, checkpoint := firstV2CommandAndCheckpoint(t, manifest)
 	if _, err := store.Append(first); err != nil {
@@ -258,7 +258,7 @@ func TestV2RejectedAdmittedCommandPersistsIndexWithoutRevisionOrTimeAdvance(t *t
 		t.Fatal(err)
 	}
 	_ = store.Close()
-	reopened, state, err := commitlog.OpenV2(root, "session", manifest)
+	reopened, state, err := verifiedOpenV2(root, "session", manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestV2RejectedAdmittedCommandPersistsIndexWithoutRevisionOrTimeAdvance(t *t
 func TestV2MissingManifestWithExistingFramesFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, _ := commitlog.OpenV2(root, "session", manifest)
+	store, _, _ := verifiedOpenV2(root, "session", manifest)
 	commit, _ := firstV2CommandAndCheckpoint(t, manifest)
 	if _, err := store.Append(commit); err != nil {
 		t.Fatal(err)
@@ -280,7 +280,7 @@ func TestV2MissingManifestWithExistingFramesFailsClosed(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "session", "lineage.v2.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := commitlog.OpenV2(root, "session", manifest); !errors.Is(err, commitlog.ErrLineage) {
+	if _, _, err := verifiedOpenV2(root, "session", manifest); !errors.Is(err, commitlog.ErrLineage) {
 		t.Fatalf("missing manifest error = %v", err)
 	}
 }
@@ -288,14 +288,14 @@ func TestV2MissingManifestWithExistingFramesFailsClosed(t *testing.T) {
 func TestV2ManifestSubstitutionFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, err := commitlog.OpenV2(root, "session", manifest)
+	store, _, err := verifiedOpenV2(root, "session", manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = store.Close()
 	changed := manifest
 	changed.Config.ContentSHA256 = strings.Repeat("9", 64)
-	if _, _, err := commitlog.OpenV2(root, "session", changed); !errors.Is(err, commitlog.ErrLineage) {
+	if _, _, err := verifiedOpenV2(root, "session", changed); !errors.Is(err, commitlog.ErrLineage) {
 		t.Fatalf("manifest substitution error = %v", err)
 	}
 }
@@ -303,7 +303,7 @@ func TestV2ManifestSubstitutionFailsClosed(t *testing.T) {
 func TestV1OpenRejectsExistingV2Frames(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, _ := commitlog.OpenV2(root, "session", manifest)
+	store, _, _ := verifiedOpenV2(root, "session", manifest)
 	commit, _ := firstV2CommandAndCheckpoint(t, manifest)
 	if _, err := store.Append(commit); err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestV1OpenRejectsExistingV2Frames(t *testing.T) {
 func TestV2CheckpointCannotOmitBothSemanticEntryAndLocator(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
-	store, _, _ := commitlog.OpenV2(root, "session", manifest)
+	store, _, _ := verifiedOpenV2(root, "session", manifest)
 	defer store.Close()
 	commit, cp := firstV2CommandAndCheckpoint(t, manifest)
 	first, err := store.Append(commit)
@@ -346,7 +346,7 @@ func TestV2SyncFailureRollsBackAndRollbackFailureSeals(t *testing.T) {
 			}
 			return f.Sync()
 		}}
-		store, _, err := commitlog.OpenV2(root, "session", manifest, commitlog.WithV2Hooks(hooks))
+		store, _, err := verifiedOpenV2(root, "session", manifest, commitlog.WithV2Hooks(hooks))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -373,7 +373,7 @@ func TestV2SyncFailureRollsBackAndRollbackFailureSeals(t *testing.T) {
 			},
 			Truncate: func(*os.File, int64) error { return errors.New("truncate failure") },
 		}
-		store, _, err := commitlog.OpenV2(t.TempDir(), "session", manifest, commitlog.WithV2Hooks(hooks))
+		store, _, err := verifiedOpenV2(t.TempDir(), "session", manifest, commitlog.WithV2Hooks(hooks))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -386,6 +386,99 @@ func TestV2SyncFailureRollsBackAndRollbackFailureSeals(t *testing.T) {
 			t.Fatalf("sealed retry error = %v", err)
 		}
 	})
+}
+
+func TestV2OpenRequiresReplayVerifierBeforeReturningTrustedState(t *testing.T) {
+	manifest := validManifestForStore()
+	store, state, err := commitlog.OpenV2(t.TempDir(), "session", manifest)
+	if err == nil || store != nil || state.SessionID != "" {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatalf("unverified open returned store=%v state=%#v err=%v", store != nil, state, err)
+	}
+}
+
+func TestV2ReopenReestablishesFailedSegmentDirectorySyncBeforeRetry(t *testing.T) {
+	root := t.TempDir()
+	manifest := validManifestForStore()
+	failSegmentDirSync := false
+	hooks := commitlog.Hooks{SyncDir: func(string) error {
+		if failSegmentDirSync {
+			failSegmentDirSync = false
+			return errors.New("simulated power-crash window")
+		}
+		return nil
+	}}
+	store, _, err := verifiedOpenV2(root, "session", manifest, commitlog.WithV2Hooks(hooks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, _ := firstV2CommandAndCheckpoint(t, manifest)
+	failSegmentDirSync = true
+	if _, err := store.Append(commit); !errors.Is(err, commitlog.ErrSealed) {
+		t.Fatalf("segment directory sync failure error = %v", err)
+	}
+	_ = store.Close()
+
+	reopenDirSyncs := 0
+	reopened, _, err := verifiedOpenV2(root, "session", manifest, commitlog.WithV2Hooks(commitlog.Hooks{
+		SyncDir: func(string) error { reopenDirSyncs++; return nil },
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopenDirSyncs == 0 {
+		t.Fatal("restart did not re-establish the parent-directory durability barrier")
+	}
+	if _, err := reopened.Append(commit); err != nil {
+		t.Fatalf("retry after verified directory barrier: %v", err)
+	}
+}
+
+func TestV2RecoveryMismatchReturnsNoStateAndNoAppendCapableStore(t *testing.T) {
+	root := t.TempDir()
+	manifest := validManifestForStore()
+	store, _, err := verifiedOpenV2(root, "session", manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, _ := firstV2CommandAndCheckpoint(t, manifest)
+	if _, err := store.Append(command); err != nil {
+		t.Fatal(err)
+	}
+	observation := validObservationCommitV2(t, manifest, 2, command)
+	if _, err := store.Append(observation); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	for _, mismatch := range []string{
+		"evidence", "raw_record", "live_projection", "command_result",
+		"decision", "audit", "publication", "state",
+	} {
+		t.Run(mismatch, func(t *testing.T) {
+			verifier := trustedVerifierV2()
+			if mismatch == "evidence" || mismatch == "raw_record" || mismatch == "live_projection" {
+				verifier.VerifyObservation = func(contracts.PolicyCommitV2) error { return errors.New(mismatch + " mismatch") }
+			} else {
+				verifier.Reevaluate = func(commit contracts.PolicyCommitV2) error {
+					if commit.CommandID != "" {
+						return errors.New(mismatch + " mismatch")
+					}
+					return nil
+				}
+			}
+			reopened, recovered, err := commitlog.OpenV2(root, "session", manifest, commitlog.WithV2ReplayVerifier(verifier))
+			if err == nil || reopened != nil || recovered.SessionID != "" || recovered.CommitSequence != 0 || len(recovered.Commits) != 0 {
+				if reopened != nil {
+					_ = reopened.Close()
+				}
+				t.Fatalf("mismatch exposed store=%v state=%#v err=%v", reopened != nil, recovered, err)
+			}
+		})
+	}
 }
 
 func firstV2CommandAndCheckpoint(t *testing.T, manifest contracts.PolicyLineageManifestV2) (contracts.PolicyCommitV2, contracts.PolicyCheckpointV2) {
@@ -442,4 +535,18 @@ func indexStage(stages []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func verifiedOpenV2(root, sessionID string, manifest contracts.PolicyLineageManifestV2, opts ...commitlog.V2Option) (*commitlog.StoreV2, commitlog.StateV2, error) {
+	verified := []commitlog.V2Option{commitlog.WithV2ReplayVerifier(trustedVerifierV2())}
+	verified = append(verified, opts...)
+	return commitlog.OpenV2(root, sessionID, manifest, verified...)
+}
+
+func trustedVerifierV2() commitlog.ReplayVerifierV2 {
+	return commitlog.ReplayVerifierV2{
+		VerifyObservation: func(contracts.PolicyCommitV2) error { return nil },
+		VerifyCommand:     func(contracts.PolicyCommitV2) error { return nil },
+		Reevaluate:        func(contracts.PolicyCommitV2) error { return nil },
+	}
 }

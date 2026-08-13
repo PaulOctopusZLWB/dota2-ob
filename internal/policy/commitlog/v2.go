@@ -28,6 +28,13 @@ type V2Option func(*StoreV2)
 
 func WithV2Hooks(h Hooks) V2Option { return func(s *StoreV2) { s.hooks = mergeHooks(h) } }
 
+// WithV2ReplayVerifier is mandatory for OpenV2. It is an application-owned
+// composition boundary that binds recovered frames to immutable source inputs
+// and byte-equivalent pure semantic replay before the store becomes writable.
+func WithV2ReplayVerifier(verifier ReplayVerifierV2) V2Option {
+	return func(s *StoreV2) { s.verifier = &verifier }
+}
+
 func WithV2SegmentLimit(n int64) V2Option {
 	return func(s *StoreV2) {
 		if n > 0 {
@@ -81,6 +88,7 @@ type StoreV2 struct {
 	totalBytes         int64
 	segmentCount       int
 	state              StateV2
+	verifier           *ReplayVerifierV2
 	sealed             bool
 	closed             bool
 }
@@ -109,6 +117,9 @@ func OpenV2(root, sessionID string, manifest contracts.PolicyLineageManifestV2, 
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.verifier == nil || s.verifier.VerifyObservation == nil || s.verifier.VerifyCommand == nil || s.verifier.Reevaluate == nil {
+		return nil, StateV2{}, errors.New("v2 recovery verifier and re-evaluator required")
+	}
 	if err := s.rejectV1Frames(); err != nil {
 		return nil, StateV2{}, err
 	}
@@ -118,6 +129,21 @@ func OpenV2(root, sessionID string, manifest contracts.PolicyLineageManifestV2, 
 	state, err := s.recover()
 	if err != nil {
 		return nil, StateV2{}, err
+	}
+	commits := make([]contracts.PolicyCommitV2, len(state.Commits))
+	for i, committed := range state.Commits {
+		commits[i] = committed.Commit
+	}
+	if err := VerifyReplayV2(commits, *s.verifier); err != nil {
+		return nil, StateV2{}, fmt.Errorf("%w: recovery activation: %v", ErrCorrupt, err)
+	}
+	// A prior process may have renamed a segment and then lost the directory
+	// sync result. Re-syncing the parent after structural and semantic recovery
+	// proves every recovered segment entry durable before one is reopened.
+	if len(state.Commits) > 0 || s.segmentCount > 0 {
+		if err := s.hooks.SyncDir(s.dir); err != nil {
+			return nil, StateV2{}, fmt.Errorf("%w: recovered segment directory sync: %v", ErrSealed, err)
+		}
 	}
 	s.state = state
 	if err := s.reopenLastSegment(); err != nil {
@@ -842,7 +868,10 @@ func VerifyReplayV2(commits []contracts.PolicyCommitV2, verifier ReplayVerifierV
 			if err := verifier.VerifyObservation(commit); err != nil {
 				return fmt.Errorf("observation source verification: %w", err)
 			}
-		} else if verifier.VerifyCommand != nil {
+		} else {
+			if verifier.VerifyCommand == nil {
+				return errors.New("v2 replay command verifier required")
+			}
 			if err := verifier.VerifyCommand(commit); err != nil {
 				return fmt.Errorf("command source verification: %w", err)
 			}
