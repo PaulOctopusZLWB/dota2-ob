@@ -401,11 +401,24 @@ carry no claim text and include one stable suppression/health code.
 `OperatorCommandV1` is the only mutation input to policy. It contains a unique
 command ID, bound session, action enum, target candidate/rule when applicable,
 expected policy revision, and explicit policy time. Policy serializes commands
-by revision. Repeating a command ID returns the identical prior result; a stale
-expected revision is rejected without mutation. Emergency hide has precedence
-over pin/show/approve and remains active until an explicit later command clears
-it. A session accepts at most 4,096 unique command IDs; later new IDs return
-`session_command_limit` without mutation, while duplicates remain replayable.
+by revision. The first 4,096 distinct commands that pass frozen
+`OperatorCommandV1` validation plus the V2 identifier-admission bounds enter the
+durable idempotency index whether policy accepts or rejects them. After basic
+authenticated request/session/command-ID validation, indexed-ID lookup precedes
+capacity and action/target evaluation: repeating an indexed ID returns its exact
+committed result and creates no new commit. A stale expected revision on a new
+admitted ID is rejected without mutation. Emergency hide has precedence over
+pin/show/approve and remains active until an explicit later command clears it.
+
+Once the durable index contains 4,096 IDs, the authenticated command adapter
+rejects every unknown ID before policy evaluation with the fixed admission
+error `session_command_limit`. Such an attempt is not an admitted
+`OperatorCommandV1`, creates no `OperatorCommandResultV1`, policy commit, or
+policy audit, and is not added to the index. Repeating an unindexed over-limit
+ID receives the same stateless admission error, not an exact-result replay.
+Only a bounded gateway counter records these attempts. V2 production admission
+also rejects policy-owned identifiers over 128 UTF-8 bytes before policy
+evaluation, without changing the frozen V1 schema.
 
 The startup mode is `approval_required`: safe candidates enter the bounded
 preview queue but cannot be shown until approved. A versioned `auto_show`
@@ -420,9 +433,9 @@ reason. The M3 console is only a client of this port. It never edits policy
 state directly.
 
 `AuditEventV1` is emitted for candidate creation/suppression, every autonomous
-transition, and every accepted or rejected command. An event is individually
-bounded to 16 KiB and is never persisted independently of its causal policy
-result.
+transition, and every policy-accepted or policy-rejected admitted command. An
+event is individually bounded to 16 KiB and is never persisted independently
+of its causal policy result.
 
 ### Recovery contract V2 correction
 
@@ -444,7 +457,8 @@ supporting contracts below before insight or policy feature work resumes.
 
 `PolicyCommitV2` is the narrow recoverable unit for the policy plane. It is not
 a source envelope or event bus. One canonical record, bounded to 256 KiB,
-retains the V1 identities, sequence, revision/state hashes, ordered
+retains the V1 identities, sequence, revision/state hashes, resulting
+observation-sequence and policy-time high-water marks, ordered
 `BroadcastDecisionV1` values, optional `OperatorCommandResultV1`, causal
 `AuditEventV1` values, and publication outcome. It also contains the complete
 canonical `OperatorCommandV1` for every command commit. Exactly one causal input
@@ -452,9 +466,28 @@ exists: an observation sequence, or both a command ID and matching embedded
 command. The embedded command's ID/session must match the commit, result,
 decisions, and audits. Its action, candidate/rule target, expected revision, and
 policy time are source data; recovery must never infer them from reason strings,
-candidate IDs, cooldowns, or another frozen field. Rejected commands and
-no-display/suppressed observations also receive a commit with an unchanged state
-hash, giving every accepted input one terminal recoverable outcome.
+candidate IDs, cooldowns, or another frozen field. Every policy-rejected
+admitted command and no-display/suppressed observation also receives one
+terminal commit. Equal prior/resulting hashes are required only when the
+canonical semantic state is unchanged; deterministic time advancement, expiry,
+or bounded-index maintenance is represented in the resulting hash even when
+publication remains unchanged.
+
+Before its first commit, each V2 policy-log lineage synchronously seals one
+content-addressed, 2 MiB-bounded `PolicyLineageManifestV2`. It binds the
+session ID and committed session-log manifest/hash; raw/live schema and mapping
+identities;
+`TournamentScopeV1` and `HistoricalSnapshotManifestV1` identities; the ordered
+eligible `HistoricalBaselineV1` content hashes; rule, config, catalog, and
+localization-parameter-mapping versions plus content hashes; and pure-engine
+build identity. Every `PolicyCommitV2` and `PolicyCheckpointV2` carries the
+manifest ID and SHA-256. The referenced manifest and artifacts are immutable
+and retained with the policy log. Its ID is SHA-256 over canonical manifest
+content, and its write uses file sync, atomic rename, and parent-directory sync
+before the first commit. A manifest write/validation failure hides policy output
+and rejects commands without affecting capture. A different artifact set starts
+a new lineage; recovery never searches alternative configs or snapshots until a
+state hash happens to match.
 
 The pure core deterministically returns the unpersisted commit payload from its
 explicit input and prior state. The application layer supplies the next commit
@@ -475,12 +508,14 @@ and are retained through release acceptance plus 180 days.
 
 The committed frame—not a separate decision, result, audit, or checkpoint
 write—is the source of truth. Presentation consumes only a synced committed
-frame. Repeating a command ID returns the exact stored result from that frame;
-replay reconstructs revision/state and the idempotency index from committed
-frames. Checkpoints are optional caches written with file sync, atomic rename,
-and parent-directory sync; losing one only forces log replay. This stronger
-policy protocol deliberately differs from the OS-buffered raw-capture boundary
-and its cost is included in P5.
+frame. Repeating an indexed admitted command ID returns the exact stored result
+from the frame named by its validated in-memory or checkpoint index entry; this
+direct frame lookup is not pre-checkpoint state replay. Replay reconstructs
+revision/state and the idempotency index from committed frames. Checkpoints are
+optional caches written with file sync, atomic rename, and parent-directory
+sync; losing one only forces log replay. This stronger policy protocol
+deliberately differs from the OS-buffered raw-capture boundary and its cost is
+included in P5.
 
 The M2 policy area owns these supporting schemas and transition semantics.
 M3 owns the authenticated HTTP adapter and operator client. The M3 presentation
@@ -503,37 +538,76 @@ priority descending, confidence descending, evidence time ascending, rule ID
 ascending, then candidate ID ascending. Every other set has a documented total
 order.
 
-`PolicyCheckpointV2` contains schema/rule/config versions, bound session and
-snapshot identities, last processed observation sequence, current revision,
-the complete bounded command-result idempotency index, complete preview
-`InsightCandidateV1` records in deterministic queue order, sorted unique
-disabled-rule IDs, cooldowns, pins, emergency-hide state, and the optional
-active primary as its complete candidate plus latest `BroadcastDecisionV1`.
-The preview queue holds at most 64 candidates and the checkpoint caches at most
-4,096 command results in canonical revision/command order. Candidate IDs are
-unique across preview and active state; every pin references a retained
-candidate. The checkpoint state hash is recomputed as SHA-256 over the canonical
-complete policy state rather than trusted as an opaque string.
+`PolicyCheckpointV2` has an explicit cache anchor: lineage manifest ID/hash,
+session ID, checkpointed commit sequence, referenced commit SHA-256, last
+processed observation sequence, policy revision, and last accepted policy-time
+high-water mark. The anchor must equal the referenced commit's lineage,
+sequence, resulting revision/state hash, observation-sequence high-water mark,
+and policy-time high-water mark.
 
-Restart validates a V2 checkpoint against its referenced `PolicyCommitV2` hash
-and replays later commits strictly by commit sequence. For an observation
-commit, recovery re-evaluates the referenced immutable session-log observation;
-for a command commit, it re-evaluates the embedded canonical command. The
-reproduced result, decisions, audits, publication outcome, revision, and state
-hash must be byte-equivalent to the committed record or recovery fails closed.
-A missing/incompatible checkpoint performs the same replay from sequence one;
-it never silently resets policy state.
+The checkpointed semantic state contains complete preview
+`InsightCandidateV1` records in deterministic rank order; sorted unique disabled
+rules; cooldowns; pins; emergency-hide state; and the optional active primary as
+its complete candidate plus latest `BroadcastDecisionV1`. It also contains:
+
+- at most 4,096 command-index entries in canonical command-ID order, each with
+  command ID, original commit sequence, and frame SHA-256 for exact-result
+  lookup;
+- at most 4,096 candidate tombstones, each with candidate ID, rule ID, terminal
+  decision ID/state, and `suppress_until_policy_time_ms`, ordered by suppression
+  deadline then candidate ID; the deadline is derived from the bound rule/config
+  at the terminal transition; and
+- the nondecreasing last accepted policy-time high-water mark used by expiry and
+  out-of-order checks.
+
+The preview queue holds at most 64 candidates, pins hold at most 64 entries, and
+disabled-rule/cooldown sets hold at most 256 rule IDs each. Candidate IDs are
+unique across preview and active state; every pin references a retained
+candidate. Expired tombstones are removed deterministically when the policy-time
+high-water mark advances. If all 4,096 tombstones remain live, a new unique
+candidate is suppressed without insertion using `candidate_index_capacity`;
+the resulting hash includes any accepted time/index maintenance. An input
+policy time below the high-water mark is rejected without mutation using
+`out_of_order_policy_time`. Only successfully time-ordered observations and
+policy-accepted commands advance the high-water mark; stale-revision, duplicate,
+over-limit, malformed, and out-of-order commands do not.
+
+The V2 checkpoint is bounded to 16 MiB canonical JSON; policy-owned identifiers
+stored in its bounded indexes are at most 128 UTF-8 bytes. Its state hash is
+SHA-256 over a documented canonical `policy_state.v2` projection containing all
+semantic state above while excluding cache creation time and the commit/hash
+anchor. Validators recompute that projection rather than trusting an opaque
+hash.
+
+Restart validates the complete V2 checkpoint anchor and state, then replays
+later commits strictly by commit sequence. For an observation commit, recovery
+uses the exact immutable observation and evaluation artifacts selected by its
+`PolicyLineageManifestV2`; for a command commit, it re-evaluates the embedded
+canonical command. The reproduced result, decisions, audits, publication
+outcome, revision, and state hash must be byte-equivalent to the committed
+record or recovery fails closed. A missing/incompatible checkpoint loads the
+same sealed lineage manifest and performs the same replay from sequence one. A
+missing or hash-mismatched manifest/artifact fails closed; recovery never
+silently resets state or guesses an evaluation context.
 
 V1 and V2 frames cannot be mixed in one policy-log lineage. Because no V1
 production session has been accepted, new production sessions start with V2.
 Encountering V1 during production recovery fails closed; an explicit offline
-rebuild may read authoritative session inputs and emit a fresh V2 lineage, but
-must never synthesize a missing command action or target. The migration gate
-requires V2 documentation, validators, canonical goldens/hashes, dependency
-checks, and recovery tests for accepted/rejected `disable_rule`/`enable_rule`,
-preview ordering/expiry, active-primary continuation, pins, duplicate commands,
-valid/missing/corrupt checkpoints, later-frame replay, mixed-version rejection,
-and state/hash mismatch before M2 resumes.
+rebuild may read authoritative session inputs and emit a fresh V2 lineage. A V1
+lineage containing a command commit is non-convertible unless a separately
+authoritative, complete command journal supplies the exact action, target,
+expected revision, and policy time for every command and is content-bound to
+that lineage; otherwise it remains archival and recovery fails closed. The
+migration must never synthesize missing command data.
+
+The migration gate requires V2 documentation, validators, canonical
+goldens/hashes, dependency checks, and recovery tests for admitted versus
+over-limit IDs, exact duplicate frame lookup, accepted/rejected
+`disable_rule`/`enable_rule`, lineage-manifest loss/mismatch, size/identifier
+admission limits, preview ordering/expiry, tombstone eviction/capacity, time
+high-water ordering, active-primary continuation, pins, valid/missing/corrupt
+checkpoint anchors, later-frame replay, mixed-version rejection, and state/hash
+mismatch before M2 resumes.
 
 ## Dependency Direction
 
@@ -639,9 +713,13 @@ Acceptance:
 - A `TournamentScopeV1` golden manifest pins TI 2026, the dated roster-snapshot
   rule, history cutoffs, discovery-run shape, initial patch/build rules, and the
   full/restricted/no-go outcomes above.
-- Command idempotency/revision ordering, emergency-hide precedence,
-  atomic `PolicyCommitV1`, audit-before-display, partial-tail/rollback/recovery,
-  canonical encoding, total ordering, checkpoint/replay, identifier
+- Legacy `PolicyCommitV1`/`PolicyCheckpointV1` schema, golden, framing, and
+  fail-closed decoder tests remain immutable compatibility evidence; they do not
+  satisfy production restart acceptance.
+- Before M2 resumes, command idempotency/revision ordering, emergency-hide
+  precedence, atomic `PolicyCommitV2`, `PolicyLineageManifestV2`,
+  audit-before-display, partial-tail/rollback/recovery, canonical encoding,
+  total ordering, complete bounded checkpoint/replay, identifier
   classification, and localhost control security have adversarial contract
   tests with injectable sync/rename/directory-sync failures.
 - A replay spike parses at least two public professional `.dem` files on the
