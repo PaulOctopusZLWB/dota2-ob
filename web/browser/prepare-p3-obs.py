@@ -9,6 +9,16 @@ from pathlib import Path
 
 
 URL = "http://127.0.0.1:18838/overlay/"
+BROWSER_WIDTH = 750
+BROWSER_HEIGHT = 640
+
+
+def browser_position(width: int, height: int) -> tuple[int, int]:
+    positions = {(1920, 1080): (1130, 60), (2560, 1440): (1770, 80)}
+    try:
+        return positions[(width, height)]
+    except KeyError as error:
+        raise ValueError("unsupported P3 output resolution") from error
 
 
 def profile(name: str, recording_dir: Path, width: int, height: int) -> str:
@@ -73,13 +83,14 @@ def collection(name: str, browser: bool, width: int, height: int) -> dict:
         "crop_left": 0, "crop_top": 0, "crop_right": 0, "crop_bottom": 0, "id": 1,
     }]
     if browser:
+        browser_x, browser_y = browser_position(width, height)
         sources.append(source("Analytics Sidebar", browser_uuid, "browser_source", {
-            "url": URL, "width": width, "height": height, "fps": 30, "shutdown": False,
+            "url": URL, "width": BROWSER_WIDTH, "height": BROWSER_HEIGHT, "fps": 30, "shutdown": False,
             "restart_when_active": False, "reroute_audio": False,
         }))
         items.append({
             "name": "Analytics Sidebar", "source_uuid": browser_uuid, "visible": True, "locked": True,
-            "rot": 0.0, "pos": {"x": 0.0, "y": 0.0}, "scale": {"x": 1.0, "y": 1.0},
+            "rot": 0.0, "pos": {"x": float(browser_x), "y": float(browser_y)}, "scale": {"x": 1.0, "y": 1.0},
             "align": 5, "bounds_type": 0, "bounds_align": 0, "bounds": {"x": 0.0, "y": 0.0},
             "crop_left": 0, "crop_top": 0, "crop_right": 0, "crop_bottom": 0, "id": 2,
         })

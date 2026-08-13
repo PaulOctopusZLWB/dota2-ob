@@ -21,15 +21,27 @@ runner = load("run_p3", "run-p3.py")
 
 
 class PrepareP3Tests(unittest.TestCase):
-    def test_profiles_and_browser_sources_use_requested_resolution(self):
-        with tempfile.TemporaryDirectory() as directory:
-            recording = Path(directory)
-            profile = prepare.profile("P3", recording, 1920, 1080)
-            collection = prepare.collection("P3", True, 1920, 1080)
-        self.assertIn("BaseCX=1920", profile)
-        self.assertIn("OutputCY=1080", profile)
-        browser = next(source for source in collection["sources"] if source["id"] == "browser_source")
-        self.assertEqual((browser["settings"]["width"], browser["settings"]["height"]), (1920, 1080))
+    def test_profiles_use_output_resolution_and_browser_source_is_native_750x640(self):
+        for width, height, expected_position in ((1920, 1080, (1130.0, 60.0)), (2560, 1440, (1770.0, 80.0))):
+            with tempfile.TemporaryDirectory() as directory:
+                recording = Path(directory)
+                profile = prepare.profile("P3", recording, width, height)
+                collection = prepare.collection("P3", True, width, height)
+            self.assertIn(f"BaseCX={width}", profile)
+            self.assertIn(f"OutputCY={height}", profile)
+            browser = next(source for source in collection["sources"] if source["id"] == "browser_source")
+            self.assertEqual((browser["settings"]["width"], browser["settings"]["height"]), (750, 640))
+            scene = next(source for source in collection["sources"] if source["id"] == "scene")
+            item = next(item for item in scene["settings"]["items"] if item["name"] == "Analytics Sidebar")
+            self.assertEqual((item["pos"]["x"], item["pos"]["y"]), expected_position)
+            self.assertEqual(item["scale"], {"x": 1.0, "y": 1.0})
+            self.assertEqual(item["rot"], 0.0)
+            self.assertEqual(item["bounds_type"], 0)
+            self.assertEqual(item["bounds"], {"x": 0.0, "y": 0.0})
+            self.assertEqual(
+                (item["crop_left"], item["crop_top"], item["crop_right"], item["crop_bottom"]),
+                (0, 0, 0, 0),
+            )
 
 
 class RunP3Tests(unittest.TestCase):
@@ -39,13 +51,43 @@ class RunP3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.resolution("720p")
 
-    def test_visibility_crop_stays_inside_each_protocol_canvas(self):
-        for label in ("1080p", "1440p"):
+    def test_visibility_region_is_the_complete_native_source(self):
+        expected = {"1080p": (1130, 60), "1440p": (1770, 80)}
+        for label, position in expected.items():
             config = runner.resolution(label)
-            crop = runner.visibility_crop(config)
-            self.assertLessEqual(crop["x"] + crop["width"], config["width"])
-            self.assertLessEqual(crop["y"] + crop["height"], config["height"])
-            self.assertEqual((crop["width"], crop["height"]), (750, 450))
+            region = runner.browser_source_rectangle(config)
+            self.assertEqual((region["x"], region["y"]), position)
+            self.assertEqual((region["width"], region["height"]), (750, 640))
+            self.assertLessEqual(region["x"] + region["width"], config["width"])
+            self.assertLessEqual(region["y"] + region["height"], config["height"])
+
+    def test_p3_gates_include_absolute_tree_and_browser_growth(self):
+        pss = {
+            "total": {"incrementalMedianKiB": 200_000, "overlayMedianKiB": 900_000, "growthKiBPerMinute": 500, "totalRangeKiB": 30_000},
+            "browser": {"growthKiBPerMinute": 1_025},
+        }
+        gates = runner.evaluate_gates(
+            overlay_duration=4_200,
+            pss=pss,
+            browser_cpu_median=1.0,
+            lag_delta=0.0,
+            hidden_violations=0,
+            recovery_violations=0,
+            remote=[],
+            crashed=False,
+            required_duration=4_200,
+        )
+        self.assertTrue(gates["incrementalWholeTreePss"])
+        self.assertTrue(gates["absoluteOverlayTreePss"])
+        self.assertTrue(gates["wholeTreeGrowth"])
+        self.assertFalse(gates["browserGrowth"])
+        pss["browser"]["growthKiBPerMinute"] = 500
+        pss["total"]["overlayMedianKiB"] = 1_048_577
+        self.assertFalse(runner.evaluate_gates(
+            overlay_duration=4_200, pss=pss, browser_cpu_median=1.0, lag_delta=0.0,
+            hidden_violations=0, recovery_violations=0, remote=[], crashed=False,
+            required_duration=4_200,
+        )["absoluteOverlayTreePss"])
 
     def test_component_pss_summary_preserves_total_and_process_kinds(self):
         baseline = [
@@ -66,6 +108,12 @@ class RunP3Tests(unittest.TestCase):
         self.assertEqual(runner.evidence_stem("preflight", "1080p"), "p3-preflight-1080p")
         with self.assertRaises(ValueError):
             runner.evidence_stem("../escape", "1440p")
+
+    def test_visibility_frame_requires_settled_start_and_safe_end_margin(self):
+        self.assertTrue(runner.visibility_frame_is_settled(2.0, 3.0))
+        self.assertFalse(runner.visibility_frame_is_settled(1.999, 8.0))
+        self.assertFalse(runner.visibility_frame_is_settled(8.0, 2.999))
+        self.assertFalse(runner.visibility_frame_is_settled(8.0, None))
 
     def test_progress_is_written_to_stderr_and_flushed(self):
         stream = io.StringIO()

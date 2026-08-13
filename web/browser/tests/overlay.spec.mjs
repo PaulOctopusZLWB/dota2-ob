@@ -59,6 +59,34 @@ async function layout(page) {
   });
 }
 
+async function nativeViewportLayout(page) {
+  return page.locator("#overlay-card").evaluate((card) => {
+    const rect = card.getBoundingClientRect();
+    const header = card.querySelector(".card-header").getBoundingClientRect();
+    const claim = card.querySelector(".claim").getBoundingClientRect();
+    const footer = card.querySelector("footer").getBoundingClientRect();
+    const clearance = {
+      left: rect.left,
+      top: rect.top,
+      right: innerWidth - rect.right,
+      bottom: innerHeight - rect.bottom
+    };
+    return {
+      clearance,
+      inside: Object.values(clearance).every((value) => value >= 24),
+      overflow: card.scrollWidth > card.clientWidth + 1 || card.scrollHeight > card.clientHeight + 1 ||
+        document.documentElement.scrollWidth > document.documentElement.clientWidth + 1 ||
+        document.documentElement.scrollHeight > document.documentElement.clientHeight + 1,
+      ordered: header.bottom <= claim.top && claim.bottom <= footer.top
+    };
+  });
+}
+
+async function transparentFrame(page) {
+  await page.waitForTimeout(250);
+  return page.screenshot({ animations: "disabled", caret: "hide", omitBackground: true });
+}
+
 test("transparent OBS surface uses localhost resources only", async ({ page }) => {
   const remote = [];
   page.on("request", (request) => {
@@ -235,6 +263,64 @@ const templateStates = [
   ["objective", "天辉拿下肉山", "本轮可见资源交换净变化 2200 经济。"],
   ["teamfight", "夜魇团战资源就绪", "4 名英雄的可见关键资源已就绪；不推断战争迷雾信息。"]
 ];
+
+const longestZhCN = [
+  "item",
+  "关键装备时间点决定下一轮团战主动权".repeat(4),
+  "双方资源分配已经出现明显差异，领先方可以围绕视野、兵线与肉山区域建立连续控制。".repeat(4)
+];
+
+for (const [family, title, body] of [...templateStates, longestZhCN]) {
+  test(`native 750x640 viewport contains ${family === "item" && title === longestZhCN[1] ? "longest zh-CN fixture" : `${family} template`}`, async ({ page }) => {
+    await page.setViewportSize({ width: 750, height: 640 });
+    await routeState(page, () => visibleState({ claim: { title, body, asset_key: family } }));
+    await openVisible(page);
+    await page.waitForTimeout(250);
+    const geometry = await nativeViewportLayout(page);
+    expect(geometry.inside, JSON.stringify(geometry.clearance)).toBe(true);
+    expect(geometry.overflow).toBe(false);
+    expect(geometry.ordered).toBe(true);
+  });
+}
+
+for (const unsafe of ["malformed", "schema-mismatch", "oversize", "stale", "emergency-hide", "missing-asset", "disconnect", "out-of-order"]) {
+  test(`native 750x640 ${unsafe} state settles to an empty complete-source frame`, async ({ page, context }) => {
+    await page.setViewportSize({ width: 750, height: 640 });
+    if (unsafe === "malformed") {
+      await page.route("**/v1/overlay/state", (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{malformed" }));
+    } else if (unsafe === "disconnect") {
+      await page.route("**/v1/overlay/state", (route) => route.abort("connectionfailed"));
+    } else if (unsafe === "oversize") {
+      await page.route("**/v1/overlay/state", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...visibleState(), padding: "x".repeat(65 * 1024) }) }));
+    } else if (unsafe === "out-of-order") {
+      const healthy = JSON.stringify(visibleState());
+      const older = JSON.stringify(visibleState({ publication_time_ms: Date.now() - 10_000, stale_deadline_ms: Date.now() + 5_000 }));
+      await page.addInitScript(({ healthy, older }) => {
+        const response = (body) => new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+        let polls = 0;
+        window.fetch = async () => response(polls++ === 0 ? healthy : older);
+      }, { healthy, older });
+    } else {
+      await routeState(page, () => {
+        if (unsafe === "schema-mismatch") return visibleState({ schema_version: "overlay_state.v2" });
+        if (unsafe === "stale") return visibleState({ stale_deadline_ms: Date.now() - 1 });
+        if (unsafe === "emergency-hide") return visibleState({ visibility: "hidden", health_code: "emergency_hide", claim: null, decision_id: "", evidence: [], confidence: "", source_receive_time: null });
+        return visibleState({ claim: { title: "素材缺失", body: "必须隐藏。", asset_key: "missing-local-asset" } });
+      });
+    }
+    await page.goto("/overlay/");
+    if (unsafe === "out-of-order") await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible");
+    await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden", { timeout: 2000 });
+    const actual = await transparentFrame(page);
+    const blank = await context.newPage();
+    await blank.setViewportSize({ width: 750, height: 640 });
+    await blank.setContent("<!doctype html><style>html,body{margin:0;background:transparent}</style>");
+    const expected = await transparentFrame(blank);
+    await blank.close();
+    expect(actual.equals(expected)).toBe(true);
+    await expect(page.locator("#claim")).toBeHidden();
+  });
+}
 
 for (const canvas of canvasSizes) {
   for (const [family, title, body] of templateStates) {

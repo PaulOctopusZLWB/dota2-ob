@@ -26,13 +26,10 @@ function append(event) {
 }
 
 function mode() {
-  const second = Math.floor((Date.now() - started) / 1000) % 120;
+  const second = Math.floor((Date.now() - started) / 1000) % 140;
   if (second < 60) return templates[Math.floor(second / 10)];
-  if (second < 72) return ["stale"];
-  if (second < 84) return ["malformed"];
-  if (second < 96) return ["missing-asset"];
-  if (second < 108) return ["emergency-hide"];
-  return ["disconnect"];
+  const unsafe = ["stale", "malformed", "schema-mismatch", "oversize", "missing-asset", "emergency-hide", "disconnect", "out-of-order"];
+  return [unsafe[Math.floor((second - 60) / 10)]];
 }
 
 function state(selected) {
@@ -58,12 +55,19 @@ function state(selected) {
     source_receive_time: new Date(now - 50).toISOString(),
     claim: { title: selected[1] || "不应显示", body: selected[2] || "不应显示", asset_key: selected[0] }
   };
+  if (selected[0] === "schema-mismatch") visible.schema_version = "overlay_state.v2";
+  if (selected[0] === "oversize") visible.padding = "x".repeat(65 * 1024);
   if (selected[0] === "stale") visible.stale_deadline_ms = now - 1;
   if (selected[0] === "missing-asset") visible.claim.asset_key = "missing-local-asset";
   if (selected[0] === "emergency-hide") return JSON.stringify({
     ...visible, visibility: "hidden", health_code: "emergency_hide", decision_id: "",
     evidence: [], confidence: "", source_receive_time: null, claim: null
   });
+  if (selected[0] === "out-of-order") {
+    visible.publication_time_ms = now - 60_000;
+    visible.stale_deadline_ms = now + 1_500;
+    visible.claim.asset_key = "objective";
+  }
   return JSON.stringify(visible);
 }
 

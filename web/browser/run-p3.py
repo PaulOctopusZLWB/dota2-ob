@@ -27,6 +27,7 @@ WARMUP_SECONDS = int(os.environ.get("DOTA2_OB_P3_WARMUP_SECONDS", "600"))
 RECORD_SECONDS = int(os.environ.get("DOTA2_OB_P3_RECORD_SECONDS", "3600"))
 SAMPLE_SECONDS = int(os.environ.get("DOTA2_OB_P3_SAMPLE_SECONDS", "5"))
 PASSWORD_RE = re.compile(r"(?i)(password|token|authorization)[^\s,;]*")
+ACCEPTED_SPEC_COMMIT = "2a0dabb60f5bc57adbc93d79c055ee80b1ccab3a"
 
 
 def resolution(label: str) -> dict:
@@ -37,12 +38,21 @@ def resolution(label: str) -> dict:
     return {"label": label, "width": width, "height": height}
 
 
-def visibility_crop(config: dict) -> dict:
+def browser_source_rectangle(config: dict) -> dict:
+    positions = {"1080p": (1130, 60), "1440p": (1770, 80)}
+    x, y = positions[config["label"]]
+    return {"x": x, "y": y, "width": 750, "height": 640}
+
+
+def full_output_rectangle(config: dict) -> dict:
+    return {"x": 0, "y": 0, "width": config["width"], "height": config["height"]}
+
+
+def historical_rejected_visibility_roi(config: dict) -> dict:
+    source = browser_source_rectangle(config)
     return {
-        "x": config["width"] - 790,
-        "y": round(config["height"] * 80 / 1440),
-        "width": 750,
-        "height": 450,
+        "status": "rejected_visibility_analysis_only_not_sampled",
+        "x": source["x"], "y": source["y"], "width": 750, "height": 450,
     }
 
 
@@ -370,8 +380,20 @@ def mode_at(events: list[dict], epoch: float) -> tuple[str, float, float | None]
     return selected["mode"], epoch - selected["epoch"], remaining
 
 
+def visibility_frame_is_settled(age: float, remaining: float | None) -> bool:
+    # State changes must have had the P2 two-second fail-closed/recovery SLA to
+    # settle. Recording file mtime can lead decoded video PTS by a fraction of
+    # the five-second sampling interval, so keep a three-second trailing guard.
+    return age >= 2.0 and remaining is not None and remaining >= 3.0
+
+
 def extract_frame(video: Path, seconds: float, target: Path) -> None:
     run(["flatpak", "run", "--user", "--command=ffmpeg", "com.obsproject.Studio", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{seconds:.3f}", "-i", str(video), "-frames:v", "1", str(target)])
+
+
+def extract_cropped_frame(video: Path, seconds: float, target: Path, rectangle: dict) -> None:
+    crop = f"crop={rectangle['width']}:{rectangle['height']}:{rectangle['x']}:{rectangle['y']}"
+    run(["flatpak", "run", "--user", "--command=ffmpeg", "com.obsproject.Studio", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{seconds:.3f}", "-i", str(video), "-vf", crop, "-frames:v", "1", str(target)])
 
 
 def stack_info(log: Path) -> dict:
@@ -430,6 +452,25 @@ def summarize_pss(baseline_samples: list[dict], overlay_samples: list[dict]) -> 
     return result
 
 
+def evaluate_gates(*, overlay_duration: float, pss: dict, browser_cpu_median: float,
+                   lag_delta: float, hidden_violations: int, recovery_violations: int,
+                   remote: list[str], crashed: bool, required_duration: int) -> dict:
+    return {
+        "duration": overlay_duration >= required_duration - 2,
+        "incrementalWholeTreePss": pss["total"]["incrementalMedianKiB"] <= 256 * 1024,
+        "absoluteOverlayTreePss": pss["total"]["overlayMedianKiB"] <= 1024 * 1024,
+        "wholeTreeGrowth": pss["total"]["growthKiBPerMinute"] <= 1024,
+        "browserGrowth": pss["browser"]["growthKiBPerMinute"] <= 1024,
+        "wholeTreeRange": pss["total"]["totalRangeKiB"] <= 64 * 1024,
+        "browserCpu": browser_cpu_median <= 5,
+        "renderLagDelta": lag_delta <= 1.0,
+        "hiddenVisibility": hidden_violations == 0,
+        "visibleRecovery": recovery_violations == 0,
+        "loopbackOnly": not remote,
+        "noCrash": not crashed,
+    }
+
+
 def main() -> int:
     if RUN.exists():
         raise RuntimeError(f"refusing existing run root: {RUN}")
@@ -481,36 +522,54 @@ def main() -> int:
         overlay_counters = recording_metrics(overlay_log)
         baseline_duration = probe_duration(baseline_video)
         overlay_duration = probe_duration(overlay_video)
-        crop = visibility_crop(RESOLUTION)
-        baseline_scores = crop_scores(baseline_video, crop)
-        overlay_scores = crop_scores(overlay_video, crop)
-        visibility_threshold = max(baseline_scores) + 3.0
+        source_rectangle = browser_source_rectangle(RESOLUTION)
+        full_rectangle = full_output_rectangle(RESOLUTION)
+        baseline_scores = {
+            "completeSource": crop_scores(baseline_video, source_rectangle),
+            "fullOutput": crop_scores(baseline_video, full_rectangle),
+        }
+        overlay_scores = {
+            "completeSource": crop_scores(overlay_video, source_rectangle),
+            "fullOutput": crop_scores(overlay_video, full_rectangle),
+        }
+        visibility_thresholds = {name: max(scores) + 3.0 for name, scores in baseline_scores.items()}
         events = parse_events(RUN / "server.jsonl")
-        unsafe = {"stale", "malformed", "missing-asset", "emergency-hide", "disconnect"}
-        hidden_checks = []
-        visible_checks = []
+        unsafe = {"stale", "malformed", "schema-mismatch", "oversize", "missing-asset", "emergency-hide", "disconnect", "out-of-order"}
+        region_checks = {}
         visible_second = hidden_second = None
-        for index, score in enumerate(overlay_scores):
-            seconds = index * SAMPLE_SECONDS
-            if seconds < WARMUP_SECONDS:
-                continue
-            mode, age, remaining = mode_at(events, overlay_started + seconds)
-            visible = score > visibility_threshold
-            # The five-second video sampler can select a frame near either side
-            # of a state boundary. Guarding both edges keeps P3 frame evidence
-            # unambiguous; protocol P2 separately measures the two-second SLA.
-            stable_window = age >= 2.0 and remaining is not None and remaining >= 2.0
-            sample = {"seconds": seconds, "mode": mode, "modeAgeSeconds": round(age, 3), "modeRemainingSeconds": None if remaining is None else round(remaining, 3), "score": round(score, 3), "visible": visible}
-            if mode in unsafe and stable_window:
-                hidden_checks.append(sample)
-                if hidden_second is None:
-                    hidden_second = seconds
-            elif mode not in unsafe and mode not in {"unknown", "server-started"} and stable_window:
-                visible_checks.append(sample)
-                if visible_second is None:
-                    visible_second = seconds
-        hidden_violations = sum(item["visible"] for item in hidden_checks)
-        recovery_violations = sum(not item["visible"] for item in visible_checks)
+        for region_name, scores in overlay_scores.items():
+            hidden_checks = []
+            visible_checks = []
+            for index, score in enumerate(scores):
+                seconds = index * SAMPLE_SECONDS
+                if seconds < WARMUP_SECONDS:
+                    continue
+                mode, age, remaining = mode_at(events, overlay_started + seconds)
+                visible = score > visibility_thresholds[region_name]
+                # The five-second video sampler can select a frame near either side
+                # of a state boundary. Guarding both edges keeps P3 frame evidence
+                # unambiguous; protocol P2 separately measures the two-second SLA.
+                stable_window = visibility_frame_is_settled(age, remaining)
+                sample = {"seconds": seconds, "mode": mode, "modeAgeSeconds": round(age, 3), "modeRemainingSeconds": None if remaining is None else round(remaining, 3), "score": round(score, 3), "visible": visible}
+                if mode in unsafe and stable_window:
+                    hidden_checks.append(sample)
+                    if hidden_second is None:
+                        hidden_second = seconds
+                elif mode not in unsafe and mode not in {"unknown", "server-started"} and stable_window:
+                    visible_checks.append(sample)
+                    if visible_second is None:
+                        visible_second = seconds
+            region_checks[region_name] = {
+                "threshold": round(visibility_thresholds[region_name], 3),
+                "hiddenChecks": len(hidden_checks),
+                "hiddenViolations": sum(item["visible"] for item in hidden_checks),
+                "recoveryChecks": len(visible_checks),
+                "recoveryViolations": sum(not item["visible"] for item in visible_checks),
+                "hiddenSamples": hidden_checks,
+                "recoverySamples": visible_checks,
+            }
+        hidden_violations = sum(region["hiddenViolations"] for region in region_checks.values())
+        recovery_violations = sum(region["recoveryViolations"] for region in region_checks.values())
 
         pss = summarize_pss(baseline_samples, recording_samples)
         cpu = [sample["cpuPercentOfOneCore"] for sample in recording_samples if sample["cpuPercentOfOneCore"] is not None]
@@ -518,27 +577,29 @@ def main() -> int:
         remote = sorted({peer for sample in baseline_samples + warmup_samples + recording_samples for peer in sample["remoteSocketPeers"]})
         lag_delta = overlay_counters["renderLagPercent"] - baseline_counters["renderLagPercent"]
 
-        visible_path = EVIDENCE / f"{EVIDENCE_STEM}-visible.png"
-        hidden_path = EVIDENCE / f"{EVIDENCE_STEM}-hidden.png"
+        full_visible_path = EVIDENCE / f"{EVIDENCE_STEM}-full-output-visible.png"
+        full_hidden_path = EVIDENCE / f"{EVIDENCE_STEM}-full-output-hidden.png"
+        source_visible_path = EVIDENCE / f"{EVIDENCE_STEM}-source-visible.png"
+        source_hidden_path = EVIDENCE / f"{EVIDENCE_STEM}-source-hidden.png"
         if visible_second is not None:
-            extract_frame(overlay_video, visible_second, visible_path)
+            extract_frame(overlay_video, visible_second, full_visible_path)
+            extract_cropped_frame(overlay_video, visible_second, source_visible_path, source_rectangle)
         if hidden_second is not None:
-            extract_frame(overlay_video, hidden_second, hidden_path)
+            extract_frame(overlay_video, hidden_second, full_hidden_path)
+            extract_cropped_frame(overlay_video, hidden_second, source_hidden_path, source_rectangle)
 
-        passed = all([
-            overlay_duration >= WARMUP_SECONDS + RECORD_SECONDS - 2,
-            pss["total"]["incrementalMedianKiB"] <= 256 * 1024,
-            pss["total"]["growthKiBPerMinute"] <= 1024,
-            pss["total"]["totalRangeKiB"] <= 64 * 1024,
-            statistics.median(browser_cpu) <= 5,
-            lag_delta <= 1.0,
-            hidden_violations == 0,
-            recovery_violations == 0,
-            not remote,
-            not overlay_counters["crash"],
-        ])
+        gates = evaluate_gates(
+            overlay_duration=overlay_duration, pss=pss,
+            browser_cpu_median=statistics.median(browser_cpu), lag_delta=lag_delta,
+            hidden_violations=hidden_violations, recovery_violations=recovery_violations,
+            remote=remote, crashed=overlay_counters["crash"],
+            required_duration=WARMUP_SECONDS + RECORD_SECONDS,
+        )
+        passed = all(gates.values())
         summary = {
-            "protocol": "P3", "measuredAt": datetime.now(timezone.utc).isoformat(), **source_identity(),
+            "protocol": "P3", "evidenceSchema": "p3.viewport-750x640.v1",
+            "acceptedSpecCommit": ACCEPTED_SPEC_COMMIT,
+            "measuredAt": datetime.now(timezone.utc).isoformat(), **source_identity(),
             "configured": {
                 "runKind": RUN_KIND, "resolution": RESOLUTION["label"],
                 "emptyBaselineSeconds": BASELINE_SECONDS, "overlayWarmupSeconds": WARMUP_SECONDS,
@@ -557,7 +618,12 @@ def main() -> int:
             "stack": {
                 **stack_info(overlay_log),
                 "canvas": f"{RESOLUTION['width']}x{RESOLUTION['height']}@60",
-                "browserSourceViewport": f"{RESOLUTION['width']}x{RESOLUTION['height']}@30",
+                "browserSourceViewport": "750x640@30",
+                "browserSourceGeometry": {
+                    "rectangle": source_rectangle, "scale": {"x": 1.0, "y": 1.0},
+                    "rotationDegrees": 0, "crop": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+                    "boundsTransform": "none", "alignment": "top-left",
+                },
                 "browserHardwareAcceleration": False,
                 "composition": "OBS OpenGL; CEF software-composited",
                 "encoder": "NVENC H.264",
@@ -575,17 +641,25 @@ def main() -> int:
                 "counters": overlay_counters, "renderLagDeltaPercentagePoints": round(lag_delta, 3),
             },
             "visibility": {
-                "crop": crop, "sampleSeconds": SAMPLE_SECONDS,
-                "threshold": round(visibility_threshold, 3), "hiddenChecks": len(hidden_checks), "hiddenViolations": hidden_violations,
-                "recoveryChecks": len(visible_checks), "recoveryViolations": recovery_violations,
-                "hiddenSamples": hidden_checks, "recoverySamples": visible_checks,
+                "sampleSeconds": SAMPLE_SECONDS, "completeSourceRectangle": source_rectangle,
+                "fullOutputRectangle": full_rectangle,
+                "historical750x450ROI": historical_rejected_visibility_roi(RESOLUTION),
+                "regions": region_checks,
+                "hiddenViolations": hidden_violations,
+                "recoveryViolations": recovery_violations,
             },
             "network": {"remotePeers": remote, "loopbackPeersObserved": sorted({peer for sample in recording_samples for peer in sample["socketPeers"]})},
             "stateTransitions": [{"at": event["at"], "mode": event["mode"]} for event in events if event["epoch"] >= overlay_started - 5],
             "samples": {"emptyBaseline": baseline_samples, "overlayWarmup": warmup_samples, "overlayRecording": recording_samples},
+            "gates": gates,
             "artifacts": [
-                {"path": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                for path in (visible_path, hidden_path) if path.exists()
+                {"path": path.name, "role": role, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                for path, role in (
+                    (full_visible_path, "composed_full_output_visible"),
+                    (full_hidden_path, "composed_full_output_hidden"),
+                    (source_visible_path, "complete_source_visible"),
+                    (source_hidden_path, "complete_source_hidden"),
+                ) if path.exists()
             ],
             "passed": passed,
         }
