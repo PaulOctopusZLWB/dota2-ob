@@ -235,34 +235,26 @@ func (c *realReplayComposition) normalizeTwice() error {
 		return err
 	}
 	proof := history.ProcessedReplayEvidence{MatchID: c.cfg.MatchID}
-	configSHA, err := c.normalizeConfigSHA()
-	if err != nil {
-		return err
-	}
+	c.metrics = nil
 	var first history.NormalizedMatchFacts
 	for _, run := range index.Runs {
-		parsedJSON, err := os.ReadFile(c.parsePayloadPath(run.ExecutionID))
-		if err != nil {
-			return err
-		}
-		parsedJSON = trimNewline(parsedJSON)
-		var parsed replay.ReplayFactsV1
-		if err := json.Unmarshal(parsedJSON, &parsed); err != nil {
-			return err
-		}
 		duration := c.cfg.DurationSeconds
-		normalized, err := replay.Normalize(&parsed, replay.NormalizeMeta{MatchID: c.cfg.MatchID, ReplaySHA256: c.manifest.Matches[0].ReplaySHA256, SourceEventTime: c.cfg.SourceEventTime, PatchID: c.cfg.PatchID, RadiantTeamID: c.cfg.RadiantTeamID, DireTeamID: c.cfg.DireTeamID, GameBuild: c.cfg.GameBuild, DurationSeconds: &duration}, nil)
+		execution, err := executeParseExecution(c.executionRoot(), parseExecutionRequest{
+			ExecutionID: run.ExecutionID, ReplayPath: c.replayPath(), ExpectedReplaySHA256: c.manifest.Matches[0].ReplaySHA256,
+			NormalizeMeta: replay.NormalizeMeta{MatchID: c.cfg.MatchID, SourceEventTime: c.cfg.SourceEventTime, PatchID: c.cfg.PatchID, RadiantTeamID: c.cfg.RadiantTeamID, DireTeamID: c.cfg.DireTeamID, GameBuild: c.cfg.GameBuild, DurationSeconds: &duration},
+		})
 		if err != nil {
 			return err
 		}
-		pass, err := materializeParseExecution(c.executionRoot(), history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: run.ExecutionID, MatchID: c.cfg.MatchID, ReplaySHA256: c.manifest.Matches[0].ReplaySHA256, FactsSHA256: normalized.ContentSHA256, ParserVersion: replay.ParserName + "/" + replay.ParserVersion, AdapterVersion: replay.AdapterName + "/" + replay.AdapterVersion, ConfigSHA256: configSHA, Deterministic: true}, parseExecutionMaterial{Parsed: parsed, Normalized: *normalized})
-		if err != nil {
-			return err
+		parsedJSON, err := execution.Parsed.CanonicalJSON()
+		if err != nil || bytesSHA256(parsedJSON) != run.PayloadSHA || execution.Evidence.ParsedArtifactSHA256 == "" {
+			return errors.New("trusted parser execution does not match parse checkpoint")
 		}
-		proof.Passes = append(proof.Passes, pass)
+		proof.Passes = append(proof.Passes, execution.Evidence)
+		c.metrics = append(c.metrics, execution.Metrics)
 		if first.MatchID == "" {
-			first = *normalized
-		} else if first.ContentSHA256 != normalized.ContentSHA256 {
+			first = execution.Normalized
+		} else if first.ContentSHA256 != execution.Normalized.ContentSHA256 {
 			return errors.New("normalizer is not deterministic")
 		}
 	}
@@ -316,7 +308,7 @@ func (c *realReplayComposition) validateStage(e history.StageEntry, ctx history.
 		c.parseIndexSHA = sha
 		return nil
 	case history.StageNormalize:
-		return c.validateNormalized()
+		return c.validateNormalized(e)
 	case history.StageAggregate:
 		sha, err := fileSHA(c.aggregatePath())
 		if err != nil {
@@ -390,7 +382,7 @@ func (c *realReplayComposition) readParseIndex() (realParseIndex, error) {
 	return index, nil
 }
 
-func (c *realReplayComposition) validateNormalized() error {
+func (c *realReplayComposition) validateNormalized(e history.StageEntry) error {
 	b, err := os.ReadFile(c.factsPath())
 	if err != nil {
 		return err
@@ -398,6 +390,10 @@ func (c *realReplayComposition) validateNormalized() error {
 	var facts history.NormalizedMatchFacts
 	if err := json.Unmarshal(b, &facts); err != nil || facts.Validate() != nil {
 		return errors.New("normalized facts artifact invalid")
+	}
+	canonical, err := contracts.MarshalCanonical(facts)
+	if err != nil || string(trimNewline(b)) != string(canonical) || facts.ContentSHA256 != e.FactsSHA256 || facts.ContentSHA256 != e.ArtifactSHA256[history.StageNormalize] {
+		return errors.New("normalized facts checkpoint identity mismatch")
 	}
 	proofBytes, err := os.ReadFile(c.proofPath())
 	if err != nil {
@@ -414,18 +410,6 @@ func (c *realReplayComposition) validateNormalized() error {
 	}
 	c.facts, c.processed = facts, proof
 	return nil
-}
-
-func (c *realReplayComposition) normalizeConfigSHA() (string, error) {
-	b, err := contracts.MarshalCanonical(struct {
-		MatchID, PatchID, RadiantTeamID, DireTeamID string
-		GameBuild                                   uint32
-		DurationSeconds                             int64
-	}{c.cfg.MatchID, c.cfg.PatchID, c.cfg.RadiantTeamID, c.cfg.DireTeamID, c.cfg.GameBuild, c.cfg.DurationSeconds})
-	if err != nil {
-		return "", err
-	}
-	return shaBytes(b), nil
 }
 
 func (c *realReplayComposition) replayPath() string {

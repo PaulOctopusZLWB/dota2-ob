@@ -109,32 +109,25 @@ func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContex
 		return e, &history.StageFailure{Stage: p.stage, Reason: "missing_fixture_input", Terminal: true}
 	}
 	if p.stage == history.StageNormalize {
-		payload, err := localReplayBytes(p.facts[e.MatchID])
-		if err != nil {
-			return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+		fact := p.facts[e.MatchID]
+		mapping := make([]replay.ParticipantMapping, 0, len(fact.Participants))
+		for _, participant := range fact.Participants {
+			mapping = append(mapping, replay.ParticipantMapping{PersonID: participant.PersonID, TeamID: participant.TeamID, HeroName: participant.HeroName, Role: participant.Role, Slot: participant.Slot})
 		}
 		proof := history.ProcessedReplayEvidence{MatchID: e.MatchID}
 		for _, id := range []string{"independent-pass-a", "independent-pass-b"} {
-			var raw localReplayFixture
-			if err := contracts.DecodeStrict(payload, &raw); err != nil {
-				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
-			}
-			raw.Facts.ReplaySHA256 = ctx.Discovery.ReplaySHA256
-			if err := history.SealNormalizedMatchFacts(&raw.Facts); err != nil || raw.Facts.ContentSHA256 != p.facts[e.MatchID].ContentSHA256 {
-				return e, &history.StageFailure{Stage: p.stage, Reason: "nondeterministic_normalize", Terminal: true}
-			}
-			pass := history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: id, MatchID: e.MatchID, ReplaySHA256: raw.Facts.ReplaySHA256, FactsSHA256: raw.Facts.ContentSHA256, ParserVersion: "local-replay-fixture/v1", AdapterVersion: history.AdapterName + "/" + history.AdapterVersion, ConfigSHA256: sha256Text("local-replay-config-v1"), ParsedArtifactSHA256: sha256Text(id + ":parsed:" + raw.Facts.ContentSHA256), NormalizedArtifactSHA256: sha256Text(id + ":normalized:" + raw.Facts.ContentSHA256), RunArtifactSHA256: sha256Text(id + ":run:" + raw.Facts.ContentSHA256), CheckpointSHA256: sha256Text(id + ":checkpoint:" + raw.Facts.ContentSHA256), Deterministic: true}
-			parsed := replay.ReplayFactsV1{
-				SchemaVersion: replay.FactsSchema,
-				Provenance:    replay.Provenance{ParserName: "local-replay-fixture", ParserVersion: "v1", AdapterName: history.AdapterName, AdapterVersion: history.AdapterVersion, SchemaVersion: replay.FactsSchema},
-				Availability:  replay.Availability{Available: []string{"fixture"}}, Meta: replay.MatchMeta{GameBuild: raw.Facts.GameBuild, ServerName: "fixture"},
-				MessageCounts: map[string]uint64{}, CombatLogTypeCounts: map[string]uint64{}, ItemUses: map[string]uint64{},
-			}
-			pass, err = materializeParseExecution(filepath.Join(p.root, "executions"), pass, parseExecutionMaterial{Parsed: parsed, Normalized: raw.Facts})
+			execution, err := executeParseExecutionWith(filepath.Join(p.root, "executions"), parseExecutionRequest{
+				ExecutionID: id, ReplayPath: p.replayPath(e.MatchID), ExpectedReplaySHA256: ctx.Discovery.ReplaySHA256,
+				NormalizeMeta:      replay.NormalizeMeta{MatchID: fact.MatchID, SourceEventTime: fact.SourceEventTime, PatchID: fact.PatchID, RadiantTeamID: fact.RadiantTeamID, DireTeamID: fact.DireTeamID, RadiantWin: fact.RadiantWin, GameBuild: fact.GameBuild, DurationSeconds: fact.DurationSeconds},
+				ParticipantMapping: mapping,
+			}, fixtureParseExecutionDependencies())
 			if err != nil {
 				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
 			}
-			proof.Passes = append(proof.Passes, pass)
+			if execution.Normalized.ContentSHA256 != fact.ContentSHA256 {
+				return e, &history.StageFailure{Stage: p.stage, Reason: "nondeterministic_normalize", Terminal: true}
+			}
+			proof.Passes = append(proof.Passes, execution.Evidence)
 		}
 		p.processed[e.MatchID] = proof
 		proofBytes, err := contracts.MarshalCanonical(proof)
@@ -153,6 +146,52 @@ func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContex
 		return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: false}
 	}
 	return p.apply(e, a), nil
+}
+
+func fixtureParseExecutionDependencies() parseExecutionDependencies {
+	return parseExecutionDependencies{
+		inspect: func(path string) (replay.Source2DemoIdentity, error) {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return replay.Source2DemoIdentity{}, err
+			}
+			return replay.Source2DemoIdentity{SHA256: bytesSHA256(b), Bytes: int64(len(b)), Magic: "fixture-json"}, nil
+		},
+		parse: func(path string) (*replay.ParseResult, error) {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			var fixture localReplayFixture
+			if err := contracts.DecodeStrict(b, &fixture); err != nil {
+				return nil, err
+			}
+			heroes := make([]replay.HeroFacts, 0, len(fixture.Facts.Participants))
+			for _, participant := range fixture.Facts.Participants {
+				hero := replay.HeroFacts{Name: participant.HeroName, ItemUses: map[string]uint64{}}
+				if participant.Kills != nil {
+					hero.HeroKills = uint64(*participant.Kills)
+				}
+				if participant.Deaths != nil {
+					hero.Deaths = uint64(*participant.Deaths)
+				}
+				heroes = append(heroes, hero)
+			}
+			sort.Slice(heroes, func(i, j int) bool { return heroes[i].Name < heroes[j].Name })
+			facts := &replay.ReplayFactsV1{
+				SchemaVersion: replay.FactsSchema,
+				Provenance:    replay.Provenance{ParserName: "local-replay-fixture", ParserVersion: "v1", AdapterName: history.AdapterName, AdapterVersion: history.AdapterVersion, SchemaVersion: replay.FactsSchema},
+				Availability:  replay.Availability{Available: []string{"fixture"}}, Meta: replay.MatchMeta{GameBuild: fixture.Facts.GameBuild, ServerName: "fixture"},
+				MessageCounts: map[string]uint64{}, CombatLogTypeCounts: map[string]uint64{}, Heroes: heroes, ItemUses: map[string]uint64{},
+			}
+			hash, err := facts.Hash()
+			if err != nil {
+				return nil, err
+			}
+			return &replay.ParseResult{Facts: facts, Hash: hash, Metrics: replay.Metrics{RawDecompressed: int64(len(b)), Outcome: "fixture"}}, nil
+		},
+		parserVersion: "local-replay-fixture/v1", adapterVersion: history.AdapterName + "/" + history.AdapterVersion,
+	}
 }
 
 func (p *fileArtifactPort) Reconcile(e history.StageEntry, ctx history.MatchContext) (history.StageEntry, bool, *history.StageFailure) {

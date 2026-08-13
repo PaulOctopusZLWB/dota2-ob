@@ -41,9 +41,26 @@ type normalizedExecutionArtifact struct {
 	Payload history.NormalizedMatchFacts `json:"payload"`
 }
 
-type parseExecutionMaterial struct {
+type parseExecutionRequest struct {
+	ExecutionID          string
+	ReplayPath           string
+	ExpectedReplaySHA256 string
+	NormalizeMeta        replay.NormalizeMeta
+	ParticipantMapping   []replay.ParticipantMapping
+}
+
+type parseExecutionResult struct {
+	Evidence   history.ParseExecutionEvidence
 	Parsed     replay.ReplayFactsV1
 	Normalized history.NormalizedMatchFacts
+	Metrics    replay.Metrics
+}
+
+type parseExecutionDependencies struct {
+	inspect        func(string) (replay.Source2DemoIdentity, error)
+	parse          func(string) (*replay.ParseResult, error)
+	parserVersion  string
+	adapterVersion string
 }
 
 type executionBindingArtifact struct {
@@ -61,69 +78,112 @@ type executionBindingArtifact struct {
 	CheckpointSHA256         string `json:"checkpoint_sha256,omitempty"`
 }
 
-func materializeParseExecution(root string, draft history.ParseExecutionEvidence, material parseExecutionMaterial) (history.ParseExecutionEvidence, error) {
-	if root == "" || draft.ExecutionID == "" || draft.MatchID == "" {
-		return history.ParseExecutionEvidence{}, errors.New("invalid parse execution material")
+func executeParseExecution(root string, request parseExecutionRequest) (parseExecutionResult, error) {
+	return executeParseExecutionWith(root, request, parseExecutionDependencies{
+		inspect: replay.InspectSource2DemoFile, parse: replay.ParseFile,
+		parserVersion:  replay.ParserName + "/" + replay.ParserVersion,
+		adapterVersion: replay.AdapterName + "/" + replay.AdapterVersion,
+	})
+}
+
+func executeParseExecutionWith(root string, request parseExecutionRequest, deps parseExecutionDependencies) (parseExecutionResult, error) {
+	if root == "" || request.ExecutionID == "" || request.ReplayPath == "" || request.ExpectedReplaySHA256 == "" || deps.inspect == nil || deps.parse == nil || deps.parserVersion == "" || deps.adapterVersion == "" {
+		return parseExecutionResult{}, errors.New("invalid parse execution request")
+	}
+	identity, err := deps.inspect(request.ReplayPath)
+	if err != nil || identity.SHA256 != request.ExpectedReplaySHA256 {
+		return parseExecutionResult{}, errors.New("parse execution replay identity mismatch")
+	}
+	parsedResult, err := deps.parse(request.ReplayPath)
+	if err != nil || parsedResult == nil || parsedResult.Facts == nil {
+		return parseExecutionResult{}, errors.New("parse execution parser failed")
+	}
+	parsed := *parsedResult.Facts
+	canonicalParsed, err := parsed.CanonicalJSON()
+	if err != nil || bytesSHA256(canonicalParsed) != parsedResult.Hash {
+		return parseExecutionResult{}, errors.New("parse execution parser result identity mismatch")
+	}
+	request.NormalizeMeta.ReplaySHA256 = identity.SHA256
+	normalized, err := replay.Normalize(&parsed, request.NormalizeMeta, request.ParticipantMapping)
+	if err != nil {
+		return parseExecutionResult{}, err
+	}
+	configSHA, err := parseExecutionConfigSHA(request.NormalizeMeta, request.ParticipantMapping)
+	if err != nil {
+		return parseExecutionResult{}, err
+	}
+	draft := history.ParseExecutionEvidence{
+		SchemaVersion: "history.parse-execution.v1", ExecutionID: request.ExecutionID,
+		MatchID: request.NormalizeMeta.MatchID, ReplaySHA256: identity.SHA256, FactsSHA256: normalized.ContentSHA256,
+		ParserVersion: deps.parserVersion, AdapterVersion: deps.adapterVersion, ConfigSHA256: configSHA, Deterministic: true,
+	}
+	if err := validateReplayFactsPayload(parsed, draft); err != nil {
+		return parseExecutionResult{}, err
+	}
+	if err := validateNormalizedFactsPayload(*normalized, draft); err != nil {
+		return parseExecutionResult{}, err
 	}
 	draft.ContentSHA256, draft.ParsedArtifactSHA256, draft.NormalizedArtifactSHA256, draft.RunArtifactSHA256, draft.CheckpointSHA256 = "", "", "", "", ""
-	canonicalParsed, err := material.Parsed.CanonicalJSON()
+	canonicalNormalized, err := contracts.MarshalCanonical(*normalized)
 	if err != nil {
-		return history.ParseExecutionEvidence{}, err
-	}
-	if err := validateReplayFactsPayload(material.Parsed, draft); err != nil {
-		return history.ParseExecutionEvidence{}, err
-	}
-	canonicalNormalized, err := contracts.MarshalCanonical(material.Normalized)
-	if err != nil {
-		return history.ParseExecutionEvidence{}, err
-	}
-	if err := validateNormalizedFactsPayload(material.Normalized, draft); err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	parsedPayloadSHA := bytesSHA256(canonicalParsed)
 	parsedBinding := executionPayloadEnvelope(draft, "parsed", bytesSHA256(canonicalParsed), parsedPayloadSHA)
-	parsed, err := json.Marshal(parsedExecutionArtifact{executionPayloadBinding: parsedBinding, Payload: material.Parsed})
+	parsedEnvelope, err := json.Marshal(parsedExecutionArtifact{executionPayloadBinding: parsedBinding, Payload: parsed})
 	if err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	normalizedBinding := executionPayloadEnvelope(draft, "normalized", bytesSHA256(canonicalNormalized), parsedPayloadSHA)
-	normalized, err := json.Marshal(normalizedExecutionArtifact{executionPayloadBinding: normalizedBinding, Payload: material.Normalized})
+	normalizedEnvelope, err := json.Marshal(normalizedExecutionArtifact{executionPayloadBinding: normalizedBinding, Payload: *normalized})
 	if err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
-	parsedSHA, normalizedSHA := bytesSHA256(parsed), bytesSHA256(normalized)
+	parsedSHA, normalizedSHA := bytesSHA256(parsedEnvelope), bytesSHA256(normalizedEnvelope)
 	draft.ParsedArtifactSHA256, draft.NormalizedArtifactSHA256 = parsedSHA, normalizedSHA
 	dir := executionDir(root, draft.MatchID, draft.ExecutionID)
-	if err := atomicfile.WriteFile(filepath.Join(dir, "parsed.json"), append(parsed, '\n'), 0o644); err != nil {
-		return history.ParseExecutionEvidence{}, err
+	if err := atomicfile.WriteFile(filepath.Join(dir, "parsed.json"), append(parsedEnvelope, '\n'), 0o644); err != nil {
+		return parseExecutionResult{}, err
 	}
-	if err := atomicfile.WriteFile(filepath.Join(dir, "normalized.json"), append(normalized, '\n'), 0o644); err != nil {
-		return history.ParseExecutionEvidence{}, err
+	if err := atomicfile.WriteFile(filepath.Join(dir, "normalized.json"), append(normalizedEnvelope, '\n'), 0o644); err != nil {
+		return parseExecutionResult{}, err
 	}
 	checkpoint := executionBinding(draft, "checkpoint")
 	checkpointBytes, err := contracts.MarshalCanonical(checkpoint)
 	if err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	draft.CheckpointSHA256 = bytesSHA256(checkpointBytes)
 	if err := atomicfile.WriteFile(filepath.Join(dir, "checkpoint.json"), append(checkpointBytes, '\n'), 0o644); err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	runBytes, err := contracts.MarshalCanonical(executionBinding(draft, "run"))
 	if err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	draft.RunArtifactSHA256 = bytesSHA256(runBytes)
 	if err := atomicfile.WriteFile(filepath.Join(dir, "run.json"), append(runBytes, '\n'), 0o644); err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	if err := sealExecutionEvidence(&draft); err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
 	if err := validateParseExecutionArtifacts(root, draft); err != nil {
-		return history.ParseExecutionEvidence{}, err
+		return parseExecutionResult{}, err
 	}
-	return draft, nil
+	return parseExecutionResult{Evidence: draft, Parsed: parsed, Normalized: *normalized, Metrics: parsedResult.Metrics}, nil
+}
+
+func parseExecutionConfigSHA(meta replay.NormalizeMeta, mapping []replay.ParticipantMapping) (string, error) {
+	b, err := contracts.MarshalCanonical(struct {
+		SchemaVersion string                      `json:"schema_version"`
+		Meta          replay.NormalizeMeta        `json:"meta"`
+		Mapping       []replay.ParticipantMapping `json:"mapping"`
+	}{SchemaVersion: "history.parse-normalize-config.v1", Meta: meta, Mapping: mapping})
+	if err != nil {
+		return "", err
+	}
+	return bytesSHA256(b), nil
 }
 
 func validateParseExecutionArtifacts(root string, pass history.ParseExecutionEvidence) error {

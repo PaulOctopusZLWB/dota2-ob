@@ -55,25 +55,87 @@ func TestMaterializeParseExecutionRejectsValidJSONWithWrongSchemas(t *testing.T)
 }
 
 func TestMaterializeParseExecutionRejectsSemanticallyInvalidReplayFacts(t *testing.T) {
-	normalized := history.NormalizedMatchFacts{
-		SchemaVersion: history.FactsSchema, MatchID: "8941092540", ReplaySHA256: sha256Text("replay"),
-		SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60",
-		IdentityStatus: contracts.IdentityQuarantined,
-	}
-	if err := history.SealNormalizedMatchFacts(&normalized); err != nil {
-		t.Fatal(err)
-	}
 	parsed := replay.ReplayFactsV1{
 		SchemaVersion: replay.FactsSchema,
 		Provenance:    replay.Provenance{ParserName: replay.ParserName, ParserVersion: replay.ParserVersion, AdapterName: replay.AdapterName, AdapterVersion: replay.AdapterVersion, SchemaVersion: replay.FactsSchema},
 	}
-	draft := history.ParseExecutionEvidence{
-		SchemaVersion: "history.parse-execution.v1", ExecutionID: "empty-typed-pass", MatchID: normalized.MatchID,
-		ReplaySHA256: normalized.ReplaySHA256, FactsSHA256: normalized.ContentSHA256,
-		ParserVersion: replay.ParserName + "/" + replay.ParserVersion, AdapterVersion: replay.AdapterName + "/" + replay.AdapterVersion,
-		ConfigSHA256: sha256Text("config"), Deterministic: true,
+	replayPath := filepath.Join(t.TempDir(), "replay.dem")
+	if err := os.WriteFile(replayPath, []byte("owned replay bytes"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := materializeParseExecution(t.TempDir(), draft, parseExecutionMaterial{Parsed: parsed, Normalized: normalized}); err == nil {
+	replaySHA := sha256Text("owned replay bytes")
+	request := parseExecutionRequest{
+		ExecutionID: "empty-typed-pass", ReplayPath: replayPath, ExpectedReplaySHA256: replaySHA,
+		NormalizeMeta: replay.NormalizeMeta{MatchID: "8941092540", SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60"},
+	}
+	if _, err := executeParseExecutionWith(t.TempDir(), request, testParseExecutionDependencies(t, replayPath, parsed)); err == nil {
 		t.Fatal("semantically empty ReplayFactsV1 was sealed as valid execution evidence")
+	}
+}
+
+func TestParseExecutionDerivesNormalizationFromOwnedParserResult(t *testing.T) {
+	parsed := replay.BuildFacts(&replay.Collected{GameBuild: 6896, ServerName: "caller", MessageCounts: map[string]uint64{"caller": 1}})
+	callerNormalized := history.NormalizedMatchFacts{
+		SchemaVersion: history.FactsSchema, MatchID: "8941092540", ReplaySHA256: sha256Text("owned replay bytes"),
+		SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60", GameBuild: 6896,
+		IdentityStatus: contracts.IdentityQuarantined,
+		Availability:   history.FactsAvailability{Available: []string{"caller-manufactured"}},
+	}
+	if err := history.SealNormalizedMatchFacts(&callerNormalized); err != nil {
+		t.Fatal(err)
+	}
+	replayPath := filepath.Join(t.TempDir(), "replay.dem")
+	if err := os.WriteFile(replayPath, []byte("owned replay bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	request := parseExecutionRequest{
+		ExecutionID: "owned-pass", ReplayPath: replayPath, ExpectedReplaySHA256: sha256Text("owned replay bytes"),
+		NormalizeMeta: replay.NormalizeMeta{
+			MatchID: "8941092540", ReplaySHA256: sha256Text("caller-label-is-overridden"),
+			SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60", GameBuild: 6896,
+		},
+	}
+	result, err := executeParseExecutionWith(t.TempDir(), request, testParseExecutionDependencies(t, replayPath, *parsed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Normalized.ContentSHA256 == callerNormalized.ContentSHA256 || result.Evidence.FactsSHA256 == callerNormalized.ContentSHA256 {
+		t.Fatal("independently sealed caller normalization became execution evidence")
+	}
+	want, err := replay.Normalize(parsed, replay.NormalizeMeta{
+		MatchID: "8941092540", ReplaySHA256: sha256Text("owned replay bytes"),
+		SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60", GameBuild: 6896,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Normalized.ContentSHA256 != want.ContentSHA256 || result.Evidence.FactsSHA256 != want.ContentSHA256 {
+		t.Fatal("execution evidence was not derived from production normalization of parser output")
+	}
+}
+
+func testParseExecutionDependencies(t *testing.T, replayPath string, facts replay.ReplayFactsV1) parseExecutionDependencies {
+	t.Helper()
+	payload, err := facts.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parseExecutionDependencies{
+		inspect: func(path string) (replay.Source2DemoIdentity, error) {
+			if path != replayPath {
+				t.Fatalf("inspected path %q, want %q", path, replayPath)
+			}
+			b, err := os.ReadFile(path)
+			return replay.Source2DemoIdentity{SHA256: bytesSHA256(b), Bytes: int64(len(b)), Magic: "test"}, err
+		},
+		parse: func(path string) (*replay.ParseResult, error) {
+			if path != replayPath {
+				t.Fatalf("parsed path %q, want %q", path, replayPath)
+			}
+			copyFacts := facts
+			return &replay.ParseResult{Facts: &copyFacts, Hash: bytesSHA256(payload)}, nil
+		},
+		parserVersion:  replay.ParserName + "/" + replay.ParserVersion,
+		adapterVersion: replay.AdapterName + "/" + replay.AdapterVersion,
 	}
 }
