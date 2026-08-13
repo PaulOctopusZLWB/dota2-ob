@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 )
@@ -116,22 +115,7 @@ func (e *Engine) ReplayCommit(committed contracts.PolicyCommitV2, candidates []c
 }
 
 func SortCandidates(values []contracts.InsightCandidateV1) {
-	sort.SliceStable(values, func(i, j int) bool {
-		if values[i].Priority != values[j].Priority {
-			return values[i].Priority > values[j].Priority
-		}
-		if confidence(values[i].Confidence) != confidence(values[j].Confidence) {
-			return confidence(values[i].Confidence) > confidence(values[j].Confidence)
-		}
-		ti, tj := candidateEvidenceTime(values[i]), candidateEvidenceTime(values[j])
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		if values[i].RuleVersion != values[j].RuleVersion {
-			return values[i].RuleVersion < values[j].RuleVersion
-		}
-		return values[i].CandidateID < values[j].CandidateID
-	})
+	contracts.SortInsightCandidates(values)
 }
 
 func (e *Engine) EvaluateObservation(observationSequence uint64, rawRecordHash, liveHash string, evidence contracts.EvidenceRefV1, candidates []contracts.InsightCandidateV1, policyTimeMS int64) contracts.PolicyCommitV2 {
@@ -149,7 +133,7 @@ func (e *Engine) EvaluateObservation(observationSequence uint64, rawRecordHash, 
 		commit.Publication = contracts.PublicationSuppressedV2
 		return e.finish(commit)
 	}
-	activeExpired := e.expire(policyTimeMS, &commit)
+	_, activeExpired := e.expire(policyTimeMS, &commit, "")
 	SortCandidates(candidates)
 	changed := false
 	for _, candidate := range candidates {
@@ -200,8 +184,25 @@ func (e *Engine) ApplyCommand(command contracts.OperatorCommandV1) contracts.Pol
 		status, reason = contracts.CommandRejected, "malformed_operator_command"
 	}
 	var decisions []contracts.BroadcastDecisionV1
+	maintenanceChanged, activeExpired := false, false
+	var expiryAudits []contracts.AuditEventV1
+	expiryDecisionCount := 0
 	if status == contracts.CommandAccepted {
-		decisions, reason, status = e.mutate(command)
+		maintenanceChanged, activeExpired = e.expire(command.PolicyTimeMS, &commit, command.CommandID)
+		expiryDecisions := append([]contracts.BroadcastDecisionV1(nil), commit.Decisions...)
+		expiryDecisionCount = len(expiryDecisions)
+		expiryAudits = append([]contracts.AuditEventV1(nil), commit.AuditEvents...)
+		mutationDecisions, mutationReason, mutationStatus := e.mutate(command)
+		decisions = append(expiryDecisions, mutationDecisions...)
+		reason, status = mutationReason, mutationStatus
+		if maintenanceChanged && mutationStatus == contracts.CommandRejected {
+			status = contracts.CommandAccepted
+			if command.TargetCandidateID != "" && mutationReason == "invalid_target" {
+				reason = "candidate_expired"
+			} else {
+				reason = "policy_time_maintenance"
+			}
+		}
 	}
 	resultingRevision := priorRevision
 	if status == contracts.CommandAccepted {
@@ -229,10 +230,17 @@ func (e *Engine) ApplyCommand(command contracts.OperatorCommandV1) contracts.Pol
 	sort.Slice(e.state.CommandResults, func(i, j int) bool { return e.state.CommandResults[i].CommandID < e.state.CommandResults[j].CommandID })
 	commit.Decisions, commit.CommandResult = decisions, &result
 	commit.AuditEvents = []contracts.AuditEventV1{audit(e.state.SessionID, command.PolicyTimeMS, "operator_command", command.TargetCandidateID, firstDecision(decisions), command.CommandID, reason)}
-	for i := 1; i < len(decisions); i++ {
-		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, command.PolicyTimeMS, "policy_transition", decisions[i].CandidateID, decisions[i].DecisionID, command.CommandID, decisions[i].Reason))
+	commit.AuditEvents = append(commit.AuditEvents, expiryAudits...)
+	transitionStart := expiryDecisionCount
+	if expiryDecisionCount == 0 && transitionStart < len(decisions) {
+		transitionStart++
+	}
+	for _, decision := range decisions[transitionStart:] {
+		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, command.PolicyTimeMS, "policy_transition", decision.CandidateID, decision.DecisionID, command.CommandID, decision.Reason))
 	}
 	if e.state.EmergencyHide {
+		commit.Publication = contracts.PublicationHide
+	} else if activeExpired && e.state.ActivePrimary == nil {
 		commit.Publication = contracts.PublicationHide
 	} else if status == contracts.CommandAccepted && e.state.ActivePrimary != nil {
 		commit.Publication = contracts.PublicationPublish
@@ -255,6 +263,9 @@ func (e *Engine) mutate(command contracts.OperatorCommandV1) ([]contracts.Broadc
 	case contracts.ActionDisableRule:
 		if contains(e.state.DisabledRuleIDs, command.TargetRuleID) {
 			return nil, "rule_already_disabled", contracts.CommandRejected
+		}
+		if len(e.state.DisabledRuleIDs) >= contracts.MaxDisabledRules {
+			return nil, "disabled_rule_capacity", contracts.CommandRejected
 		}
 		e.state.DisabledRuleIDs = append(e.state.DisabledRuleIDs, command.TargetRuleID)
 		sort.Strings(e.state.DisabledRuleIDs)
@@ -334,9 +345,13 @@ func (e *Engine) mutate(command contracts.OperatorCommandV1) ([]contracts.Broadc
 	return []contracts.BroadcastDecisionV1{decision}, command.Action, contracts.CommandAccepted
 }
 
-func (e *Engine) expire(now int64, commit *contracts.PolicyCommitV2) bool {
+func (e *Engine) expire(now int64, commit *contracts.PolicyCommitV2, commandID string) (bool, bool) {
+	changed := false
 	activeExpired := false
+	priorTombstones := len(e.state.CandidateTombstones)
 	e.state.CandidateTombstones = contracts.ExpirePolicyTombstonesV2(e.state.CandidateTombstones, now)
+	changed = changed || len(e.state.CandidateTombstones) != priorTombstones
+	priorCooldowns := len(e.state.Cooldowns)
 	cooldowns := e.state.Cooldowns[:0]
 	for _, cooldown := range e.state.Cooldowns {
 		if cooldown.UntilPolicyTimeMS > now {
@@ -344,33 +359,40 @@ func (e *Engine) expire(now int64, commit *contracts.PolicyCommitV2) bool {
 		}
 	}
 	e.state.Cooldowns = cooldowns
+	changed = changed || len(cooldowns) != priorCooldowns
 	remaining := e.state.Preview[:0]
 	for _, candidate := range e.state.Preview {
 		if candidate.ExpiryTimeMS > now {
 			remaining = append(remaining, candidate)
 			continue
 		}
-		decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("expiry", candidate.CandidateID), SessionID: e.state.SessionID, PolicyRevision: e.state.PolicyRevision + 1, CandidateID: candidate.CandidateID, PriorState: contracts.DecisionQueued, ResultingState: contracts.DecisionExpired, PolicyTimeMS: now, Reason: "expired"}
+		decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("expiry", candidate.CandidateID), SessionID: e.state.SessionID, PolicyRevision: e.state.PolicyRevision + 1, CandidateID: candidate.CandidateID, CommandID: commandID, PriorState: contracts.DecisionQueued, ResultingState: contracts.DecisionExpired, PolicyTimeMS: now, Reason: "expired"}
 		commit.Decisions = append(commit.Decisions, decision)
-		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, now, "candidate_expired", candidate.CandidateID, decision.DecisionID, "", "expired"))
+		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, now, "candidate_expired", candidate.CandidateID, decision.DecisionID, commandID, "expired"))
 		e.tombstone(candidate, decision, now)
 		removePin(&e.state.Pins, candidate.CandidateID)
+		changed = true
 	}
 	e.state.Preview = remaining
 	if e.state.ActivePrimary != nil && e.state.ActivePrimary.Candidate.ExpiryTimeMS <= now {
 		candidate := e.state.ActivePrimary.Candidate
-		decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("expiry", candidate.CandidateID), SessionID: e.state.SessionID, PolicyRevision: e.state.PolicyRevision + 1, CandidateID: candidate.CandidateID, PriorState: e.state.ActivePrimary.Decision.ResultingState, ResultingState: contracts.DecisionExpired, PolicyTimeMS: now, Reason: "expired"}
+		decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("expiry", candidate.CandidateID), SessionID: e.state.SessionID, PolicyRevision: e.state.PolicyRevision + 1, CandidateID: candidate.CandidateID, CommandID: commandID, PriorState: e.state.ActivePrimary.Decision.ResultingState, ResultingState: contracts.DecisionExpired, PolicyTimeMS: now, Reason: "expired"}
 		commit.Decisions = append(commit.Decisions, decision)
-		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, now, "active_primary_expired", candidate.CandidateID, decision.DecisionID, "", "expired"))
+		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, now, "active_primary_expired", candidate.CandidateID, decision.DecisionID, commandID, "expired"))
 		e.tombstone(candidate, decision, now)
 		removePin(&e.state.Pins, candidate.CandidateID)
 		e.state.ActivePrimary = nil
 		activeExpired = true
+		changed = true
 	}
-	return activeExpired
+	return changed, activeExpired
 }
 
 func (e *Engine) candidateSuppression(candidate contracts.InsightCandidateV1, evidence contracts.EvidenceRefV1, now int64) string {
+	contentID, identityErr := contracts.InsightCandidateContentID(candidate)
+	if identityErr != nil || contentID != candidate.CandidateID {
+		return "candidate_identity_mismatch"
+	}
 	if candidate.Validate() != nil || len(candidate.Evidence) != 1 || !evidenceEqual(candidate.Evidence[0], evidence) {
 		return "candidate_evidence_mismatch"
 	}
@@ -527,23 +549,6 @@ func firstDecision(v []contracts.BroadcastDecisionV1) string {
 		return v[0].DecisionID
 	}
 	return ""
-}
-func confidence(v string) int {
-	switch v {
-	case "high", "verified":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	}
-	return 0
-}
-func candidateEvidenceTime(c contracts.InsightCandidateV1) (z time.Time) {
-	if len(c.Evidence) > 0 {
-		return c.Evidence[0].ReceiveTime
-	}
-	return z
 }
 func candidateIndex(v []contracts.InsightCandidateV1, id string) int {
 	for i := range v {

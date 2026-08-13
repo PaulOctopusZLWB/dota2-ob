@@ -1,9 +1,12 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 	"unicode/utf8"
 )
 
@@ -460,26 +463,96 @@ func validateCheckpointState(v PolicyCheckpointV2) error {
 }
 
 func candidateRanksBefore(a, b InsightCandidateV1) bool {
+	return CompareInsightCandidates(a, b) < 0
+}
+
+// CompareInsightCandidates is the single semantic candidate-rank comparator
+// used by evaluation, policy state, and checkpoint validation.
+func CompareInsightCandidates(a, b InsightCandidateV1) int {
 	if a.Priority != b.Priority {
-		return a.Priority > b.Priority
+		if a.Priority > b.Priority {
+			return -1
+		}
+		return 1
 	}
-	if a.Confidence != b.Confidence {
-		return a.Confidence > b.Confidence
+	if ar, br := confidenceRank(a.Confidence), confidenceRank(b.Confidence); ar != br {
+		if ar > br {
+			return -1
+		}
+		return 1
 	}
-	aTime, bTime := int64(0), int64(0)
+	var aTime, bTime time.Time
 	if len(a.Evidence) > 0 {
-		aTime = a.Evidence[0].ReceiveTime.UnixMilli()
+		aTime = a.Evidence[0].ReceiveTime
 	}
 	if len(b.Evidence) > 0 {
-		bTime = b.Evidence[0].ReceiveTime.UnixMilli()
+		bTime = b.Evidence[0].ReceiveTime
 	}
-	if aTime != bTime {
-		return aTime < bTime
+	if !aTime.Equal(bTime) {
+		if aTime.Before(bTime) {
+			return -1
+		}
+		return 1
 	}
 	if a.RuleVersion != b.RuleVersion {
-		return a.RuleVersion < b.RuleVersion
+		if a.RuleVersion < b.RuleVersion {
+			return -1
+		}
+		return 1
 	}
-	return a.CandidateID < b.CandidateID
+	if a.CandidateID < b.CandidateID {
+		return -1
+	}
+	if a.CandidateID > b.CandidateID {
+		return 1
+	}
+	return 0
+}
+
+func SortInsightCandidates(values []InsightCandidateV1) {
+	sort.SliceStable(values, func(i, j int) bool { return CompareInsightCandidates(values[i], values[j]) < 0 })
+}
+
+func confidenceRank(value string) int {
+	switch value {
+	case "high", "verified":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// InsightCandidateContentID is the frozen candidate identity algorithm used by
+// the insight producer and every admission boundary.
+func InsightCandidateContentID(candidate InsightCandidateV1) (string, error) {
+	candidate.CandidateID = ""
+	payload, err := MarshalCanonical(candidate)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// RuleVersionsArtifact binds the concrete sorted admission rule set to one
+// lineage artifact identity.
+func RuleVersionsArtifact(version string, versions []string) (PolicyArtifactIdentityV2, error) {
+	values := append([]string(nil), versions...)
+	sort.Strings(values)
+	for i, value := range values {
+		if !validPolicyID(value) || (i > 0 && value == values[i-1]) {
+			return PolicyArtifactIdentityV2{}, errors.New("invalid rule version set")
+		}
+	}
+	hash, err := CanonicalSHA256(values)
+	if err != nil {
+		return PolicyArtifactIdentityV2{}, err
+	}
+	return PolicyArtifactIdentityV2{Version: version, ContentSHA256: hash}, nil
 }
 
 func validateSortedIDs(ids []string) error {

@@ -2,8 +2,6 @@
 package insight
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"math/big"
 	"sort"
 	"strconv"
@@ -78,8 +76,8 @@ func ConfigArtifact(config Config) contracts.PolicyArtifactIdentityV2 {
 
 func RulesArtifact() contracts.PolicyArtifactIdentityV2 {
 	rules := []string{DraftRule, ItemRule, LaneRule, ObjectiveRule, ReadinessRule}
-	hash, _ := contracts.CanonicalSHA256(rules)
-	return contracts.PolicyArtifactIdentityV2{Version: "rules.v1", ContentSHA256: hash}
+	artifact, _ := contracts.RuleVersionsArtifact("rules.v1", rules)
+	return artifact
 }
 
 type Input struct {
@@ -136,22 +134,7 @@ func Evaluate(input Input, config Config) []contracts.InsightCandidateV1 {
 }
 
 func Sort(values []contracts.InsightCandidateV1) {
-	sort.SliceStable(values, func(i, j int) bool {
-		if values[i].Priority != values[j].Priority {
-			return values[i].Priority > values[j].Priority
-		}
-		if confidence(values[i].Confidence) != confidence(values[j].Confidence) {
-			return confidence(values[i].Confidence) > confidence(values[j].Confidence)
-		}
-		ti, tj := evidenceTime(values[i]), evidenceTime(values[j])
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		if values[i].RuleVersion != values[j].RuleVersion {
-			return values[i].RuleVersion < values[j].RuleVersion
-		}
-		return values[i].CandidateID < values[j].CandidateID
-	})
+	contracts.SortInsightCandidates(values)
 }
 
 func historyCandidate(o contracts.LiveObservationV1, manifest *contracts.HistoricalSnapshotManifestV1, lineage *contracts.PolicyLineageManifestV2, baselines []contracts.HistoricalBaselineV1, config Config, now int64, rule, metric string, minimum uint64, priority int) contracts.InsightCandidateV1 {
@@ -285,11 +268,7 @@ func suppress(o contracts.LiveObservationV1, config Config, now int64, rule, rea
 	return c
 }
 func seal(c *contracts.InsightCandidateV1) {
-	copy := *c
-	copy.CandidateID = ""
-	payload, _ := contracts.MarshalCanonical(copy)
-	sum := sha256.Sum256(payload)
-	c.CandidateID = hex.EncodeToString(sum[:])
+	c.CandidateID, _ = contracts.InsightCandidateContentID(*c)
 }
 func present[T ~int64](v contracts.ObservedV1[T]) T {
 	if v.State == contracts.ValuePresent && v.Value != nil {
@@ -302,23 +281,6 @@ func state(v contracts.ObservedV1[string]) string {
 		return *v.Value
 	}
 	return ""
-}
-func evidenceTime(c contracts.InsightCandidateV1) (zeroTime time.Time) {
-	if len(c.Evidence) > 0 {
-		return c.Evidence[0].ReceiveTime
-	}
-	return zeroTime
-}
-func confidence(v string) int {
-	switch v {
-	case "high", "verified":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	}
-	return 0
 }
 func newlyObservedItem(o contracts.LiveObservationV1, previous *contracts.LiveObservationV1, keyItems []string) string {
 	if previous == nil {

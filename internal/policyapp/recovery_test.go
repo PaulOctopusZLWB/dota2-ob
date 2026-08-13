@@ -79,6 +79,26 @@ func TestBoundApplicationRejectsRuleAndConfigContentMismatch(t *testing.T) {
 	}
 }
 
+func TestBoundApplicationRejectsAdmissionSettingsOutsideSealedArtifacts(t *testing.T) {
+	manifest := recoveryManifest()
+	base := policy.DefaultConfig()
+	base.LineageID = manifest.MustContentID()
+	base.CandidateConfigArtifact, base.CandidateRulesArtifact = manifest.Config, manifest.Rules
+	for _, mutate := range []func(*policy.Config){
+		func(c *policy.Config) { c.CandidateConfigVersion = "config.v999" },
+		func(c *policy.Config) { c.CandidateConfigArtifact.Version = "config.v999" },
+		func(c *policy.Config) { c.AllowedRuleVersions = append(c.AllowedRuleVersions, "fabricated.v1") },
+		func(c *policy.Config) { c.AllowedRuleVersions = c.AllowedRuleVersions[:len(c.AllowedRuleVersions)-1] },
+	} {
+		config := base
+		config.AllowedRuleVersions = append([]string(nil), base.AllowedRuleVersions...)
+		mutate(&config)
+		if _, err := policy.NewBoundApplication(policy.New("session", config), nil, manifest); err == nil {
+			t.Fatal("admission settings escaped sealed lineage artifacts")
+		}
+	}
+}
+
 func TestRecoverOutOfOrderObservationPreservesCausalTimeAndContinuation(t *testing.T) {
 	manifest := recoveryManifest()
 	config := policy.DefaultConfig()
@@ -146,10 +166,13 @@ func recoveryManifest() contracts.PolicyLineageManifestV2 {
 	artifact := func(version string, digit byte) contracts.PolicyArtifactIdentityV2 {
 		return contracts.PolicyArtifactIdentityV2{Version: version, ContentSHA256: recoveryHash(digit)}
 	}
-	return contracts.PolicyLineageManifestV2{SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: "session", RawRecordSchema: artifact("raw.v2", '1'), RawRecordFraming: artifact("jsonl.v1", '2'), RawPayloadSchema: artifact("gsi.v1", '3'), LiveObservationSchema: artifact("live.v1", '4'), ProjectionMapping: artifact("mapping.v1", '5'), TournamentScopeID: recoveryHash('6'), TournamentScopeSHA256: recoveryHash('6'), HistoricalSnapshotID: recoveryHash('7'), HistoricalSnapshotSHA256: recoveryHash('7'), EligibleBaselineSHA256: []string{recoveryHash('8')}, Rules: artifact("rules.v1", 'a'), Config: artifact("config.v1", 'b'), Catalog: artifact("catalog.v1", 'c'), Terminology: artifact("terms.v1", 'd'), LocalizationParameterMapping: artifact("params.v1", 'e'), EngineBuild: artifact("build.v1", 'f')}
+	rules, _ := contracts.RuleVersionsArtifact("rules.v1", policy.DefaultConfig().AllowedRuleVersions)
+	return contracts.PolicyLineageManifestV2{SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: "session", RawRecordSchema: artifact("raw.v2", '1'), RawRecordFraming: artifact("jsonl.v1", '2'), RawPayloadSchema: artifact("gsi.v1", '3'), LiveObservationSchema: artifact("live.v1", '4'), ProjectionMapping: artifact("mapping.v1", '5'), TournamentScopeID: recoveryHash('6'), TournamentScopeSHA256: recoveryHash('6'), HistoricalSnapshotID: recoveryHash('7'), HistoricalSnapshotSHA256: recoveryHash('7'), EligibleBaselineSHA256: []string{recoveryHash('8')}, Rules: rules, Config: artifact("config.v1", 'b'), Catalog: artifact("catalog.v1", 'c'), Terminology: artifact("terms.v1", 'd'), LocalizationParameterMapping: artifact("params.v1", 'e'), EngineBuild: artifact("build.v1", 'f')}
 }
 func recoveryCandidate() contracts.InsightCandidateV1 {
-	return contracts.InsightCandidateV1{SchemaVersion: contracts.InsightCandidateSchemaV1, CandidateID: "candidate-1", SessionID: "session", RuleVersion: "draft.v1", ConfigVersion: "config.v1", LocalizationKey: "insight.draft", Evidence: []contracts.EvidenceRefV1{recoveryEvidence(1)}, Confidence: "high", Priority: 10, CreatedTimeMS: 1, ExpiryTimeMS: 100, Availability: "available"}
+	candidate := contracts.InsightCandidateV1{SchemaVersion: contracts.InsightCandidateSchemaV1, SessionID: "session", RuleVersion: "draft.v1", ConfigVersion: "config.v1", LocalizationKey: "insight.draft", Evidence: []contracts.EvidenceRefV1{recoveryEvidence(1)}, Confidence: "high", Priority: 10, CreatedTimeMS: 1, ExpiryTimeMS: 100, Availability: "available"}
+	candidate.CandidateID, _ = contracts.InsightCandidateContentID(candidate)
+	return candidate
 }
 func recoveryEvidence(sequence uint64) contracts.EvidenceRefV1 {
 	return contracts.EvidenceRefV1{RecordSchemaVersion: 1, SessionID: "session", Sequence: sequence, ReceiveTime: time.Unix(1, 0).UTC(), Source: "gsi", ProviderVersion: contracts.Absent[int64](), RawPayloadSHA256: recoveryHash('9')}

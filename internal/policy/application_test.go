@@ -32,8 +32,9 @@ func TestApplicationReturnsCommittedDuplicateAfterRestart(t *testing.T) {
 	config := policy.DefaultConfig()
 	log := &recordingLog{lookup: map[string]contracts.PolicyCommitV2{}}
 	app := policy.NewApplication(policy.New("session", config), log)
-	_, _ = app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 1)
-	cmd := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "approve", SessionID: "session", Action: contracts.ActionApprove, TargetCandidateID: "a", ExpectedPolicyRevision: app.State().PolicyRevision, PolicyTimeMS: 2}
+	c := candidate("a", "draft.v1", "high", 1, 10)
+	_, _ = app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
+	cmd := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "approve", SessionID: "session", Action: contracts.ActionApprove, TargetCandidateID: c.CandidateID, ExpectedPolicyRevision: app.State().PolicyRevision, PolicyTimeMS: 2}
 	original, err := app.ApplyCommand(cmd)
 	if err != nil {
 		t.Fatal(err)
@@ -74,17 +75,19 @@ func TestApplicationAcceptsStateOnlyAfterCommit(t *testing.T) {
 func TestApplicationPersistsCompleteNormalTransitionSequence(t *testing.T) {
 	log := &recordingLog{}
 	app := policy.NewApplication(policy.New("session", policy.DefaultConfig()), log)
-	queued, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 20), candidate("b", "lane.v1", "high", 1, 10)}, 1)
+	a := candidate("a", "draft.v1", "high", 1, 20)
+	b := candidate("b", "lane.v1", "high", 1, 10)
+	queued, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{a, b}, 1)
 	if err != nil || len(queued.Decisions) != 2 {
 		t.Fatalf("queue transitions incomplete: decisions=%d err=%v", len(queued.Decisions), err)
 	}
 	command := func(id, action, target string, at int64) contracts.OperatorCommandV1 {
 		return contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: id, SessionID: "session", Action: action, TargetCandidateID: target, ExpectedPolicyRevision: app.State().PolicyRevision, PolicyTimeMS: at}
 	}
-	if _, err = app.ApplyCommand(command("show-a", contracts.ActionShow, "a", 2)); err != nil {
+	if _, err = app.ApplyCommand(command("show-a", contracts.ActionShow, a.CandidateID, 2)); err != nil {
 		t.Fatal(err)
 	}
-	superseded, err := app.ApplyCommand(command("show-b", contracts.ActionShow, "b", 3))
+	superseded, err := app.ApplyCommand(command("show-b", contracts.ActionShow, b.CandidateID, 3))
 	if err != nil || len(superseded.Decisions) != 2 || superseded.Decisions[0].ResultingState != contracts.DecisionSuperseded {
 		t.Fatalf("primary supersede incomplete: %#v err=%v", superseded.Decisions, err)
 	}

@@ -2,6 +2,7 @@ package policy_test
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,21 +16,19 @@ func TestCandidateOrderUsesRuleVersionThenCandidateID(t *testing.T) {
 		candidate("b", "rule.v1", "high", 5, 10), candidate("top", "rule.v9", "medium", 9, 20),
 	}
 	policy.SortCandidates(candidates)
-	want := []string{"top", "a", "b", "z"}
-	for i := range want {
-		if candidates[i].CandidateID != want[i] {
-			t.Fatalf("rank %d=%s", i, candidates[i].CandidateID)
-		}
+	if candidates[0].Priority != 20 || candidates[1].RuleVersion != "rule.v1" || candidates[2].RuleVersion != "rule.v1" || candidates[3].RuleVersion != "rule.v2" || candidates[1].CandidateID >= candidates[2].CandidateID {
+		t.Fatalf("unexpected candidate rank: %#v", candidates)
 	}
 }
 
 func TestApprovalRequiredCommandsRevisionIdempotencyAndSafety(t *testing.T) {
 	engine := policy.New("session", policy.DefaultConfig())
-	commit := engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 10)
+	c := candidate("a", "draft.v1", "high", 1, 10)
+	commit := engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 10)
 	if commit.Publication != contracts.PublicationSuppressedV2 || len(engine.State().Preview) != 1 || engine.State().ActivePrimary != nil {
 		t.Fatal("startup did not remain approval_required and hidden")
 	}
-	command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "cmd-1", SessionID: "session", Action: contracts.ActionApprove, TargetCandidateID: "a", ExpectedPolicyRevision: commit.ResultingPolicyRevision, PolicyTimeMS: 11}
+	command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "cmd-1", SessionID: "session", Action: contracts.ActionApprove, TargetCandidateID: c.CandidateID, ExpectedPolicyRevision: commit.ResultingPolicyRevision, PolicyTimeMS: 11}
 	approved := engine.ApplyCommand(command)
 	if approved.CommandResult.Status != contracts.CommandAccepted || approved.Publication != contracts.PublicationPublish || engine.State().ActivePrimary == nil {
 		t.Fatal("approve did not select primary")
@@ -56,6 +55,7 @@ func TestQueueExpiryDuplicateDisabledAndOutOfOrder(t *testing.T) {
 	engine := policy.New("session", policy.Config{QueueLimit: 1, TombstoneMS: 100, CooldownMS: 50})
 	a := candidate("a", "draft.v1", "high", 1, 100)
 	a.ExpiryTimeMS = 5
+	sealTestCandidate(&a)
 	engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{a, candidate("b", "lane.v1", "medium", 2, 5)}, 1)
 	if len(engine.State().Preview) != 1 {
 		t.Fatal("queue bound not enforced")
@@ -92,8 +92,9 @@ func TestDisableEnablePinStaleRevisionAndCooldown(t *testing.T) {
 	if got := engine.ApplyCommand(enable); got.CommandResult.Status != contracts.CommandAccepted {
 		t.Fatal("enable rule rejected")
 	}
-	engine.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{candidate("b", "draft.v1", "high", 2, 10)}, 4)
-	approve := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "approve", SessionID: "session", Action: contracts.ActionApprove, TargetCandidateID: "b", ExpectedPolicyRevision: engine.State().PolicyRevision, PolicyTimeMS: 5}
+	b := candidate("b", "draft.v1", "high", 2, 10)
+	engine.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{b}, 4)
+	approve := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "approve", SessionID: "session", Action: contracts.ActionApprove, TargetCandidateID: b.CandidateID, ExpectedPolicyRevision: engine.State().PolicyRevision, PolicyTimeMS: 5}
 	engine.ApplyCommand(approve)
 	engine.EvaluateObservation(3, hash('c'), hash('d'), evidence(3), []contracts.InsightCandidateV1{candidate("c", "draft.v1", "high", 3, 10)}, 6)
 	if len(engine.State().Preview) != 0 {
@@ -124,8 +125,9 @@ func TestActiveAndPinnedPreviewExpiryIsComplete(t *testing.T) {
 	e := policy.New("session", policy.DefaultConfig())
 	c := candidate("a", "draft.v1", "high", 1, 10)
 	c.ExpiryTimeMS = 5
+	sealTestCandidate(&c)
 	queued := e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
-	show := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "show", SessionID: "session", Action: contracts.ActionShow, TargetCandidateID: "a", ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
+	show := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "show", SessionID: "session", Action: contracts.ActionShow, TargetCandidateID: c.CandidateID, ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
 	e.ApplyCommand(show)
 	expired := e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), nil, 10)
 	if expired.Publication != contracts.PublicationHide || e.State().ActivePrimary != nil || len(expired.Decisions) != 1 || expired.Decisions[0].ResultingState != contracts.DecisionExpired {
@@ -136,8 +138,9 @@ func TestActiveAndPinnedPreviewExpiryIsComplete(t *testing.T) {
 	e = policy.New("session", policy.DefaultConfig())
 	c = candidate("p", "draft.v1", "high", 1, 10)
 	c.ExpiryTimeMS = 5
+	sealTestCandidate(&c)
 	queued = e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
-	pin := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "pin", SessionID: "session", Action: contracts.ActionPin, TargetCandidateID: "p", ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
+	pin := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "pin", SessionID: "session", Action: contracts.ActionPin, TargetCandidateID: c.CandidateID, ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
 	e.ApplyCommand(pin)
 	e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), nil, 10)
 	if len(e.State().Pins) != 0 {
@@ -165,10 +168,103 @@ func TestOutOfOrderObservationReplayPreservesCausalAuditTime(t *testing.T) {
 
 func TestRepeatedSemanticCandidateRemainsSparse(t *testing.T) {
 	e := policy.New("session", policy.DefaultConfig())
-	e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 1)
-	e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{candidate("b", "draft.v1", "high", 2, 10)}, 2)
+	a := candidate("a", "draft.v1", "high", 1, 10)
+	b := a
+	b.Evidence = []contracts.EvidenceRefV1{evidence(2)}
+	b.CreatedTimeMS, b.ExpiryTimeMS = 2, 101
+	sealTestCandidate(&b)
+	e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{a}, 1)
+	e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{b}, 2)
 	if len(e.State().Preview) != 1 {
 		t.Fatalf("repeated claim grew queue: %d", len(e.State().Preview))
+	}
+}
+
+func TestCommandExpiresTargetBeforeLookupAndReplaysExactly(t *testing.T) {
+	config := policy.DefaultConfig()
+	live := policy.New("session", config)
+	c := sealedCandidate("draft.v1", "high", 1, 10)
+	c.ExpiryTimeMS = 5
+	sealTestCandidate(&c)
+	queued := live.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
+	command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "expired-show", SessionID: "session", Action: contracts.ActionShow, TargetCandidateID: c.CandidateID, ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 5}
+	staleCommand := command
+	staleCommand.CommandID = "stale-before-expiry"
+	staleCommand.ExpectedPolicyRevision = 0
+	stale := live.ApplyCommand(staleCommand)
+	if stale.CommandResult.Reason != "stale_revision" || len(live.State().Preview) != 1 {
+		t.Fatalf("stale command performed expiry: %#v", stale)
+	}
+	expired := live.ApplyCommand(command)
+	if err := expired.Validate(); err != nil || live.State().ActivePrimary != nil || len(live.State().Preview) != 0 || expired.Publication == contracts.PublicationPublish || len(expired.Decisions) != 1 || expired.Decisions[0].ResultingState != contracts.DecisionExpired || expired.CommandResult.Reason != "candidate_expired" {
+		t.Fatalf("expired target was not suppressed before show: %#v", expired)
+	}
+	replayed := policy.New("session", config)
+	if err := replayed.ReplayCommit(queued, []contracts.InsightCandidateV1{c}); err != nil {
+		t.Fatal(err)
+	}
+	if err := replayed.ReplayCommit(stale, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := replayed.ReplayCommit(expired, nil); err != nil || replayed.StateHash() != live.StateHash() {
+		t.Fatalf("expired command replay diverged: %v", err)
+	}
+}
+
+func TestAdmissionRequiresCanonicalCandidateContentID(t *testing.T) {
+	valid := sealedCandidate("draft.v1", "high", 1, 10)
+	engine := policy.New("session", policy.DefaultConfig())
+	engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{valid}, 1)
+	if len(engine.State().Preview) != 1 {
+		t.Fatal("valid content-derived candidate ID rejected")
+	}
+	for _, mutate := range []func(*contracts.InsightCandidateV1){
+		func(c *contracts.InsightCandidateV1) { c.Priority++ },
+		func(c *contracts.InsightCandidateV1) { c.Evidence[0].RawPayloadSHA256 = hash('9') },
+		func(c *contracts.InsightCandidateV1) { c.CandidateID = "arbitrary" },
+	} {
+		engine = policy.New("session", policy.DefaultConfig())
+		bad := valid
+		bad.Evidence = append([]contracts.EvidenceRefV1(nil), valid.Evidence...)
+		mutate(&bad)
+		commit := engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{bad}, 1)
+		if len(engine.State().Preview) != 0 || commit.AuditEvents[0].Reason != "candidate_identity_mismatch" {
+			t.Fatalf("tampered candidate admitted: %#v", commit)
+		}
+	}
+}
+
+func TestRuntimeConfidenceOrderProducesValidCheckpoint(t *testing.T) {
+	engine := policy.New("session", policy.DefaultConfig())
+	high := sealedCandidate("draft.v1", "high", 1, 10)
+	medium := sealedCandidate("lane.v1", "medium", 1, 10)
+	commit := engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{medium, high}, 1)
+	if got := engine.State().Preview; len(got) != 2 || got[0].Confidence != "high" || got[1].Confidence != "medium" {
+		t.Fatalf("runtime confidence order wrong: %#v", got)
+	}
+	assertCheckpointStateValid(t, engine, commit)
+}
+
+func TestDisableRuleCapacityRejects257thWithoutInvalidState(t *testing.T) {
+	engine := policy.New("session", policy.DefaultConfig())
+	commits := make([]contracts.PolicyCommitV2, 0, contracts.MaxDisabledRules+1)
+	for i := 0; i <= contracts.MaxDisabledRules; i++ {
+		command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: fmt.Sprintf("disable-%03d", i), SessionID: "session", Action: contracts.ActionDisableRule, TargetRuleID: fmt.Sprintf("rule-%03d", i), ExpectedPolicyRevision: engine.State().PolicyRevision, PolicyTimeMS: int64(i + 1)}
+		commits = append(commits, engine.ApplyCommand(command))
+	}
+	last := commits[len(commits)-1]
+	if last.CommandResult.Status != contracts.CommandRejected || last.CommandResult.Reason != "disabled_rule_capacity" || len(engine.State().DisabledRuleIDs) != contracts.MaxDisabledRules {
+		t.Fatalf("257th disable was not bounded: %#v", last.CommandResult)
+	}
+	assertCheckpointStateValid(t, engine, last)
+	replay := policy.New("session", policy.DefaultConfig())
+	for _, commit := range commits {
+		if err := replay.ReplayCommit(commit, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if replay.StateHash() != engine.StateHash() {
+		t.Fatal("disable capacity replay diverged")
 	}
 }
 
@@ -187,7 +283,17 @@ func assertCheckpointStateValid(t *testing.T, e *policy.Engine, commit contracts
 }
 
 func candidate(id, rule, confidence string, evidenceMS int64, priority int) contracts.InsightCandidateV1 {
-	return contracts.InsightCandidateV1{SchemaVersion: contracts.InsightCandidateSchemaV1, CandidateID: id, SessionID: "session", RuleVersion: rule, ConfigVersion: "config.v1", LocalizationKey: "insight." + rule, Evidence: []contracts.EvidenceRefV1{evidence(uint64(evidenceMS))}, Confidence: confidence, Priority: priority, CreatedTimeMS: 1, ExpiryTimeMS: 100, Availability: "available"}
+	c := contracts.InsightCandidateV1{SchemaVersion: contracts.InsightCandidateSchemaV1, SessionID: "session", RuleVersion: rule, ConfigVersion: "config.v1", LocalizationKey: "insight." + rule + "." + id, Evidence: []contracts.EvidenceRefV1{evidence(uint64(evidenceMS))}, Confidence: confidence, Priority: priority, CreatedTimeMS: 1, ExpiryTimeMS: 100, Availability: "available"}
+	sealTestCandidate(&c)
+	return c
+}
+func sealedCandidate(rule, confidence string, evidenceMS int64, priority int) contracts.InsightCandidateV1 {
+	c := candidate("", rule, confidence, evidenceMS, priority)
+	sealTestCandidate(&c)
+	return c
+}
+func sealTestCandidate(c *contracts.InsightCandidateV1) {
+	c.CandidateID, _ = contracts.InsightCandidateContentID(*c)
 }
 func evidence(seq uint64) contracts.EvidenceRefV1 {
 	return contracts.EvidenceRefV1{RecordSchemaVersion: 1, SessionID: "session", Sequence: seq, ReceiveTime: mustTime(), Source: "gsi", ProviderVersion: contracts.Absent[int64](), RawPayloadSHA256: hash('e')}

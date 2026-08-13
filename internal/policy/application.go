@@ -29,7 +29,8 @@ func NewApplication(engine *Engine, log CommitAppender) *Application {
 	return &Application{engine: engine, log: log}
 }
 func NewBoundApplication(engine *Engine, log CommitAppender, lineage contracts.PolicyLineageManifestV2) (*Application, error) {
-	if err := lineage.Validate(); err != nil || lineage.MustContentID() != engine.config.LineageID || lineage.Config != engine.config.CandidateConfigArtifact || lineage.Rules != engine.config.CandidateRulesArtifact {
+	rules, rulesErr := contracts.RuleVersionsArtifact(lineage.Rules.Version, engine.config.AllowedRuleVersions)
+	if err := lineage.Validate(); err != nil || rulesErr != nil || lineage.MustContentID() != engine.config.LineageID || lineage.Config != engine.config.CandidateConfigArtifact || lineage.Rules != engine.config.CandidateRulesArtifact || engine.config.CandidateConfigVersion != lineage.Config.Version || rules != lineage.Rules {
 		return nil, ErrCommitFailedHidden
 	}
 	return NewApplication(engine, log), nil
