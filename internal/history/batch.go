@@ -12,9 +12,9 @@ import (
 type StageState string
 
 const (
-	StageQueued        StageState = "queued"
-	StageRunning       StageState = "running"
-	StageSucceeded     StageState = "succeeded"
+	StageQueued         StageState = "queued"
+	StageRunning        StageState = "running"
+	StageSucceeded      StageState = "succeeded"
 	StageFailedTerminal StageState = "failed_terminal"
 )
 
@@ -22,14 +22,16 @@ const (
 // reached, terminal reason, attempt count, and content identities so resume
 // does not duplicate facts or aggregates.
 type StageEntry struct {
-	MatchID        string     `json:"match_id"`
-	Status         StageState `json:"status"`
-	ReachedStage   string     `json:"reached_stage"`
-	Attempts       int        `json:"attempts"`
-	ReplaySHA256   string     `json:"replay_sha256,omitempty"`
-	FactsSHA256    string     `json:"facts_sha256,omitempty"`
-	LastError      string     `json:"last_error,omitempty"`
-	TerminalReason string     `json:"terminal_reason,omitempty"`
+	MatchID        string            `json:"match_id"`
+	Status         StageState        `json:"status"`
+	ReachedStage   string            `json:"reached_stage"`
+	InFlightStage  string            `json:"in_flight_stage,omitempty"`
+	Attempts       int               `json:"attempts"`
+	ReplaySHA256   string            `json:"replay_sha256,omitempty"`
+	FactsSHA256    string            `json:"facts_sha256,omitempty"`
+	ArtifactSHA256 map[string]string `json:"artifact_sha256,omitempty"`
+	LastError      string            `json:"last_error,omitempty"`
+	TerminalReason string            `json:"terminal_reason,omitempty"`
 }
 
 // StageBatch is the complete resumable state for one discovery manifest run.
@@ -37,8 +39,8 @@ type StageEntry struct {
 // so a checkpoint written for one manifest can never be silently applied to a
 // different manifest (which could skip or replay matching ids).
 type StageBatch struct {
-	SchemaVersion string             `json:"schema_version"`
-	ManifestID    string             `json:"manifest_id"`
+	SchemaVersion string                `json:"schema_version"`
+	ManifestID    string                `json:"manifest_id"`
 	Entries       map[string]StageEntry `json:"entries"`
 }
 
@@ -71,19 +73,21 @@ var ErrBatchManifestMismatch = errors.New("history: batch checkpoint does not bi
 // owns persistence (injected), stages own their stage-specific work.
 type StageFunc func(entry StageEntry, ctx MatchContext) (StageEntry, *StageFailure)
 
+type StageReconcileFunc func(entry StageEntry, ctx MatchContext) (StageEntry, bool, *StageFailure)
+
 // MatchContext is the read-only per-match context supplied by the adapter
 // (discovery manifest entry, local replay path, parsed facts, etc.).
 type MatchContext struct {
-	Discovery     DiscoveryMatch
-	ReplayPath    string
+	Discovery       DiscoveryMatch
+	ReplayPath      string
 	NormalizedFacts *NormalizedMatchFacts
 }
 
 // StageFailure is a typed stage failure. Terminal marks a dead-letter entry
 // that will not be retried until an explicit retry-all.
 type StageFailure struct {
-	Stage   string
-	Reason  string
+	Stage    string
+	Reason   string
 	Terminal bool
 }
 
@@ -98,9 +102,10 @@ type StageFailure struct {
 // here. Adapters supply StageFunc implementations and the persistence seam.
 type StagePipeline struct {
 	Stages     map[string]StageFunc
+	Reconcile  map[string]StageReconcileFunc
 	StageOrder []string
-	MaxRetries  int
-	Save        func(StageBatch) error
+	MaxRetries int
+	Save       func(StageBatch) error
 }
 
 // Run processes the discovery manifest matches in sorted match-id order.
@@ -168,14 +173,53 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 			if !ok {
 				return prior, errors.New("batch: missing stage " + stageName)
 			}
-			newEntry, sf := stageFn(entry, ctx)
-			entry = newEntry
+			if entry.InFlightStage != "" && entry.InFlightStage != stageName {
+				return prior, errors.New("batch: in-flight stage does not match cursor")
+			}
+			if entry.InFlightStage == stageName {
+				reconcile, ok := p.Reconcile[stageName]
+				if !ok {
+					return prior, errors.New("batch: missing reconciler for in-flight stage " + stageName)
+				}
+				var done bool
+				var rf *StageFailure
+				entry, done, rf = reconcile(entry, ctx)
+				if rf != nil {
+					entry.Attempts++
+					entry.LastError = rf.Reason
+					if rf.Terminal || entry.Attempts >= p.MaxRetries {
+						entry.Status = StageFailedTerminal
+						entry.TerminalReason = rf.Stage + ":" + rf.Reason
+					} else {
+						entry.Status = StageQueued
+					}
+					prior.Entries[m.MatchID] = entry
+					if err := checkpoint(prior); err != nil {
+						return prior, err
+					}
+					failed = true
+					break
+				}
+				if done {
+					entry.ReachedStage = stageName
+					entry.InFlightStage = ""
+					prior.Entries[m.MatchID] = entry
+					if err := checkpoint(prior); err != nil {
+						return prior, err
+					}
+					continue
+				}
+			}
+			entry.InFlightStage = stageName
 			prior.Entries[m.MatchID] = entry
 			if err := checkpoint(prior); err != nil {
 				return prior, err
 			}
+			newEntry, sf := stageFn(entry, ctx)
+			entry = newEntry
 			if sf == nil {
 				entry.ReachedStage = stageName
+				entry.InFlightStage = ""
 				prior.Entries[m.MatchID] = entry
 				if err := checkpoint(prior); err != nil {
 					return prior, err

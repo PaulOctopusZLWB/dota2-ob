@@ -5,84 +5,92 @@ import (
 	"time"
 )
 
-func buildReadinessManifest(t *testing.T, pairs [][2]string) DiscoveryManifestV1 {
+func buildReadinessInput(t *testing.T, pairs [][2]string, parsePasses uint32) ReadinessInput {
 	t.Helper()
 	scope := buildScope(t)
 	roster := buildRoster(t, scope)
-	var matches []DiscoveryMatch
 	base := mustParseTime(t, "2026-07-01T00:00:00Z")
+	var matches []DiscoveryMatch
+	var facts []NormalizedMatchFacts
+	var processed []ProcessedReplayEvidence
 	for i, p := range pairs {
 		mid := "m" + string(rune('a'+i/26)) + string(rune('a'+i%26))
-		m := makeMatch(mid, base.Add(time.Duration(i)*time.Hour), MatchReplayAccessible, p[0], p[1])
+		f := buildFacts(t, mid, base.Add(time.Duration(i)*time.Hour), p[0], p[1], i%2 == 0, roster)
+		facts = append(facts, f)
+		m := makeMatch(mid, f.SourceEventTime, MatchReplayAccessible, p[0], p[1])
+		m.ReplaySHA256 = f.ReplaySHA256
+		m.GameBuild = f.GameBuild
 		matches = append(matches, m)
+		processed = append(processed, ProcessedReplayEvidence{MatchID: mid, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, SuccessfulParsePasses: parsePasses})
 	}
-	return buildDiscovery(t, scope, roster, matches)
+	dm := buildDiscovery(t, scope, roster, matches)
+	return ReadinessInput{Scope: scope, Roster: roster, Manifest: dm, Facts: facts, Processed: processed, Windows: NewCutoffWindow(scope.HistoryCutoff, PatchWindow{PatchID: "60"}, mustParseTime(t, "2026-03-24T00:00:00Z")), Patch: PatchWindow{PatchID: "60"}, GeneratedAt: scope.HistoryCutoff.Add(-time.Hour)}
 }
 
-func TestReadinessGateFullHistoryGo(t *testing.T) {
-	scope := buildScope(t)
+func fullPairs(scopeTeamIDs []string) [][2]string {
 	var pairs [][2]string
-	for i, t := range scope.Teams {
+	for i, team := range scopeTeamIDs {
 		for j := 0; j < 7; j++ {
-			pairs = append(pairs, [2]string{t.TeamID, scope.Teams[(i+1)%len(scope.Teams)].TeamID})
+			pairs = append(pairs, [2]string{team, scopeTeamIDs[(i+1)%len(scopeTeamIDs)]})
 		}
 	}
-	dm := buildReadinessManifest(t, pairs)
-	e := ReadinessGate(scope, dm)
-	if e.Outcome != ReadinessFullHistoryGo {
-		t.Fatalf("expected full_history_go, got %s (accessible=%d)", e.Outcome, e.ReplayAccessibleTotal)
+	return pairs
+}
+
+func TestReadinessGateFullHistoryGoFromProcessedFactsAndCells(t *testing.T) {
+	scope := buildScope(t)
+	ids := make([]string, len(scope.Teams))
+	for i := range scope.Teams {
+		ids[i] = scope.Teams[i].TeamID
+	}
+	in := buildReadinessInput(t, fullPairs(ids), 2)
+	e := ReadinessGate(in)
+	if e.Outcome != ReadinessFullHistoryGo || e.RepeatablyProcessedTotal < 100 || e.EnabledCellTotal == 0 {
+		t.Fatalf("expected evidence-backed full go, got %#v", e)
+	}
+}
+
+func TestReadinessGateAccessibleManifestWithoutRepeatableParseCannotPass(t *testing.T) {
+	scope := buildScope(t)
+	ids := make([]string, len(scope.Teams))
+	for i := range scope.Teams {
+		ids[i] = scope.Teams[i].TeamID
+	}
+	in := buildReadinessInput(t, fullPairs(ids), 1)
+	e := ReadinessGate(in)
+	if e.Outcome == ReadinessFullHistoryGo || e.RestrictedReason != "no_repeatably_processed_replays" {
+		t.Fatalf("accessible-only manifest passed: %#v", e)
 	}
 }
 
 func TestReadinessGateRestrictedHistoryGo(t *testing.T) {
 	scope := buildScope(t)
 	var pairs [][2]string
-	// First 8 teams get five matches each; remaining 8 teams get none.
 	for i := 0; i < 8; i++ {
 		for j := 0; j < 5; j++ {
-			pairs = append(pairs, [2]string{scope.Teams[i].TeamID, scope.Teams[len(scope.Teams)-1].TeamID})
+			pairs = append(pairs, [2]string{scope.Teams[i].TeamID, scope.Teams[15].TeamID})
 		}
 	}
-	dm := buildReadinessManifest(t, pairs)
-	e := ReadinessGate(scope, dm)
-	if e.Outcome != ReadinessRestrictedGo {
-		t.Fatalf("expected restricted_history_go, got %s", e.Outcome)
-	}
-	if len(e.DisabledFamilies) == 0 {
-		t.Fatalf("expected disabled families for under-represented teams")
+	e := ReadinessGate(buildReadinessInput(t, pairs, 2))
+	if e.Outcome != ReadinessRestrictedGo || len(e.DisabledFamilies) == 0 {
+		t.Fatalf("expected restricted with disabled teams, got %#v", e)
 	}
 }
 
-func TestReadinessGateHistoricalNoGo(t *testing.T) {
+func TestReadinessGateHistoricalNoGoWithoutEnabledCells(t *testing.T) {
 	scope := buildScope(t)
-	dm := buildReadinessManifest(t, nil)
-	e := ReadinessGate(scope, dm)
-	if e.Outcome != ReadinessHistoricalNoGo {
-		t.Fatalf("expected historical_no_go, got %s", e.Outcome)
-	}
-}
-
-// TestReadinessGateOneMatchIsNoGo proves a single accessible match (or any
-// case where no team reaches its minimum-match coverage) is no_go, not
-// restricted_history_go — one match cannot satisfy any five-sample baseline.
-func TestReadinessGateOneMatchIsNoGo(t *testing.T) {
-	scope := buildScope(t)
-	dm := buildReadinessManifest(t, [][2]string{{scope.Teams[0].TeamID, scope.Teams[1].TeamID}})
-	e := ReadinessGate(scope, dm)
-	if e.Outcome != ReadinessHistoricalNoGo {
-		t.Fatalf("expected historical_no_go for one match, got %s (accessible=%d)", e.Outcome, e.ReplayAccessibleTotal)
+	in := buildReadinessInput(t, [][2]string{{scope.Teams[0].TeamID, scope.Teams[1].TeamID}}, 2)
+	e := ReadinessGate(in)
+	if e.Outcome != ReadinessHistoricalNoGo || e.RestrictedReason != "no_enabled_baseline_cells" {
+		t.Fatalf("expected no-go for insufficient cells, got %#v", e)
 	}
 }
 
 func TestReadinessGateRejectsUnboundManifest(t *testing.T) {
-	scope := buildScope(t)
-	dm := buildReadinessManifest(t, nil)
-	// Tamper the scope binding so the manifest no longer binds to the scope.
-	dm.TournamentScopeID = "not-the-scope"
-	// Re-seal is intentionally skipped: Validate must reject before the gate
-	// evaluates coverage.
-	e := ReadinessGate(scope, dm)
+	in := buildReadinessInput(t, nil, 2)
+	in.Manifest.TournamentScopeID = "not-the-scope"
+	e := ReadinessGate(in)
 	if e.Outcome != ReadinessHistoricalNoGo {
-		t.Fatalf("expected no_go for unbound manifest, got %s", e.Outcome)
+		t.Fatalf("expected no-go for unbound manifest, got %#v", e)
 	}
 }

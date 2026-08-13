@@ -1,6 +1,7 @@
 package history
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -130,5 +131,28 @@ func TestRosterManifestRejectsPlayerNotInScope(t *testing.T) {
 	roster.Players[0].TeamID = "team-zzz"
 	if err := roster.ValidateAgainstScope(scope); err == nil {
 		t.Fatalf("expected scope binding to reject a player absent from the scope")
+	}
+}
+
+func TestRosterManifestRejectsOmittedScopeCoach(t *testing.T) {
+	scope := buildScope(t)
+	coach := contracts.TournamentParticipantV1{PersonID: "coach-a", TeamID: "team-a", Handle: "coach-a", Role: "coach", EffectiveFrom: scope.Teams[0].EffectiveFrom, EffectiveUntil: scope.Teams[0].EffectiveUntil}
+	scope.Participants = append(scope.Participants, coach)
+	sort.Slice(scope.Participants, func(i, j int) bool { return scope.Participants[i].PersonID < scope.Participants[j].PersonID })
+	if err := contracts.SealTournamentScopeV1(&scope); err != nil {
+		t.Fatal(err)
+	}
+	roster := buildRoster(t, scope)
+	for i, p := range roster.Players {
+		if p.PersonID == coach.PersonID {
+			roster.Players = append(roster.Players[:i], roster.Players[i+1:]...)
+			break
+		}
+	}
+	if err := SealRosterManifestV1(&roster); err != nil {
+		t.Fatal(err)
+	}
+	if err := roster.ValidateAgainstScope(scope); err == nil {
+		t.Fatal("expected omitted scope coach to fail bidirectional equality")
 	}
 }

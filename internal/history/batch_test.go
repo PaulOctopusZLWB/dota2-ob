@@ -14,7 +14,7 @@ import (
 type stageCounts struct {
 	acquireFail map[string]bool
 	parseFail   map[string]bool
-	calls      map[string]int
+	calls       map[string]int
 }
 
 func newStageCounts() *stageCounts {
@@ -55,9 +55,16 @@ func (sc *stageCounts) buildPipeline(maxRetries int, save func(StageBatch) error
 			StageAcquisition: acquire, StageVerification: verify,
 			StageParse: parse, StageNormalize: normalize, StageAggregate: aggregate,
 		},
+		Reconcile: map[string]StageReconcileFunc{
+			StageAcquisition:  func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
+			StageVerification: func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
+			StageParse:        func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
+			StageNormalize:    func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
+			StageAggregate:    func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
+		},
 		StageOrder: []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate},
-		MaxRetries:  maxRetries,
-		Save:        save,
+		MaxRetries: maxRetries,
+		Save:       save,
 	}
 }
 
@@ -242,4 +249,55 @@ func TestBatchRetryablePendingIsNotSuccess(t *testing.T) {
 	if !errors.As(err, &pending) {
 		t.Fatalf("expected ErrRetryablePending, got %v", err)
 	}
+}
+
+func TestBatchReconcilesCompletedEffectAfterCursorCheckpointFailure(t *testing.T) {
+	manifest := buildBatchManifest(t, "m1")
+	effects := 0
+	artifacts := map[string]StageEntry{}
+	saves := 0
+	var durable StageBatch
+	p := &StagePipeline{
+		StageOrder: []string{StageAcquisition}, MaxRetries: 1,
+		Stages: map[string]StageFunc{StageAcquisition: func(e StageEntry, _ MatchContext) (StageEntry, *StageFailure) {
+			effects++
+			e.ReplaySHA256 = testSHA("artifact")
+			artifacts[e.MatchID] = e
+			return e, nil
+		}},
+		Reconcile: map[string]StageReconcileFunc{StageAcquisition: func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) {
+			a, ok := artifacts[e.MatchID]
+			return a, ok, nil
+		}},
+		Save: func(b StageBatch) error {
+			saves++
+			if saves == 3 {
+				return errors.New("cursor checkpoint failed")
+			}
+			durable = cloneStageBatch(b)
+			return nil
+		},
+	}
+	if _, err := p.Run(manifest, NewStageBatch(manifest)); err == nil {
+		t.Fatal("expected checkpoint failure")
+	}
+	if effects != 1 {
+		t.Fatalf("effect calls=%d", effects)
+	}
+	p.Save = func(b StageBatch) error { durable = cloneStageBatch(b); return nil }
+	if _, err := p.Run(manifest, durable); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if effects != 1 {
+		t.Fatalf("resume duplicated completed effect: %d", effects)
+	}
+}
+
+func cloneStageBatch(in StageBatch) StageBatch {
+	out := in
+	out.Entries = map[string]StageEntry{}
+	for k, v := range in.Entries {
+		out.Entries[k] = v
+	}
+	return out
 }

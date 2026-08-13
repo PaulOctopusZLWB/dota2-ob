@@ -26,31 +26,31 @@ func contentSHA256(kind string, v any) (string, error) {
 // ProvenanceRef records where a roster fact came from. URLs are public; no
 // credentials, account IDs, or cookies are stored here.
 type ProvenanceRef struct {
-	URL        string    `json:"url"`
+	URL         string    `json:"url"`
 	RetrievedAt time.Time `json:"retrieved_at"`
 }
 
 // RosterPlayer is one player or coach in the frozen TI 2026 field.
 type RosterPlayer struct {
-	PersonID      string         `json:"person_id"`
-	TeamID        string         `json:"team_id"`
-	Handle        string         `json:"handle"`
-	Aliases       []string       `json:"aliases"`
-	Role          string         `json:"role"`
-	EffectiveFrom time.Time      `json:"effective_from"`
-	EffectiveUntil time.Time     `json:"effective_until"`
-	Provenance    []ProvenanceRef `json:"provenance"`
+	PersonID       string          `json:"person_id"`
+	TeamID         string          `json:"team_id"`
+	Handle         string          `json:"handle"`
+	Aliases        []string        `json:"aliases"`
+	Role           string          `json:"role"`
+	EffectiveFrom  time.Time       `json:"effective_from"`
+	EffectiveUntil time.Time       `json:"effective_until"`
+	Provenance     []ProvenanceRef `json:"provenance"`
 }
 
 // RosterTeam is one of the sixteen frozen teams.
 type RosterTeam struct {
-	TeamID        string    `json:"team_id"`
-	RosterID      string    `json:"roster_id"`
-	Handle        string    `json:"handle"`
-	Aliases       []string  `json:"aliases"`
-	EffectiveFrom time.Time `json:"effective_from"`
-	EffectiveUntil time.Time `json:"effective_until"`
-	Provenance    []ProvenanceRef `json:"provenance"`
+	TeamID         string          `json:"team_id"`
+	RosterID       string          `json:"roster_id"`
+	Handle         string          `json:"handle"`
+	Aliases        []string        `json:"aliases"`
+	EffectiveFrom  time.Time       `json:"effective_from"`
+	EffectiveUntil time.Time       `json:"effective_until"`
+	Provenance     []ProvenanceRef `json:"provenance"`
 }
 
 // RosterManifestV1 is the versioned, content-addressed roster manifest M1
@@ -58,16 +58,16 @@ type RosterTeam struct {
 // TournamentScopeV1 by scope id and content hash; a later roster change
 // creates a new manifest and never mutates the accepted one.
 type RosterManifestV1 struct {
-	SchemaVersion      string        `json:"schema_version"`
-	ManifestID         string        `json:"manifest_id"`
-	ContentSHA256      string        `json:"content_sha256"`
-	TournamentScopeID  string        `json:"tournament_scope_id"`
-	TournamentScopeSHA string        `json:"tournament_scope_sha256"`
-	Edition            string        `json:"edition"`
-	SampledAt          time.Time     `json:"sampled_at"`
-	EffectiveCutoff    time.Time     `json:"effective_cutoff"`
-	Teams              []RosterTeam  `json:"teams"`
-	Players            []RosterPlayer `json:"players"`
+	SchemaVersion      string          `json:"schema_version"`
+	ManifestID         string          `json:"manifest_id"`
+	ContentSHA256      string          `json:"content_sha256"`
+	TournamentScopeID  string          `json:"tournament_scope_id"`
+	TournamentScopeSHA string          `json:"tournament_scope_sha256"`
+	Edition            string          `json:"edition"`
+	SampledAt          time.Time       `json:"sampled_at"`
+	EffectiveCutoff    time.Time       `json:"effective_cutoff"`
+	Teams              []RosterTeam    `json:"teams"`
+	Players            []RosterPlayer  `json:"players"`
 	Sources            []ProvenanceRef `json:"sources"`
 }
 
@@ -165,6 +165,20 @@ func (m RosterManifestV1) ValidateAgainstScope(scope contracts.TournamentScopeV1
 		}
 		if !found {
 			return errors.New("roster player not present in scope")
+		}
+	}
+	// Equality is bidirectional: every scope participant, including coaches,
+	// must appear in the sealed roster with the same identity and interval.
+	for _, sp := range scope.Participants {
+		found := false
+		for _, p := range m.Players {
+			if sp.PersonID == p.PersonID && sp.TeamID == p.TeamID && sp.Role == p.Role && sp.EffectiveFrom.Equal(p.EffectiveFrom) && sp.EffectiveUntil.Equal(p.EffectiveUntil) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("scope participant not present in roster")
 		}
 	}
 	return nil

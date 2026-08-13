@@ -2,6 +2,7 @@ package history
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
@@ -56,7 +57,7 @@ type aggKey struct {
 
 type aggGroup struct {
 	kind            CellKind
-	dec             bool // true once a decimal (cent-scaled) value is recorded; never mixed with int scalars in one group
+	dec             bool  // true once a decimal (cent-scaled) value is recorded; never mixed with int scalars in one group
 	sum             int64 // int scalars: integer units; decimals: cent units
 	count           int64 // count of present scalar observations
 	eligibleMatches map[string]bool
@@ -90,8 +91,10 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 		rosterByID[p.PersonID] = p
 	}
 	teamRoster := map[string]string{}
+	teamByID := map[string]RosterTeam{}
 	for _, t := range in.Roster.Teams {
 		teamRoster[t.TeamID] = t.RosterID
+		teamByID[t.TeamID] = t
 	}
 	groups := map[aggKey]*aggGroup{}
 	ensure := func(k aggKey, kind CellKind) *aggGroup {
@@ -121,11 +124,13 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 			mark(g, matchID, false)
 			return
 		}
-		mark(g, matchID, true)
 		if num, ok := parseDec(v); ok {
+			mark(g, matchID, true)
 			g.sum += num
 			g.count++
+			return
 		}
+		mark(g, matchID, false)
 	}
 
 	for _, f := range in.Facts {
@@ -142,116 +147,127 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 			continue
 		}
 		// An unknown win outcome is a missing observation, not a Dire win: wins are
-	// only accumulated when RadiantWin is known, and a wins cell is published
-	// only when every eligible game contributes a known result.
-	winKnown := f.RadiantWin != nil
-	radiantWin := false
-	if winKnown {
-		radiantWin = *f.RadiantWin
-	}
-	curPatch := in.Patch.PatchID
-	effectiveMember := func(personID, teamID string, at time.Time) bool {
-		rp, ok := rosterByID[personID]
-		if !ok || rp.TeamID != teamID {
-			return false
+		// only accumulated when RadiantWin is known, and a wins cell is published
+		// only when every eligible game contributes a known result.
+		winKnown := f.RadiantWin != nil
+		radiantWin := false
+		if winKnown {
+			radiantWin = *f.RadiantWin
 		}
-		return !at.Before(rp.EffectiveFrom) && at.Before(rp.EffectiveUntil)
-	}
-	for _, w := range AllWindows() {
-		if !in.Windows.Includes(w, f.SourceEventTime) {
-			continue
+		curPatch := in.Patch.PatchID
+		effectiveMember := func(personID, teamID string, at time.Time) bool {
+			rp, ok := rosterByID[personID]
+			rt, teamOK := teamByID[teamID]
+			if !ok || !teamOK || rp.TeamID != teamID {
+				return false
+			}
+			return !at.Before(rp.EffectiveFrom) && at.Before(rp.EffectiveUntil) && !at.Before(rt.EffectiveFrom) && at.Before(rt.EffectiveUntil)
 		}
-		patchKey := f.PatchID
-		if w == WindowCurrentPatch && patchKey != curPatch {
-			continue
-		}
-		teamsInMatch := map[string]string{}
-		for _, p := range f.Participants {
-			rosterID := teamRoster[p.TeamID]
-			if rosterID == "" {
+		for _, w := range AllWindows() {
+			if !in.Windows.Includes(w, f.SourceEventTime) {
 				continue
 			}
-			if !effectiveMember(p.PersonID, p.TeamID, f.SourceEventTime) {
+			patchKey := f.PatchID
+			if w == WindowCurrentPatch && patchKey != curPatch {
 				continue
 			}
-			teamsInMatch[p.TeamID] = rosterID
-			role := p.Role
-			if rp, ok := rosterByID[p.PersonID]; ok && role == "" {
-				role = rp.Role
-			}
-			hid := p.HeroName
-			pid := p.PersonID
-			won := winKnown && ((p.TeamID == f.RadiantTeamID && radiantWin) || (p.TeamID == f.DireTeamID && !radiantWin))
+			teamsInMatch := map[string]string{}
+			for _, p := range f.Participants {
+				rosterID := teamRoster[p.TeamID]
+				if rosterID == "" {
+					continue
+				}
+				if !effectiveMember(p.PersonID, p.TeamID, f.SourceEventTime) {
+					continue
+				}
+				teamsInMatch[p.TeamID] = rosterID
+				role := p.Role
+				if rp, ok := rosterByID[p.PersonID]; ok && role == "" {
+					role = rp.Role
+				}
+				hid := p.HeroName
+				pid := p.PersonID
+				won := winKnown && ((p.TeamID == f.RadiantTeamID && radiantWin) || (p.TeamID == f.DireTeamID && !radiantWin))
 
-			emitCount(ensure, mark, aggKey{rosterID, pid, "", "", patchKey, MetricGames, string(w), "player.scalar.games"}, f.MatchID, true)
-			if hid != "" {
-				emitCount(ensure, mark, aggKey{rosterID, "", "", hid, patchKey, MetricGames, string(w), "hero.scalar.games"}, f.MatchID, true)
-			}
-			if role != "" {
-				emitCount(ensure, mark, aggKey{rosterID, "", role, "", patchKey, MetricGames, string(w), "role.scalar.games"}, f.MatchID, true)
-			}
-			emitWins(ensure, winKnown, won, aggKey{rosterID, pid, "", "", patchKey, MetricWins, string(w), "player.scalar.wins"}, f.MatchID, "player.scalar.wins")
-			if hid != "" {
-				emitWins(ensure, winKnown, won, aggKey{rosterID, "", "", hid, patchKey, MetricWins, string(w), "hero.scalar.wins"}, f.MatchID, "hero.scalar.wins")
-			}
-
-			for _, m := range []string{MetricKills, MetricDeaths, MetricAssists, MetricGPM, MetricXPM, MetricLastHits, MetricDenies, MetricLevel} {
-				v := scalarPtr(p, m)
-				addScalar(ensure(aggKey{rosterID, pid, "", "", patchKey, m, string(w), "player.scalar." + m}, CellDraft), f.MatchID, v)
+				emitCount(ensure, mark, aggKey{rosterID, pid, "", "", patchKey, MetricGames, string(w), "player.scalar.games"}, f.MatchID, true)
 				if hid != "" {
-					addScalar(ensure(aggKey{rosterID, "", "", hid, patchKey, m, string(w), "hero.scalar." + m}, CellDraft), f.MatchID, v)
+					emitCount(ensure, mark, aggKey{rosterID, "", "", hid, patchKey, MetricGames, string(w), "hero.scalar.games"}, f.MatchID, true)
 				}
 				if role != "" {
-					addScalar(ensure(aggKey{rosterID, "", role, "", patchKey, m, string(w), "role.scalar." + m}, CellDraft), f.MatchID, v)
+					emitCount(ensure, mark, aggKey{rosterID, "", role, "", patchKey, MetricGames, string(w), "role.scalar.games"}, f.MatchID, true)
 				}
-			}
-			addDec(ensure(aggKey{rosterID, pid, "", "", patchKey, MetricNetWorth, string(w), "player.scalar." + MetricNetWorth}, CellDraft), f.MatchID, decOrEmpty(p.NetWorth))
-			if p.Kills != nil && p.Assists != nil {
-				kp := killParticipationValue(p, participantsOf(f, p.TeamID))
-				g := ensure(aggKey{rosterID, pid, "", "", patchKey, MetricKillParticipation, string(w), "player.scalar." + MetricKillParticipation}, CellDraft)
-				if kp.Valid() {
-					addDec(g, f.MatchID, kp)
+				emitWins(ensure, winKnown, won, aggKey{rosterID, pid, "", "", patchKey, MetricWins, string(w), "player.scalar.wins"}, f.MatchID, "player.scalar.wins")
+				if hid != "" {
+					emitWins(ensure, winKnown, won, aggKey{rosterID, "", "", hid, patchKey, MetricWins, string(w), "hero.scalar.wins"}, f.MatchID, "hero.scalar.wins")
+				}
+
+				for _, m := range []string{MetricKills, MetricDeaths, MetricAssists, MetricGPM, MetricXPM, MetricLastHits, MetricDenies, MetricLevel} {
+					v := scalarPtr(p, m)
+					addScalar(ensure(aggKey{rosterID, pid, "", "", patchKey, m, string(w), "player.scalar." + m}, CellDraft), f.MatchID, v)
+					if hid != "" {
+						addScalar(ensure(aggKey{rosterID, "", "", hid, patchKey, m, string(w), "hero.scalar." + m}, CellDraft), f.MatchID, v)
+					}
+					if role != "" {
+						addScalar(ensure(aggKey{rosterID, "", role, "", patchKey, m, string(w), "role.scalar." + m}, CellDraft), f.MatchID, v)
+					}
+				}
+				addDec(ensure(aggKey{rosterID, pid, "", "", patchKey, MetricNetWorth, string(w), "player.scalar." + MetricNetWorth}, CellDraft), f.MatchID, decOrEmpty(p.NetWorth))
+				if p.Kills != nil && p.Assists != nil {
+					kp := killParticipationValue(p, participantsOf(f, p.TeamID))
+					g := ensure(aggKey{rosterID, pid, "", "", patchKey, MetricKillParticipation, string(w), "player.scalar." + MetricKillParticipation}, CellDraft)
+					if kp.Valid() {
+						addDec(g, f.MatchID, kp)
+					} else {
+						mark(g, f.MatchID, false)
+					}
 				} else {
-					mark(g, f.MatchID, false)
+					mark(ensure(aggKey{rosterID, pid, "", "", patchKey, MetricKillParticipation, string(w), "player.scalar." + MetricKillParticipation}, CellDraft), f.MatchID, false)
 				}
-			} else {
-				mark(ensure(aggKey{rosterID, pid, "", "", patchKey, MetricKillParticipation, string(w), "player.scalar." + MetricKillParticipation}, CellDraft), f.MatchID, false)
-			}
 
-			if hid != "" {
-				for _, m := range []string{MetricKills, MetricDeaths, MetricAssists, MetricGPM} {
-					v := scalarPtr(p, m)
-					addScalar(ensure(aggKey{rosterID, pid, "", hid, patchKey, m, string(w), "player_hero.scalar." + m}, CellDraft), f.MatchID, v)
-				}
-			}
-
-			emitBuckets(ensure, mark, f.MatchID, aggKey{rosterID, pid, "", "", patchKey, MetricFarmCheckpoint, string(w), "player.distribution." + MetricFarmCheckpoint}, CellDistribution, copyMap(p.FarmCheckpoints))
-			emitBuckets(ensure, mark, f.MatchID, aggKey{rosterID, pid, "", "", patchKey, MetricKeyItemTiming, string(w), "player.distribution." + MetricKeyItemTiming}, CellDistribution, itemTimingsMap(p))
-		}
-
-		for teamID, rosterID := range teamsInMatch {
-			won := winKnown && ((teamID == f.RadiantTeamID && radiantWin) || (teamID == f.DireTeamID && !radiantWin))
-			emitCount(ensure, mark, aggKey{rosterID, "", "", "", patchKey, MetricGames, string(w), "team.scalar.games"}, f.MatchID, true)
-			emitWins(ensure, winKnown, won, aggKey{rosterID, "", "", "", patchKey, MetricWins, string(w), "team.scalar.wins"}, f.MatchID, "team.scalar.wins")
-			for _, m := range []string{MetricGPM, MetricXPM, MetricKills, MetricDeaths, MetricAssists} {
-				gm := ensure(aggKey{rosterID, "", "", "", patchKey, m, string(w), "team.scalar." + m}, CellTeamComparative)
-				var teamPresent bool
-				for _, p := range f.Participants {
-					if p.TeamID != teamID || !effectiveMember(p.PersonID, p.TeamID, f.SourceEventTime) {
-						continue
+				if hid != "" {
+					for _, m := range []string{MetricKills, MetricDeaths, MetricAssists, MetricGPM} {
+						v := scalarPtr(p, m)
+						addScalar(ensure(aggKey{rosterID, pid, "", hid, patchKey, m, string(w), "player_hero.scalar." + m}, CellDraft), f.MatchID, v)
 					}
-					v := scalarPtr(p, m)
-					if v != nil {
-						gm.sum += *v
+				}
+
+				emitBuckets(ensure, mark, f.MatchID, aggKey{rosterID, pid, "", "", patchKey, MetricFarmCheckpoint, string(w), "player.distribution." + MetricFarmCheckpoint}, CellDistribution, copyMap(p.FarmCheckpoints))
+				emitBuckets(ensure, mark, f.MatchID, aggKey{rosterID, pid, "", "", patchKey, MetricKeyItemTiming, string(w), "player.distribution." + MetricKeyItemTiming}, CellDistribution, itemTimingsMap(p))
+			}
+
+			for teamID, rosterID := range teamsInMatch {
+				won := winKnown && ((teamID == f.RadiantTeamID && radiantWin) || (teamID == f.DireTeamID && !radiantWin))
+				emitCount(ensure, mark, aggKey{rosterID, "", "", "", patchKey, MetricGames, string(w), "team.scalar.games"}, f.MatchID, true)
+				emitWins(ensure, winKnown, won, aggKey{rosterID, "", "", "", patchKey, MetricWins, string(w), "team.scalar.wins"}, f.MatchID, "team.scalar.wins")
+				for _, m := range []string{MetricGPM, MetricXPM, MetricKills, MetricDeaths, MetricAssists} {
+					gm := ensure(aggKey{rosterID, "", "", "", patchKey, m, string(w), "team.scalar." + m}, CellTeamComparative)
+					var total int64
+					teamPresent := true
+					memberCount := 0
+					for _, p := range f.Participants {
+						if p.TeamID != teamID || !effectiveMember(p.PersonID, p.TeamID, f.SourceEventTime) {
+							continue
+						}
+						memberCount++
+						v := scalarPtr(p, m)
+						if v == nil {
+							teamPresent = false
+							continue
+						}
+						total += *v
+					}
+					if memberCount != 5 {
+						teamPresent = false
+					}
+					if teamPresent {
+						gm.sum += total
 						gm.count++
-						teamPresent = true
 					}
+					mark(gm, f.MatchID, teamPresent)
 				}
-				mark(gm, f.MatchID, teamPresent)
 			}
+			_ = teamsInMatch
 		}
-		_ = teamsInMatch
-	}
 	}
 
 	cells := buildCells(groups, in)
@@ -270,22 +286,19 @@ func emitCount(ensure func(aggKey, CellKind) *aggGroup, mark func(*aggGroup, str
 
 func emitBuckets(ensure func(aggKey, CellKind) *aggGroup, mark func(*aggGroup, string, bool), matchID string, k aggKey, kind CellKind, buckets map[string]string) {
 	g := ensure(k, kind)
-	any := false
+	g.eligibleMatches[matchID] = true
 	for bucket, val := range buckets {
 		b := g.buckets[bucket]
 		if b == nil {
 			b = &bucketAgg{}
 			g.buckets[bucket] = b
 		}
-		b.eligibleObs++
 		if num, ok := parseDecString(val); ok {
 			b.sum += num // cent-scaled; mean divides once via meanDec
 			b.count++
 			b.presentObs++
-			any = true
 		}
 	}
-	mark(g, matchID, any)
 }
 
 func buildCells(groups map[aggKey]*aggGroup, in AggregateInput) []BaselineCell {
@@ -302,8 +315,12 @@ func buildCells(groups map[aggKey]*aggGroup, in AggregateInput) []BaselineCell {
 		if len(g.buckets) > 0 {
 			for bucket, b := range g.buckets {
 				pobs := uint64(b.presentObs)
+				bucketCoverage := uint32(0)
+				if eligible > 0 {
+					bucketCoverage = uint32((pobs * 1_000_000) / eligible)
+				}
 				val := meanDec(b.sum, b.count)
-				out = append(out, makeCell(k, periodStart, periodEnd, pobs, coveragePPM, val, pobs >= min && pobs > 0 && val.Valid(), bucket))
+				out = append(out, makeCell(k, periodStart, periodEnd, pobs, bucketCoverage, val, pobs >= min && pobs > 0 && val.Valid(), bucket))
 			}
 			continue
 		}
@@ -514,43 +531,73 @@ func decOrEmpty(s *string) contracts.Decimal {
 func parseDec(d contracts.Decimal) (int64, bool) { return parseDecString(string(d)) }
 
 func parseDecString(s string) (int64, bool) {
-	if s == "" {
+	if !contracts.Decimal(s).Valid() {
 		return 0, false
 	}
-	neg := false
-	i := 0
-	if s[0] == '-' {
-		neg = true
-		i = 1
+	negative := strings.HasPrefix(s, "-")
+	if negative {
+		s = s[1:]
 	}
-	var whole int64
-	for ; i < len(s) && s[i] != '.'; i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, false
+	exponent := 0
+	if at := strings.IndexAny(s, "eE"); at >= 0 {
+		expText := s[at+1:]
+		s = s[:at]
+		expNegative := strings.HasPrefix(expText, "-")
+		if strings.HasPrefix(expText, "+") || expNegative {
+			expText = expText[1:]
 		}
-		whole = whole*10 + int64(s[i]-'0')
-	}
-	var frac int64
-	if i < len(s) && s[i] == '.' {
-		i++
-		for j := 0; i < len(s) && j < 2; j++ {
-			if s[i] < '0' || s[i] > '9' {
-				return 0, false
+		for _, ch := range expText {
+			if exponent > 100000 {
+				exponent = 100001
+				break
 			}
-			frac = frac*10 + int64(s[i]-'0')
-			i++
+			exponent = exponent*10 + int(ch-'0')
+		}
+		if expNegative {
+			exponent = -exponent
 		}
 	}
-	for ; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
+	fracDigits := 0
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		fracDigits = len(s) - dot - 1
+		s = s[:dot] + s[dot+1:]
+	}
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return 0, true
+	}
+	shift := 2 + exponent - fracDigits
+	if shift < 0 {
+		cut := -shift
+		if cut >= len(s) {
+			return 0, true
+		}
+		s = s[:len(s)-cut]
+	} else {
+		if shift > 18 || len(s)+shift > 19 {
 			return 0, false
 		}
+		s += strings.Repeat("0", shift)
 	}
-	total := whole*100 + frac
-	if neg {
-		total = -total
+	limit := uint64(^uint64(0) >> 1)
+	if negative {
+		limit++
 	}
-	return total, true
+	var value uint64
+	for _, ch := range s {
+		d := uint64(ch - '0')
+		if value > (limit-d)/10 {
+			return 0, false
+		}
+		value = value*10 + d
+	}
+	if negative {
+		if value == uint64(1)<<63 {
+			return -1 << 63, true
+		}
+		return -int64(value), true
+	}
+	return int64(value), true
 }
 
 func cellLess(a, b contracts.HistoricalBaselineKeyV1) bool {

@@ -34,6 +34,14 @@ func TestCorpusDeterministicAndIdempotent(t *testing.T) {
 	if r1.snapshotID != r2.snapshotID {
 		t.Fatalf("snapshot manifest id not deterministic: %s != %s", r1.snapshotID, r2.snapshotID)
 	}
+	if r1.artifactTreeSHA != r2.artifactTreeSHA || r1.artifactTreeSHA == "" {
+		t.Fatalf("artifact tree not deterministic: %s != %s", r1.artifactTreeSHA, r2.artifactTreeSHA)
+	}
+	for stage, calls := range r1.interruptionCalls {
+		if calls != 12 {
+			t.Fatalf("interruption matrix %s effects=%d, want 12 (once per boundary)", stage, calls)
+		}
+	}
 	if r1.baselineCount != r2.baselineCount || r1.baselineCount == 0 {
 		t.Fatalf("baseline count not deterministic or empty: %d vs %d", r1.baselineCount, r2.baselineCount)
 	}
@@ -54,6 +62,31 @@ func TestCorpusDeterministicAndIdempotent(t *testing.T) {
 	files, _ := os.ReadDir(dir1)
 	if len(files) == 0 {
 		t.Fatalf("expected batch state artifact under data root")
+	}
+}
+
+func TestCorpusArtifactIdentityIgnoresFilesOutsideHistoryRoot(t *testing.T) {
+	root := t.TempDir()
+	historyRoot := filepath.Join(root, "history")
+	if err := os.MkdirAll(historyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(historyRoot, "artifact.json"), []byte("pipeline evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantSHA, wantBytes, wantFiles, err := artifactTreeSHA(historyRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "wrapper.log"), []byte("not pipeline evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gotSHA, gotBytes, gotFiles, err := artifactTreeSHA(historyRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSHA != wantSHA || gotBytes != wantBytes || gotFiles != wantFiles {
+		t.Fatalf("history artifact identity changed due to unrelated root file: got=%s/%d/%d want=%s/%d/%d", gotSHA, gotBytes, gotFiles, wantSHA, wantBytes, wantFiles)
 	}
 }
 

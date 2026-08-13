@@ -87,21 +87,30 @@ func runCorpus(args []string) error {
 }
 
 type corpusResult struct {
-	err           error
-	discoveryID   string
-	discovery     history.DiscoveryManifestV1
-	snapshotID    string
-	baselineCount int
-	includedCount int
-	excludedCount int
-	quarantined   int
-	stageCalls    map[string]int
-	resumeCalls   map[string]int
-	elapsed       time.Duration
-	userCPU       float64
-	sysCPU        float64
-	peakHeapMiB   uint64
-	statePath     string
+	err               error
+	discoveryID       string
+	discovery         history.DiscoveryManifestV1
+	roster            history.RosterManifestV1
+	facts             []history.NormalizedMatchFacts
+	processed         []history.ProcessedReplayEvidence
+	windows           history.CutoffWindow
+	patch             history.PatchWindow
+	snapshotID        string
+	baselineCount     int
+	includedCount     int
+	excludedCount     int
+	quarantined       int
+	stageCalls        map[string]int
+	resumeCalls       map[string]int
+	elapsed           time.Duration
+	userCPU           float64
+	sysCPU            float64
+	peakHeapMiB       uint64
+	statePath         string
+	artifactTreeSHA   string
+	storageBytes      int64
+	artifactFiles     int
+	interruptionCalls map[string]int
 }
 
 func printCorpus(r *corpusResult) {
@@ -120,6 +129,9 @@ func printCorpus(r *corpusResult) {
 	fmt.Printf("system_cpu_sec         = %.6f\n", r.sysCPU)
 	fmt.Printf("peak_heap_mib          = %d\n", r.peakHeapMiB)
 	fmt.Printf("batch_state_path       = %s (git-ignored under canonical data root)\n", r.statePath)
+	fmt.Printf("artifact_tree_sha256   = %s\n", r.artifactTreeSHA)
+	fmt.Printf("storage_bytes/files    = %d/%d\n", r.storageBytes, r.artifactFiles)
+	fmt.Printf("interruption_effects   = %v\n", r.interruptionCalls)
 }
 
 func measureRun(f func() (*corpusResult, error)) *corpusResult {
@@ -258,17 +270,17 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		return nil, fmt.Errorf("discovery binding: %w", err)
 	}
 
-	// Stage pipeline: stages operate on the deterministic facts built above;
-	// acquire/verify/parse/normalize are no-ops that record calls, so the
-	// pipeline proves resume/dedupe and dead-letter behavior without a replay
-	// download. State is persisted atomically under the git-ignored data root.
+	// The fixture adapters implement the same injectable, durable stage ports as
+	// production: each stage writes a content-addressed artifact and reconciles
+	// it after interruption before any side effect can repeat.
 	if err := os.MkdirAll(dataDir+"/history", 0o755); err != nil {
 		return nil, err
 	}
 	statePath := dataDir + "/history/corpus-batch-state.json"
-	mu := noopStages(facts)
+	mu := newFixtureStageComposition(facts, dataDir+"/history/artifacts")
 	pipeline := &history.StagePipeline{
 		Stages:     mu.stages,
+		Reconcile:  mu.reconcile,
 		StageOrder: mu.order,
 		MaxRetries: 3,
 		Save: func(b history.StageBatch) error {
@@ -344,80 +356,36 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 	for k, v := range callsRecorder {
 		resumeCalls[k] = v
 	}
+	interruptionCalls, err := verifyInterruptionRecovery(dm, facts, dataDir+"/history/interruption-matrix")
+	if err != nil {
+		return nil, fmt.Errorf("interruption matrix: %w", err)
+	}
+	treeSHA, storageBytes, artifactFiles, err := artifactTreeSHA(dataDir + "/history")
+	if err != nil {
+		return nil, fmt.Errorf("artifact tree: %w", err)
+	}
 
 	return &corpusResult{
-		discoveryID:   dm.ContentSHA256,
-		discovery:     dm,
-		snapshotID:    snap.Snapshot.ContentSHA256,
-		baselineCount: len(snap.Baselines),
-		includedCount: len(snap.Snapshot.IncludedMatches),
-		excludedCount: len(snap.Snapshot.ExcludedMatches),
-		quarantined:   quarantinedCount,
-		stageCalls:    stageCalls,
-		resumeCalls:   resumeCalls,
-		statePath:     statePath,
+		discoveryID:       dm.ContentSHA256,
+		discovery:         dm,
+		roster:            roster,
+		facts:             facts,
+		processed:         processedEvidence(facts),
+		windows:           windows,
+		patch:             history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
+		snapshotID:        snap.Snapshot.ContentSHA256,
+		baselineCount:     len(snap.Baselines),
+		includedCount:     len(snap.Snapshot.IncludedMatches),
+		excludedCount:     len(snap.Snapshot.ExcludedMatches),
+		quarantined:       quarantinedCount,
+		stageCalls:        stageCalls,
+		resumeCalls:       resumeCalls,
+		statePath:         statePath,
+		artifactTreeSHA:   treeSHA,
+		storageBytes:      storageBytes,
+		artifactFiles:     artifactFiles,
+		interruptionCalls: interruptionCalls,
 	}, nil
-}
-
-// noopStages builds deterministic stage functions that record call counts and
-// stamp content identities on each entry. They prove the pipeline advances
-// every accessible match to succeeded and skips terminal entries on resume.
-func noopStages(facts []history.NormalizedMatchFacts) struct {
-	stages map[string]history.StageFunc
-	order  []string
-	calls  map[string]int
-} {
-	factsByID := map[string]history.NormalizedMatchFacts{}
-	for _, f := range facts {
-		factsByID[f.MatchID] = f
-	}
-	calls := map[string]int{}
-	record := func(stage, id string) { calls[stage+":"+id]++ }
-	mk := func(name string, fn func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure)) history.StageFunc {
-		return func(e history.StageEntry, ctx history.MatchContext) (history.StageEntry, *history.StageFailure) {
-			record(name, e.MatchID)
-			f, _ := factsByID[e.MatchID]
-			return fn(e, ctx, f)
-		}
-	}
-	return struct {
-		stages map[string]history.StageFunc
-		order  []string
-		calls  map[string]int
-	}{
-		stages: map[string]history.StageFunc{
-			history.StageAcquisition: mk(history.StageAcquisition, func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure) {
-				switch ctx.Discovery.State {
-				case history.MatchReplayAccessible:
-					if f.ReplaySHA256 != "" {
-						e.ReplaySHA256 = f.ReplaySHA256
-					}
-					return e, nil
-				case history.MatchReplayQuarantined:
-					return e, &history.StageFailure{Stage: history.StageAcquisition, Reason: "identity_not_correlated", Terminal: true}
-				default:
-					// expired/purged/unlisted have no replay bytes; they are a
-					// legitimate terminal dead-letter, not a recoverable failure.
-					return e, &history.StageFailure{Stage: history.StageAcquisition, Reason: "replay_not_accessible:" + ctx.Discovery.State, Terminal: true}
-				}
-			}),
-			history.StageVerification: mk(history.StageVerification, func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure) {
-				return e, nil
-			}),
-			history.StageParse: mk(history.StageParse, func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure) {
-				return e, nil
-			}),
-			history.StageNormalize: mk(history.StageNormalize, func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure) {
-				e.FactsSHA256 = f.ContentSHA256
-				return e, nil
-			}),
-			history.StageAggregate: mk(history.StageAggregate, func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure) {
-				return e, nil
-			}),
-		},
-		order: []string{history.StageAcquisition, history.StageVerification, history.StageParse, history.StageNormalize, history.StageAggregate},
-		calls: calls,
-	}
 }
 
 func saveBatch(path string, b history.StageBatch) error {
@@ -465,12 +433,14 @@ func runReport(args []string) error {
 	if err != nil {
 		return err
 	}
-	evidence := history.ReadinessGate(scope, res.discovery)
+	evidence := history.ReadinessGate(history.ReadinessInput{Scope: scope, Roster: res.roster, Manifest: res.discovery, Facts: res.facts, Processed: res.processed, Windows: res.windows, Patch: res.patch, GeneratedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)})
 
 	var b strings.Builder
 	fmt.Fprintln(&b, "=== M1 deterministic fixture-corpus gate (NOT real tournament readiness evidence) ===")
 	fmt.Fprintf(&b, "outcome                = %s\n", evidence.Outcome)
 	fmt.Fprintf(&b, "replay_accessible_total= %d\n", evidence.ReplayAccessibleTotal)
+	fmt.Fprintf(&b, "repeatably_processed   = %d\n", evidence.RepeatablyProcessedTotal)
+	fmt.Fprintf(&b, "enabled_cells          = %d\n", evidence.EnabledCellTotal)
 	fmt.Fprintf(&b, "full_history_target    = %d\n", scope.Discovery.FullHistoryReplayTarget)
 	fmt.Fprintf(&b, "minimum_team_matches   = %d\n", scope.Discovery.MinimumTeamMatches)
 	fmt.Fprintf(&b, "teams_represented      = %d\n", len(evidence.TeamsRepresented))
@@ -510,6 +480,18 @@ func participantIDs(in []history.ParticipantFacts) []string {
 		out = append(out, p.PersonID)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func processedEvidence(facts []history.NormalizedMatchFacts) []history.ProcessedReplayEvidence {
+	out := []history.ProcessedReplayEvidence{}
+	for _, f := range facts {
+		if f.IdentityStatus != contracts.IdentityVerified {
+			continue
+		}
+		out = append(out, history.ProcessedReplayEvidence{MatchID: f.MatchID, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, SuccessfulParsePasses: 2})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].MatchID < out[j].MatchID })
 	return out
 }
 
