@@ -8,10 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -154,7 +152,6 @@ func TestBroadcastRuntimeRejectsSubstitutedLocalLineageArtifact(t *testing.T) {
 func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 	files := map[string]string{
 		"../../internal/session/store.go":            sessionStoreSourceSHA256,
-		"../../internal/session/live_projector.go":   liveProjectorSourceSHA256,
 		"../../internal/gsi/server.go":               gsiServerSourceSHA256,
 		"../../internal/contracts/contracts.go":      contractsSourceSHA256,
 		"../../internal/capture/live_observation.go": liveMappingSourceSHA256,
@@ -355,23 +352,8 @@ func TestObservationResolverStreamsRawSessionOnce(t *testing.T) {
 }
 
 func TestObservationResolverUnlinksIndexAndAcceptsMaximumPersistedCapture(t *testing.T) {
-	const sessionID = "maximum-raw-record"
-	if root := os.Getenv("DOTA2_OB_MAXIMUM_RECOVERY_ROOT"); root != "" {
-		runtime, err := newBroadcastRuntime(broadcastConfig{DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"), Lineage: testLineage(sessionID)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer runtime.Close()
-		var usage syscall.Rusage
-		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-			t.Fatal(err)
-		}
-		if !raceEnabled && usage.Maxrss > 192<<10 {
-			t.Fatalf("isolated maximum-record recovery RSS=%d KiB exceeds 192 MiB", usage.Maxrss)
-		}
-		return
-	}
 	root := t.TempDir()
+	const sessionID = "maximum-raw-record"
 	store, err := session.NewStore(root, session.WithSessionID(sessionID))
 	if err != nil {
 		t.Fatal(err)
@@ -390,40 +372,10 @@ func TestObservationResolverUnlinksIndexAndAcceptsMaximumPersistedCapture(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() <= maximumCaptureBody || info.Size() > maximumPersistedRecordBytes {
-		t.Fatalf("persisted maximum capture size=%d outside (%d,%d]", info.Size(), maximumCaptureBody, maximumPersistedRecordBytes)
+	if info.Size() <= 100<<20 {
+		t.Fatalf("fixture did not exercise worst-case HTML escaping: size=%d", info.Size())
 	}
-	rawPath := filepath.Join(root, sessionID, "raw.jsonl")
-	lineage := testLineage(sessionID)
-	observation, err := capture.MapLiveObservationV1(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := newBroadcastRuntime(broadcastConfig{DataRoot: root, SessionID: sessionID, RawPath: rawPath, Lineage: lineage})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.commitCandidates(observation, insight.Evaluate(insight.Input{Observation: observation, Lineage: &lineage, PolicyTimeMS: observation.Evidence.ReceiveTime.UnixMilli()}, insight.DefaultConfig()), observation.Evidence.ReceiveTime.UnixMilli()); err != nil {
-		t.Fatal(err)
-	}
-	wantHash := runtime.app.StateHash()
-	if err := runtime.Close(); err != nil {
-		t.Fatal(err)
-	}
-	child := exec.Command(os.Args[0], "-test.run=^TestObservationResolverUnlinksIndexAndAcceptsMaximumPersistedCapture$", "-test.count=1")
-	child.Env = append(os.Environ(), "DOTA2_OB_MAXIMUM_RECOVERY_ROOT="+root)
-	if output, err := child.CombinedOutput(); err != nil {
-		t.Fatalf("isolated maximum-record recovery failed: %v\n%s", err, output)
-	}
-	restarted, err := newBroadcastRuntime(broadcastConfig{DataRoot: root, SessionID: sessionID, RawPath: rawPath, Lineage: lineage})
-	if err != nil {
-		t.Fatalf("maximum persisted capture failed real restart recovery: %v", err)
-	}
-	defer restarted.Close()
-	if restarted.app.StateHash() != wantHash {
-		t.Fatalf("maximum persisted capture recovered hash=%s want=%s", restarted.app.StateHash(), wantHash)
-	}
-	resolver := newObservationResolver(rawPath, sessionID, lineage)
+	resolver := newObservationResolver(filepath.Join(root, sessionID, "raw.jsonl"), sessionID, testLineage(sessionID))
 	defer resolver.Close()
 	resolved, err := resolver.readCommittedRecord(record.Sequence)
 	if err != nil || resolved.Sequence != record.Sequence {

@@ -2,8 +2,6 @@ package session
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,14 +48,13 @@ type Store struct {
 }
 
 type Record struct {
-	SchemaVersion    int             `json:"schema_version"`
-	SessionID        string          `json:"session_id"`
-	Sequence         uint64          `json:"sequence"`
-	ReceivedAt       time.Time       `json:"received_at"`
-	Source           string          `json:"source"`
-	Payload          any             `json:"payload"`
-	Raw              json.RawMessage `json:"raw"`
-	RawPayloadSHA256 string          `json:"raw_payload_sha256,omitempty"`
+	SchemaVersion int             `json:"schema_version"`
+	SessionID     string          `json:"session_id"`
+	Sequence      uint64          `json:"sequence"`
+	ReceivedAt    time.Time       `json:"received_at"`
+	Source        string          `json:"source"`
+	Payload       any             `json:"payload"`
+	Raw           json.RawMessage `json:"raw"`
 }
 
 func WithClock(clock Clock) Option {
@@ -150,16 +147,11 @@ func (s *Store) Append(raw []byte) (*Record, error) {
 		ReceivedAt: s.clock().UTC(), Source: "gsi", Payload: payload,
 		Raw: append(json.RawMessage(nil), raw...),
 	}
-	digest := sha256.Sum256(raw)
-	record.RawPayloadSHA256 = hex.EncodeToString(digest[:])
-	var encoded bytes.Buffer
-	encoder := json.NewEncoder(&encoded)
-	encoder.SetEscapeHTML(false)
-	err = encoder.Encode(record)
+	line, err := json.Marshal(record)
 	if err != nil {
 		return nil, fmt.Errorf("marshal record: %w", err)
 	}
-	line := encoded.Bytes()
+	line = append(line, '\n')
 	n, writeErr := s.file.Write(line)
 	if writeErr != nil || n != len(line) {
 		if rollbackErr := s.rollback(prior); rollbackErr != nil {

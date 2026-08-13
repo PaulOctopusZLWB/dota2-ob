@@ -50,11 +50,7 @@ func verifyEvidence(record *session.Record, e contracts.EvidenceRefV1) error {
 		return errors.New("resolved evidence identity mismatch")
 	}
 	h := sha256.Sum256(record.Raw)
-	rawHash := record.RawPayloadSHA256
-	if rawHash == "" {
-		rawHash = hex.EncodeToString(h[:])
-	}
-	if rawHash != e.RawPayloadSHA256 {
+	if hex.EncodeToString(h[:]) != e.RawPayloadSHA256 {
 		return errors.New("resolved evidence hash mismatch")
 	}
 	return nil

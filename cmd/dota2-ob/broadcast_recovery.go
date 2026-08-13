@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
@@ -20,9 +19,11 @@ import (
 )
 
 // The capture listener accepts at most 10 MiB of JSON. Persisted records retain
-// decoded payload and raw JSON with HTML escaping disabled, so two input copies
-// plus a 1 MiB envelope margin bound every accepted record.
-const maximumPersistedRecordBytes = (2 * (10 << 20)) + (1 << 20)
+// both decoded payload and raw JSON, and encoding/json may expand HTML-sensitive
+// bytes to six-byte escapes in both copies. Twelve input copies plus a 1 MiB
+// envelope margin therefore bounds every accepted record without guessing from
+// ordinary ASCII payloads.
+const maximumPersistedRecordBytes = (12 * (10 << 20)) + (1 << 20)
 
 type observationResolver struct {
 	rawPath   string
@@ -164,31 +165,11 @@ func (r *observationResolver) readCommittedRecord(sequence uint64) (*session.Rec
 		return nil, err
 	}
 	payload = bytes.TrimSuffix(payload, []byte{'\n'})
-	var persisted struct {
-		SchemaVersion    int       `json:"schema_version"`
-		SessionID        string    `json:"session_id"`
-		Sequence         uint64    `json:"sequence"`
-		ReceivedAt       time.Time `json:"received_at"`
-		Source           string    `json:"source"`
-		Payload          any       `json:"payload"`
-		RawPayloadSHA256 string    `json:"raw_payload_sha256"`
-	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
-	if err := decoder.Decode(&persisted); err != nil {
+	var record session.Record
+	if err := decoder.Decode(&record); err != nil {
 		return nil, err
-	}
-	record := session.Record{
-		SchemaVersion: persisted.SchemaVersion, SessionID: persisted.SessionID, Sequence: persisted.Sequence,
-		ReceivedAt: persisted.ReceivedAt, Source: persisted.Source, Payload: persisted.Payload,
-		RawPayloadSHA256: persisted.RawPayloadSHA256,
-	}
-	if record.RawPayloadSHA256 == "" {
-		decoder = json.NewDecoder(bytes.NewReader(payload))
-		decoder.UseNumber()
-		if err := decoder.Decode(&record); err != nil {
-			return nil, err
-		}
 	}
 	if record.SessionID != r.sessionID || record.Sequence != sequence {
 		return nil, errors.New("persisted record identity mismatch")

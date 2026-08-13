@@ -19,7 +19,7 @@ const liveObservationMappingVersion = "gsi_normalized.v1"
 // observation. It reads the accepted raw record directly and never constructs
 // a private legacy tick.
 func MapLiveObservationV1(record *session.Record) (contracts.LiveObservationV1, error) {
-	if record == nil || record.SchemaVersion <= 0 || record.SessionID == "" || record.Sequence == 0 || record.ReceivedAt.IsZero() || record.Source != "gsi" || (len(record.Raw) == 0 && record.RawPayloadSHA256 == "") {
+	if record == nil || record.SchemaVersion <= 0 || record.SessionID == "" || record.Sequence == 0 || record.ReceivedAt.IsZero() || record.Source != "gsi" || len(record.Raw) == 0 {
 		return contracts.LiveObservationV1{}, errors.New("invalid committed GSI record")
 	}
 	root, ok := record.Payload.(map[string]any)
@@ -29,11 +29,7 @@ func MapLiveObservationV1(record *session.Record) (contracts.LiveObservationV1, 
 	provider := mapValue(root, "provider")
 	m := mapValue(root, "map")
 	h := sha256.Sum256(record.Raw)
-	rawHash := record.RawPayloadSHA256
-	if rawHash == "" {
-		rawHash = hex.EncodeToString(h[:])
-	}
-	o := contracts.LiveObservationV1{SchemaVersion: contracts.LiveObservationSchemaV1, MappingVersion: liveObservationMappingVersion, Evidence: contracts.EvidenceRefV1{RecordSchemaVersion: record.SchemaVersion, SessionID: record.SessionID, Sequence: record.Sequence, ReceiveTime: record.ReceivedAt.UTC(), Source: record.Source, ProviderVersion: observedInt(provider, "version"), RawPayloadSHA256: rawHash}, Provider: contracts.ProviderObservationV1{Name: observedString(provider, "name"), AppID: observedInt(provider, "appid"), Timestamp: observedInt(provider, "timestamp")}, MatchID: observedMatchID(root), ClockBasis: "gsi_map_clock_and_game_time", Map: mapObservation(m), Roshan: contracts.ObjectiveObservationV1{State: observedString(m, "roshan_state"), Location: contracts.Absent[string](), EndSeconds: observedDecimal(m, "roshan_state_end_seconds")}, Tormentor: contracts.ObjectiveObservationV1{State: observedString(m, "tormentor_state"), Location: observedString(m, "tormentor_state_location"), EndSeconds: observedDecimal(m, "tormentor_state_end_seconds")}, Buildings: mapBuildings(mapValue(root, "buildings")), Participants: mapParticipants(root), Quality: contracts.SourceQualityV1{Confidence: "observed", Flags: []string{}}}
+	o := contracts.LiveObservationV1{SchemaVersion: contracts.LiveObservationSchemaV1, MappingVersion: liveObservationMappingVersion, Evidence: contracts.EvidenceRefV1{RecordSchemaVersion: record.SchemaVersion, SessionID: record.SessionID, Sequence: record.Sequence, ReceiveTime: record.ReceivedAt.UTC(), Source: record.Source, ProviderVersion: observedInt(provider, "version"), RawPayloadSHA256: hex.EncodeToString(h[:])}, Provider: contracts.ProviderObservationV1{Name: observedString(provider, "name"), AppID: observedInt(provider, "appid"), Timestamp: observedInt(provider, "timestamp")}, MatchID: observedMatchID(root), ClockBasis: "gsi_map_clock_and_game_time", Map: mapObservation(m), Roshan: contracts.ObjectiveObservationV1{State: observedString(m, "roshan_state"), Location: contracts.Absent[string](), EndSeconds: observedDecimal(m, "roshan_state_end_seconds")}, Tormentor: contracts.ObjectiveObservationV1{State: observedString(m, "tormentor_state"), Location: observedString(m, "tormentor_state_location"), EndSeconds: observedDecimal(m, "tormentor_state_end_seconds")}, Buildings: mapBuildings(mapValue(root, "buildings")), Participants: mapParticipants(root), Quality: contracts.SourceQualityV1{Confidence: "observed", Flags: []string{}}}
 	return o, nil
 }
 

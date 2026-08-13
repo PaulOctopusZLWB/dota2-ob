@@ -53,15 +53,17 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 	storeOptions := append([]commitlog.V2Option(nil), config.StoreOptions...)
 	storeOptions = append(storeOptions, verifier)
 	store, _, err := commitlog.OpenV2(config.DataRoot, config.SessionID, config.Lineage, storeOptions...)
+	verificationCloseErr := verificationResolver.Close()
 	if err != nil {
-		_ = verificationResolver.Close()
 		return nil, err
 	}
-	// Reuse the verified disk-backed raw index for exact application replay.
-	// Only the delta predecessor is reset; no raw records are retained in RAM.
-	verificationResolver.previous = nil
-	app, err := recoverProductionApplication(store, config.SessionID, config.Lineage, policyConfig, verificationResolver)
-	resolverCloseErr := verificationResolver.Close()
+	if verificationCloseErr != nil {
+		_ = store.Close()
+		return nil, verificationCloseErr
+	}
+	resolver := newObservationResolver(config.RawPath, config.SessionID, config.Lineage)
+	app, err := recoverProductionApplication(store, config.SessionID, config.Lineage, policyConfig, resolver)
+	resolverCloseErr := resolver.Close()
 	if err != nil {
 		_ = store.Close()
 		return nil, err
@@ -76,7 +78,7 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	return &broadcastRuntime{app: app, store: store, now: config.Now, lineage: config.Lineage, previous: verificationResolver.previous, overlay: hidden}, nil
+	return &broadcastRuntime{app: app, store: store, now: config.Now, lineage: config.Lineage, previous: resolver.previous, overlay: hidden}, nil
 }
 
 func (r *broadcastRuntime) Close() error {
