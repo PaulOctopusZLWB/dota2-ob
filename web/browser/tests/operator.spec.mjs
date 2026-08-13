@@ -182,7 +182,7 @@ test("revision conflicts refresh authoritative state and replay the identical re
         previous_revision: 8,
         resulting_revision: 8,
         decision_ids: [],
-        reason: "revision_conflict"
+        reason: "stale_revision"
       } : acceptedResult(command));
     }
     const result = committedResults.get(command.command_id);
@@ -229,7 +229,7 @@ test("revision-conflict refresh failure clears stale state and leaves controls f
       previous_revision: 8,
       resulting_revision: 8,
       decision_ids: [],
-      reason: "revision_conflict"
+      reason: "stale_revision"
     }) });
   });
   await connect(page);
@@ -329,7 +329,7 @@ test("operator exposes every accepted action and replays the exact prior command
     requests.push(command);
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       schema_version: "operator_command_result.v1", command_id: command.command_id, session_id: command.session_id,
-      status: "rejected", previous_revision: 7, resulting_revision: 7, decision_ids: [], reason: "revision_conflict"
+      status: "rejected", previous_revision: 7, resulting_revision: 7, decision_ids: [], reason: "stale_revision"
     }) });
   });
   await page.goto("/operator/");

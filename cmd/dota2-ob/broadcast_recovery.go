@@ -23,10 +23,27 @@ type observationResolver struct {
 	sessionID string
 	lineage   contracts.PolicyLineageManifestV2
 	previous  *contracts.LiveObservationV1
+	file      *os.File
+	scanner   *bufio.Scanner
+	sequence  uint64
+}
+
+func newObservationResolver(rawPath, sessionID string, lineage contracts.PolicyLineageManifestV2) *observationResolver {
+	return &observationResolver{rawPath: rawPath, sessionID: sessionID, lineage: lineage}
+}
+
+func (r *observationResolver) Close() error {
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	r.scanner = nil
+	return err
 }
 
 func (r *observationResolver) resolve(commit contracts.PolicyCommitV2) ([]contracts.InsightCandidateV1, error) {
-	record, err := readCommittedRecord(r.rawPath, r.sessionID, commit.ObservationSequence)
+	record, err := r.readCommittedRecord(commit.ObservationSequence)
 	if err != nil {
 		return nil, err
 	}
@@ -54,8 +71,8 @@ func (r *observationResolver) resolve(commit contracts.PolicyCommitV2) ([]contra
 	return candidates, nil
 }
 
-func newProductionReplayVerifier(rawPath, sessionID string, lineage contracts.PolicyLineageManifestV2, config policy.Config) commitlog.ReplayVerifierV2 {
-	resolver := &observationResolver{rawPath: rawPath, sessionID: sessionID, lineage: lineage}
+func newProductionReplayVerifier(rawPath, sessionID string, lineage contracts.PolicyLineageManifestV2, config policy.Config) (commitlog.ReplayVerifierV2, *observationResolver) {
+	resolver := newObservationResolver(rawPath, sessionID, lineage)
 	engine := policy.New(sessionID, config)
 	staged := make(map[uint64][]contracts.InsightCandidateV1)
 	return commitlog.ReplayVerifierV2{
@@ -72,7 +89,7 @@ func newProductionReplayVerifier(rawPath, sessionID string, lineage contracts.Po
 			delete(staged, commit.CommitSequence)
 			return engine.ReplayCommit(commit, candidates)
 		},
-	}
+	}, resolver
 }
 
 func verifyCommittedCommand(commit contracts.PolicyCommitV2) error {
@@ -82,24 +99,30 @@ func verifyCommittedCommand(commit contracts.PolicyCommitV2) error {
 	return nil
 }
 
-func readCommittedRecord(path, sessionID string, sequence uint64) (*session.Record, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func (r *observationResolver) readCommittedRecord(sequence uint64) (*session.Record, error) {
+	if sequence <= r.sequence {
+		return nil, errors.New("committed observation sequence is not ordered")
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), maximumPersistedRecordBytes)
-	for scanner.Scan() {
-		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
+	if r.scanner == nil {
+		file, err := os.Open(r.rawPath)
+		if err != nil {
+			return nil, err
+		}
+		r.file = file
+		r.scanner = bufio.NewScanner(file)
+		r.scanner.Buffer(make([]byte, 64<<10), maximumPersistedRecordBytes)
+	}
+	for r.scanner.Scan() {
+		decoder := json.NewDecoder(bytes.NewReader(r.scanner.Bytes()))
 		decoder.UseNumber()
 		var record session.Record
 		if err := decoder.Decode(&record); err != nil {
 			return nil, err
 		}
-		if record.SessionID != sessionID || record.Sequence == 0 {
+		if record.SessionID != r.sessionID || record.Sequence == 0 || record.Sequence <= r.sequence {
 			return nil, errors.New("persisted record identity mismatch")
 		}
+		r.sequence = record.Sequence
 		if record.Sequence == sequence {
 			return &record, nil
 		}
@@ -107,7 +130,7 @@ func readCommittedRecord(path, sessionID string, sequence uint64) (*session.Reco
 			break
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err := r.scanner.Err(); err != nil {
 		return nil, err
 	}
 	return nil, fmt.Errorf("committed record %d unavailable", sequence)

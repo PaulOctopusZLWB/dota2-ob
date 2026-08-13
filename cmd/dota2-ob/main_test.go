@@ -292,8 +292,13 @@ func TestRunMissingLineageDisablesDeliveryWithoutBlockingRawCapture(t *testing.T
 	}
 	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
 		product := server.(*pairedHTTPServer)
-		if product.delivery != nil || product.deliveryListener != nil {
-			t.Fatal("misconfigured product exposed delivery endpoints")
+		if product.delivery == nil || product.deliveryListener == nil {
+			t.Fatal("misconfigured product removed the fail-closed delivery surface")
+		}
+		overlay := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(overlay, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+		if overlay.Code != http.StatusOK || !strings.Contains(overlay.Body.String(), `"visibility":"hidden"`) || strings.Contains(overlay.Body.String(), `"claim"`) {
+			t.Fatalf("fail-closed overlay status=%d body=%s", overlay.Code, overlay.Body.String())
 		}
 		request := httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`))
 		response := httptest.NewRecorder()
@@ -390,6 +395,11 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 	first := newDeps()
 	first.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
 		product := server.(*pairedHTTPServer)
+		gsiResponse := httptest.NewRecorder()
+		product.capture.Handler.ServeHTTP(gsiResponse, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`)))
+		if gsiResponse.Code != http.StatusOK {
+			t.Fatalf("first GSI status=%d body=%s", gsiResponse.Code, gsiResponse.Body.String())
+		}
 		command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "restart-hide", SessionID: sessionID, Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: 0, PolicyTimeMS: 10_000}
 		body, _ := json.Marshal(command)
 		request := httptest.NewRequest(http.MethodPost, "/v1/operator/commands", bytes.NewReader(body))
@@ -409,6 +419,7 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 	if code := runWithDependencies(args, &firstOutput, first); code != 0 {
 		t.Fatalf("first exit=%d output=%q", code, firstOutput.String())
 	}
+	policyBytesBeforeRestart := policyLogBytes(t, filepath.Join(root, sessionID))
 
 	second := newDeps()
 	second.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
@@ -423,6 +434,9 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 			t.Fatalf("recovered status=%d state=%#v decode=%v", response.Code, state, err)
 		}
 		waiter.Wait()
+		if policyBytesAfterRestart := policyLogBytes(t, filepath.Join(root, sessionID)); policyBytesAfterRestart != policyBytesBeforeRestart {
+			t.Fatalf("ordinary product restart duplicated policy log: before=%d after=%d", policyBytesBeforeRestart, policyBytesAfterRestart)
+		}
 		return appender.Close()
 	}
 	var secondOutput bytes.Buffer

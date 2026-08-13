@@ -151,8 +151,6 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 			})
 		}
 		if lineageErr != nil {
-			_ = deliveryListener.Close()
-			deliveryListener = nil
 			logger.Printf("broadcast_policy_config_failed")
 		}
 	}
@@ -190,10 +188,20 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	var deliveryServer *http.Server
 	if deliveryListener != nil {
-		gateway, gatewayErr := delivery.NewGateway(delivery.Config{
-			BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
-			Commands: broadcastCommandPort{broadcast}, Operator: broadcastOperatorPort{broadcast}, Overlay: broadcastOverlayPort{broadcast}, ReadAsset: webassets.ReadAsset, Now: time.Now,
-		})
+		var ports broadcastPorts
+		if broadcast != nil {
+			ports = broadcast
+		} else {
+			ports, err = newFailClosedBroadcastPorts(store.SessionID(), time.Now().UTC().UnixMilli())
+		}
+		var gateway http.Handler
+		gatewayErr := err
+		if gatewayErr == nil {
+			gateway, gatewayErr = delivery.NewGateway(delivery.Config{
+				BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
+				Commands: broadcastCommandPort{ports}, Operator: broadcastOperatorPort{ports}, Overlay: broadcastOverlayPort{ports}, ReadAsset: webassets.ReadAsset, Now: time.Now,
+			})
+		}
 		if gatewayErr != nil {
 			_ = deliveryListener.Close()
 			deliveryListener = nil

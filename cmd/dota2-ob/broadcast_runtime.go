@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"sync"
@@ -41,11 +43,7 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	if config.Lineage.Validate() != nil || config.Lineage.SessionID != config.SessionID ||
-		config.Lineage.Config != insight.ConfigArtifact(insight.DefaultConfig()) ||
-		config.Lineage.Rules != insight.RulesArtifact() ||
-		config.Lineage.Catalog.Version != presentation.CatalogVersion() ||
-		config.Lineage.Terminology.Version != presentation.TerminologyVersion() {
+	if !matchesProductLineage(config.Lineage, config.SessionID) {
 		return nil, errors.New("broadcast lineage configuration mismatch")
 	}
 	policyConfig := policy.DefaultConfig()
@@ -53,18 +51,29 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 	policyConfig.CandidateConfigVersion = config.Lineage.Config.Version
 	policyConfig.CandidateConfigArtifact = config.Lineage.Config
 	policyConfig.CandidateRulesArtifact = config.Lineage.Rules
-	verifier := commitlog.WithV2ReplayVerifier(newProductionReplayVerifier(config.RawPath, config.SessionID, config.Lineage, policyConfig))
+	replayVerifier, verificationResolver := newProductionReplayVerifier(config.RawPath, config.SessionID, config.Lineage, policyConfig)
+	verifier := commitlog.WithV2ReplayVerifier(replayVerifier)
 	storeOptions := append([]commitlog.V2Option(nil), config.StoreOptions...)
 	storeOptions = append(storeOptions, verifier)
 	store, _, err := commitlog.OpenV2(config.DataRoot, config.SessionID, config.Lineage, storeOptions...)
+	verificationCloseErr := verificationResolver.Close()
 	if err != nil {
 		return nil, err
 	}
-	resolver := &observationResolver{rawPath: config.RawPath, sessionID: config.SessionID, lineage: config.Lineage}
+	if verificationCloseErr != nil {
+		_ = store.Close()
+		return nil, verificationCloseErr
+	}
+	resolver := newObservationResolver(config.RawPath, config.SessionID, config.Lineage)
 	app, err := policyapp.Recover(store, config.SessionID, config.Lineage, policyConfig, resolver.resolve)
+	resolverCloseErr := resolver.Close()
 	if err != nil {
 		_ = store.Close()
 		return nil, err
+	}
+	if resolverCloseErr != nil {
+		_ = store.Close()
+		return nil, resolverCloseErr
 	}
 	nowMS := config.Now().UTC().UnixMilli()
 	hidden, err := presentation.Hidden(config.SessionID, nowMS, nowMS+overlayFreshness.Milliseconds(), "waiting_for_policy_decision")
@@ -73,6 +82,35 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 		return nil, err
 	}
 	return &broadcastRuntime{app: app, store: store, now: config.Now, lineage: config.Lineage, previous: resolver.previous, overlay: hidden}, nil
+}
+
+func matchesProductLineage(lineage contracts.PolicyLineageManifestV2, sessionID string) bool {
+	expected := map[string]contracts.PolicyArtifactIdentityV2{
+		"raw_record_schema":              productArtifact("session_record.v2"),
+		"raw_record_framing":             productArtifact("jsonl.v1"),
+		"raw_payload_schema":             productArtifact("dota2_gsi.v1"),
+		"live_observation_schema":        productArtifact(contracts.LiveObservationSchemaV1),
+		"projection_mapping":             productArtifact("gsi_normalized.v1"),
+		"catalog":                        productArtifact(presentation.CatalogVersion()),
+		"terminology":                    productArtifact(presentation.TerminologyVersion()),
+		"localization_parameter_mapping": productArtifact("localization_parameter_mapping.v1"),
+		"engine_build":                   productArtifact("dota2-ob.product.v1"),
+	}
+	return lineage.Validate() == nil && lineage.SessionID == sessionID &&
+		lineage.RawRecordSchema == expected["raw_record_schema"] &&
+		lineage.RawRecordFraming == expected["raw_record_framing"] &&
+		lineage.RawPayloadSchema == expected["raw_payload_schema"] &&
+		lineage.LiveObservationSchema == expected["live_observation_schema"] &&
+		lineage.ProjectionMapping == expected["projection_mapping"] &&
+		lineage.Rules == insight.RulesArtifact() && lineage.Config == insight.ConfigArtifact(insight.DefaultConfig()) &&
+		lineage.Catalog == expected["catalog"] && lineage.Terminology == expected["terminology"] &&
+		lineage.LocalizationParameterMapping == expected["localization_parameter_mapping"] &&
+		lineage.EngineBuild == expected["engine_build"]
+}
+
+func productArtifact(version string) contracts.PolicyArtifactIdentityV2 {
+	digest := sha256.Sum256([]byte(version))
+	return contracts.PolicyArtifactIdentityV2{Version: version, ContentSHA256: hex.EncodeToString(digest[:])}
 }
 
 func (r *broadcastRuntime) Close() error {
@@ -94,6 +132,11 @@ func (r *broadcastRuntime) applyObservation(ctx context.Context, observation con
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if observation.Evidence.Sequence <= r.app.State().LastObservationSequence {
+		copyObservation := observation
+		r.previous = &copyObservation
+		return nil
+	}
 	policyTimeMS := r.now().UTC().UnixMilli()
 	candidates := insight.Evaluate(insight.Input{
 		Observation: observation, Previous: r.previous, Lineage: &r.lineage, PolicyTimeMS: policyTimeMS,
@@ -126,6 +169,7 @@ func (r *broadcastRuntime) execute(ctx context.Context, command contracts.Operat
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	duplicate := hasCommandResult(r.app.State().CommandResults, command.CommandID)
 	commit, err := r.app.ApplyCommand(command)
 	if err != nil {
 		if !errors.Is(err, contracts.ErrSessionCommandLimit) && !errors.Is(err, contracts.ErrPolicyIdentifierLimit) && !errors.Is(err, contracts.ErrMalformedCommand) {
@@ -137,8 +181,20 @@ func (r *broadcastRuntime) execute(ctx context.Context, command contracts.Operat
 		r.hideLocked("invalid_policy_result")
 		return contracts.OperatorCommandResultV1{}, errors.New("committed command result missing")
 	}
+	if duplicate {
+		return *commit.CommandResult, nil
+	}
 	r.publishLocked(commit)
 	return *commit.CommandResult, nil
+}
+
+func hasCommandResult(results []contracts.PolicyCommandResultRefV2, commandID string) bool {
+	for _, result := range results {
+		if result.CommandID == commandID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *broadcastRuntime) publishLocked(commit contracts.PolicyCommitV2) {

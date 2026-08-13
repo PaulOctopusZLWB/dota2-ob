@@ -11,14 +11,49 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/delivery"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/presentation"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
 const policyProjectionSubsystem = "broadcast_policy"
 
-type broadcastCommandPort struct{ runtime *broadcastRuntime }
-type broadcastOperatorPort struct{ runtime *broadcastRuntime }
-type broadcastOverlayPort struct{ runtime *broadcastRuntime }
+type broadcastPorts interface {
+	execute(context.Context, contracts.OperatorCommandV1) (contracts.OperatorCommandResultV1, error)
+	operatorState(context.Context) (delivery.OperatorState, error)
+	overlayState(context.Context) (contracts.OverlayStateV1, error)
+}
+
+type broadcastCommandPort struct{ runtime broadcastPorts }
+type broadcastOperatorPort struct{ runtime broadcastPorts }
+type broadcastOverlayPort struct{ runtime broadcastPorts }
+
+type failClosedBroadcastPorts struct {
+	operator delivery.OperatorState
+	overlay  contracts.OverlayStateV1
+}
+
+func newFailClosedBroadcastPorts(sessionID string, nowMS int64) (*failClosedBroadcastPorts, error) {
+	overlay, err := presentation.Hidden(sessionID, nowMS, nowMS+overlayFreshness.Milliseconds(), "policy_unconfigured")
+	if err != nil {
+		return nil, err
+	}
+	return &failClosedBroadcastPorts{
+		operator: delivery.OperatorState{SchemaVersion: "operator_state.v1", SessionID: sessionID, Previews: []delivery.OperatorPreview{}},
+		overlay:  overlay,
+	}, nil
+}
+
+func (p *failClosedBroadcastPorts) execute(context.Context, contracts.OperatorCommandV1) (contracts.OperatorCommandResultV1, error) {
+	return contracts.OperatorCommandResultV1{}, errors.New("broadcast policy is not configured")
+}
+
+func (p *failClosedBroadcastPorts) operatorState(context.Context) (delivery.OperatorState, error) {
+	return p.operator, nil
+}
+
+func (p *failClosedBroadcastPorts) overlayState(context.Context) (contracts.OverlayStateV1, error) {
+	return cloneOverlay(p.overlay)
+}
 
 func (p broadcastCommandPort) Execute(ctx context.Context, command contracts.OperatorCommandV1) (contracts.OperatorCommandResultV1, error) {
 	return p.runtime.execute(ctx, command)

@@ -130,6 +130,24 @@ func TestBroadcastRuntimeCommandsMutateOnlyPolicyAndPublishCommittedOverlay(t *t
 	if overlay.Visibility != "visible" || overlay.Claim == nil {
 		t.Fatalf("cleared overlay=%#v", overlay)
 	}
+	duplicateHide, err := runtime.execute(context.Background(), command("hide", contracts.ActionEmergencyHide, "", 4, 10_006))
+	if err != nil || duplicateHide.Status != contracts.CommandAccepted {
+		t.Fatalf("duplicate hide=%#v err=%v", duplicateHide, err)
+	}
+	overlay, _ = runtime.overlayState(context.Background())
+	if overlay.Visibility != "visible" || overlay.Claim == nil {
+		t.Fatalf("old duplicate command changed current publication: %#v", overlay)
+	}
+}
+
+func TestBroadcastRuntimeRejectsSubstitutedLocalLineageArtifact(t *testing.T) {
+	lineage := testLineage("substituted-lineage")
+	lineage.Catalog.ContentSHA256 = strings.Repeat("f", 64)
+	if _, err := newBroadcastRuntime(broadcastConfig{
+		DataRoot: t.TempDir(), SessionID: lineage.SessionID, RawPath: filepath.Join(t.TempDir(), "raw.jsonl"), Lineage: lineage,
+	}); err == nil {
+		t.Fatal("substituted local catalog content hash was accepted")
+	}
 }
 
 func TestBroadcastRuntimeKeepsOperatorControlForUnrenderableCandidate(t *testing.T) {
@@ -245,6 +263,63 @@ func TestBroadcastRuntimeRecoversLineageBoundObservationFromRawSession(t *testin
 	if state := restarted.app.State(); state.LastObservationSequence != 1 || restarted.app.StateHash() != wantHash {
 		t.Fatalf("recovered observation state=%#v hash=%s want=%s", state, restarted.app.StateHash(), wantHash)
 	}
+	before := policyLogBytes(t, filepath.Join(root, sessionID))
+	if err := restarted.applyObservation(context.Background(), observation); err != nil {
+		t.Fatal(err)
+	}
+	if after := policyLogBytes(t, filepath.Join(root, sessionID)); after != before {
+		t.Fatalf("replayed raw observation appended policy bytes: before=%d after=%d", before, after)
+	}
+}
+
+func TestObservationResolverStreamsRawSessionOnce(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	root := t.TempDir()
+	const sessionID = "streaming-recovery"
+	store, err := session.NewStore(root, session.WithSessionID(sessionID), session.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]*session.Record, 0, 2)
+	for range 2 {
+		record, appendErr := store.Append([]byte(`{}`))
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		records = append(records, record)
+		now = now.Add(time.Millisecond)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rawPath := filepath.Join(root, sessionID, "raw.jsonl")
+	resolver := newObservationResolver(rawPath, sessionID, testLineage(sessionID))
+	defer resolver.Close()
+	commits := make([]contracts.PolicyCommitV2, 0, 2)
+	for index, record := range records {
+		observation, mapErr := capture.MapLiveObservationV1(record)
+		if mapErr != nil {
+			t.Fatal(mapErr)
+		}
+		liveHash, hashErr := contracts.CanonicalSHA256(observation)
+		if hashErr != nil {
+			t.Fatal(hashErr)
+		}
+		commits = append(commits, contracts.PolicyCommitV2{
+			ObservationSequence: uint64(index + 1), ObservationEvidence: &observation.Evidence,
+			RawRecordSHA256: observation.Evidence.RawPayloadSHA256, LiveObservationSHA256: liveHash,
+			ResultingPolicyTimeMS: observation.Evidence.ReceiveTime.UnixMilli(),
+		})
+	}
+	if _, err := resolver.resolve(commits[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(rawPath, rawPath+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.resolve(commits[1]); err != nil {
+		t.Fatalf("ordered resolver reopened raw session instead of streaming: %v", err)
+	}
 }
 
 func TestBroadcastRuntimeFailsClosedOnCommitFailureAndStaleOutput(t *testing.T) {
@@ -343,8 +418,28 @@ func testLineage(sessionID string) contracts.PolicyLineageManifestV2 {
 		HistoricalSnapshotID: artifact("history_unavailable.v1").ContentSHA256, HistoricalSnapshotSHA256: artifact("history_unavailable.v1").ContentSHA256,
 		EligibleBaselineSHA256: []string{}, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(config),
 		Catalog: artifact(presentation.CatalogVersion()), Terminology: artifact(presentation.TerminologyVersion()),
-		LocalizationParameterMapping: artifact("localization_parameter_mapping.v1"), EngineBuild: artifact("dota2-ob.test"),
+		LocalizationParameterMapping: artifact("localization_parameter_mapping.v1"), EngineBuild: artifact("dota2-ob.product.v1"),
 	}
+}
+
+func policyLogBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".pcl2") {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		total += info.Size()
+	}
+	return total
 }
 
 func writeTestLineage(t *testing.T, path string, lineage contracts.PolicyLineageManifestV2) {

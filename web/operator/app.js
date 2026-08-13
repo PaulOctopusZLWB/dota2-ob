@@ -224,7 +224,7 @@
       showResult(body, "accepted");
       return;
     }
-    if (body.status === "rejected" && body.reason === "revision_conflict") {
+    if (body.status === "rejected" && body.reason === "stale_revision") {
       clearState();
       if (!await loadState(epoch, body.resulting_revision, command.session_id)) return;
       showResult(body, "rejected");
