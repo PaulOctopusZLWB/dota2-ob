@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
@@ -24,8 +26,10 @@ type observationResolver struct {
 	lineage   contracts.PolicyLineageManifestV2
 	previous  *contracts.LiveObservationV1
 	file      *os.File
-	scanner   *bufio.Scanner
-	sequence  uint64
+	index     *os.File
+	indexPath string
+	rawSize   int64
+	maximum   uint64
 }
 
 func newObservationResolver(rawPath, sessionID string, lineage contracts.PolicyLineageManifestV2) *observationResolver {
@@ -33,13 +37,22 @@ func newObservationResolver(rawPath, sessionID string, lineage contracts.PolicyL
 }
 
 func (r *observationResolver) Close() error {
-	if r.file == nil {
-		return nil
+	var errs []error
+	if r.file != nil {
+		errs = append(errs, r.file.Close())
+		r.file = nil
 	}
-	err := r.file.Close()
-	r.file = nil
-	r.scanner = nil
-	return err
+	if r.index != nil {
+		errs = append(errs, r.index.Close())
+		r.index = nil
+	}
+	if r.indexPath != "" {
+		if err := os.Remove(r.indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+		r.indexPath = ""
+	}
+	return errors.Join(errs...)
 }
 
 func (r *observationResolver) resolve(commit contracts.PolicyCommitV2) ([]contracts.InsightCandidateV1, error) {
@@ -99,41 +112,130 @@ func verifyCommittedCommand(commit contracts.PolicyCommitV2) error {
 	return nil
 }
 
-func (r *observationResolver) readCommittedRecord(sequence uint64) (*session.Record, error) {
-	if sequence <= r.sequence {
-		return nil, errors.New("committed observation sequence is not ordered")
+func recoverProductionApplication(store *commitlog.StoreV2, sessionID string, lineage contracts.PolicyLineageManifestV2, config policy.Config, resolver *observationResolver) (*policy.Application, error) {
+	engine := policy.New(sessionID, config)
+	err := store.VisitAll(func(committed commitlog.CommittedV2) error {
+		var candidates []contracts.InsightCandidateV1
+		if committed.Commit.ObservationEvidence != nil {
+			var err error
+			candidates, err = resolver.resolve(committed.Commit)
+			if err != nil {
+				return err
+			}
+		}
+		return engine.ReplayCommit(committed.Commit, candidates)
+	})
+	if err != nil {
+		return nil, err
 	}
-	if r.scanner == nil {
-		file, err := os.Open(r.rawPath)
+	return policy.NewBoundApplication(engine, store, lineage)
+}
+
+func (r *observationResolver) readCommittedRecord(sequence uint64) (*session.Record, error) {
+	if sequence == 0 {
+		return nil, errors.New("committed observation sequence is invalid")
+	}
+	if err := r.ensureIndex(); err != nil {
+		return nil, err
+	}
+	if sequence > r.maximum {
+		return nil, fmt.Errorf("committed record %d unavailable", sequence)
+	}
+	offset, err := r.indexOffset(sequence)
+	if err != nil {
+		return nil, err
+	}
+	end := r.rawSize
+	if sequence < r.maximum {
+		end, err = r.indexOffset(sequence + 1)
 		if err != nil {
 			return nil, err
 		}
-		r.file = file
-		r.scanner = bufio.NewScanner(file)
-		r.scanner.Buffer(make([]byte, 64<<10), maximumPersistedRecordBytes)
 	}
-	for r.scanner.Scan() {
-		decoder := json.NewDecoder(bytes.NewReader(r.scanner.Bytes()))
+	if end <= offset || end-offset > maximumPersistedRecordBytes {
+		return nil, errors.New("persisted record frame is invalid")
+	}
+	payload := make([]byte, end-offset)
+	if _, err := r.file.ReadAt(payload, offset); err != nil {
+		return nil, err
+	}
+	payload = bytes.TrimSuffix(payload, []byte{'\n'})
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var record session.Record
+	if err := decoder.Decode(&record); err != nil {
+		return nil, err
+	}
+	if record.SessionID != r.sessionID || record.Sequence != sequence {
+		return nil, errors.New("persisted record identity mismatch")
+	}
+	return &record, nil
+}
+
+func (r *observationResolver) ensureIndex() (resultErr error) {
+	if r.index != nil {
+		return nil
+	}
+	raw, err := os.Open(r.rawPath)
+	if err != nil {
+		return err
+	}
+	index, err := os.CreateTemp("", "dota2-ob-policy-raw-index-*")
+	if err != nil {
+		_ = raw.Close()
+		return err
+	}
+	indexPath := index.Name()
+	defer func() {
+		if resultErr != nil {
+			_ = raw.Close()
+			_ = index.Close()
+			_ = os.Remove(indexPath)
+		}
+	}()
+	scanner := bufio.NewScanner(raw)
+	scanner.Buffer(make([]byte, 64<<10), maximumPersistedRecordBytes)
+	var offset int64
+	var sequence uint64
+	for scanner.Scan() {
+		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
 		decoder.UseNumber()
 		var record session.Record
 		if err := decoder.Decode(&record); err != nil {
-			return nil, err
+			return err
 		}
-		if record.SessionID != r.sessionID || record.Sequence == 0 || record.Sequence <= r.sequence {
-			return nil, errors.New("persisted record identity mismatch")
+		sequence++
+		if record.SessionID != r.sessionID || record.Sequence != sequence {
+			return errors.New("persisted record identity mismatch")
 		}
-		r.sequence = record.Sequence
-		if record.Sequence == sequence {
-			return &record, nil
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], uint64(offset))
+		if _, err := index.Write(encoded[:]); err != nil {
+			return err
 		}
-		if record.Sequence > sequence {
-			break
-		}
+		offset += int64(len(scanner.Bytes()) + 1)
 	}
-	if err := r.scanner.Err(); err != nil {
-		return nil, err
+	if err := scanner.Err(); err != nil {
+		return err
 	}
-	return nil, fmt.Errorf("committed record %d unavailable", sequence)
+	info, err := raw.Stat()
+	if err != nil {
+		return err
+	}
+	r.file, r.index, r.indexPath = raw, index, indexPath
+	r.rawSize, r.maximum = info.Size(), sequence
+	return nil
+}
+
+func (r *observationResolver) indexOffset(sequence uint64) (int64, error) {
+	var encoded [8]byte
+	if _, err := r.index.ReadAt(encoded[:], int64(sequence-1)*int64(len(encoded))); err != nil {
+		if errors.Is(err, io.EOF) {
+			return 0, fmt.Errorf("committed record %d unavailable", sequence)
+		}
+		return 0, err
+	}
+	return int64(binary.BigEndian.Uint64(encoded[:])), nil
 }
 
 func canonicalEqual(left, right any) bool {

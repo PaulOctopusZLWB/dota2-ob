@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"sort"
 	"sync"
@@ -14,7 +12,6 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
-	"github.com/PaulOctopusZLWB/dota2-ob/internal/policyapp"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/presentation"
 )
 
@@ -65,7 +62,7 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 		return nil, verificationCloseErr
 	}
 	resolver := newObservationResolver(config.RawPath, config.SessionID, config.Lineage)
-	app, err := policyapp.Recover(store, config.SessionID, config.Lineage, policyConfig, resolver.resolve)
+	app, err := recoverProductionApplication(store, config.SessionID, config.Lineage, policyConfig, resolver)
 	resolverCloseErr := resolver.Close()
 	if err != nil {
 		_ = store.Close()
@@ -82,35 +79,6 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 		return nil, err
 	}
 	return &broadcastRuntime{app: app, store: store, now: config.Now, lineage: config.Lineage, previous: resolver.previous, overlay: hidden}, nil
-}
-
-func matchesProductLineage(lineage contracts.PolicyLineageManifestV2, sessionID string) bool {
-	expected := map[string]contracts.PolicyArtifactIdentityV2{
-		"raw_record_schema":              productArtifact("session_record.v2"),
-		"raw_record_framing":             productArtifact("jsonl.v1"),
-		"raw_payload_schema":             productArtifact("dota2_gsi.v1"),
-		"live_observation_schema":        productArtifact(contracts.LiveObservationSchemaV1),
-		"projection_mapping":             productArtifact("gsi_normalized.v1"),
-		"catalog":                        productArtifact(presentation.CatalogVersion()),
-		"terminology":                    productArtifact(presentation.TerminologyVersion()),
-		"localization_parameter_mapping": productArtifact("localization_parameter_mapping.v1"),
-		"engine_build":                   productArtifact("dota2-ob.product.v1"),
-	}
-	return lineage.Validate() == nil && lineage.SessionID == sessionID &&
-		lineage.RawRecordSchema == expected["raw_record_schema"] &&
-		lineage.RawRecordFraming == expected["raw_record_framing"] &&
-		lineage.RawPayloadSchema == expected["raw_payload_schema"] &&
-		lineage.LiveObservationSchema == expected["live_observation_schema"] &&
-		lineage.ProjectionMapping == expected["projection_mapping"] &&
-		lineage.Rules == insight.RulesArtifact() && lineage.Config == insight.ConfigArtifact(insight.DefaultConfig()) &&
-		lineage.Catalog == expected["catalog"] && lineage.Terminology == expected["terminology"] &&
-		lineage.LocalizationParameterMapping == expected["localization_parameter_mapping"] &&
-		lineage.EngineBuild == expected["engine_build"]
-}
-
-func productArtifact(version string) contracts.PolicyArtifactIdentityV2 {
-	digest := sha256.Sum256([]byte(version))
-	return contracts.PolicyArtifactIdentityV2{Version: version, ContentSHA256: hex.EncodeToString(digest[:])}
 }
 
 func (r *broadcastRuntime) Close() error {

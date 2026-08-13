@@ -17,7 +17,6 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
-	"github.com/PaulOctopusZLWB/dota2-ob/internal/presentation"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
@@ -147,6 +146,31 @@ func TestBroadcastRuntimeRejectsSubstitutedLocalLineageArtifact(t *testing.T) {
 		DataRoot: t.TempDir(), SessionID: lineage.SessionID, RawPath: filepath.Join(t.TempDir(), "raw.jsonl"), Lineage: lineage,
 	}); err == nil {
 		t.Fatal("substituted local catalog content hash was accepted")
+	}
+}
+
+func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
+	files := map[string]string{
+		"../../internal/session/store.go":            sessionStoreSourceSHA256,
+		"../../internal/gsi/server.go":               gsiServerSourceSHA256,
+		"../../internal/contracts/contracts.go":      contractsSourceSHA256,
+		"../../internal/capture/live_observation.go": liveMappingSourceSHA256,
+		"../../internal/presentation/catalog.go":     presentationCatalogSHA256,
+		"main.go":                                    productMainSourceSHA256,
+		"broadcast_ports.go":                         productPortsSourceSHA256,
+		"broadcast_recovery.go":                      productRecoverySourceSHA256,
+		"broadcast_runtime.go":                       productRuntimeSourceSHA256,
+		"broadcast_lineage.go":                       productLineageSourceSHA256,
+	}
+	for path, want := range files {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(payload)
+		if got := hex.EncodeToString(digest[:]); got != want {
+			t.Errorf("lineage source fingerprint for %s = %s want %s", path, got, want)
+		}
 	}
 }
 
@@ -311,14 +335,88 @@ func TestObservationResolverStreamsRawSessionOnce(t *testing.T) {
 			ResultingPolicyTimeMS: observation.Evidence.ReceiveTime.UnixMilli(),
 		})
 	}
-	if _, err := resolver.resolve(commits[0]); err != nil {
+	if _, err := resolver.resolve(commits[1]); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(rawPath, rawPath+".moved"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.resolve(commits[1]); err != nil {
-		t.Fatalf("ordered resolver reopened raw session instead of streaming: %v", err)
+	for _, commit := range []contracts.PolicyCommitV2{commits[0], commits[1]} {
+		if _, err := resolver.resolve(commit); err != nil {
+			t.Fatalf("indexed resolver rejected out-of-order or repeated observation: %v", err)
+		}
+	}
+}
+
+func TestBroadcastRuntimeRecoversDeltaObservationAfterValidCheckpoint(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	root := t.TempDir()
+	const sessionID = "checkpoint-delta"
+	rawStore, err := session.NewStore(root, session.WithSessionID(sessionID), session.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRecord, err := rawStore.Append([]byte(`{"items":{"radiant":{"player0":{"slot0":{"name":"item_branches"}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Millisecond)
+	secondRecord, err := rawStore.Append([]byte(`{"items":{"radiant":{"player0":{"slot0":{"name":"item_blink"}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rawStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lineage := testLineage(sessionID)
+	config := broadcastConfig{DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"), Lineage: lineage, Now: func() time.Time { return now }}
+	runtime, err := newBroadcastRuntime(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstObservation, err := capture.MapLiveObservationV1(firstRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCandidates := insight.Evaluate(insight.Input{Observation: firstObservation, Lineage: &lineage, PolicyTimeMS: firstObservation.Evidence.ReceiveTime.UnixMilli()}, insight.DefaultConfig())
+	firstLiveHash, _ := contracts.CanonicalSHA256(firstObservation)
+	firstCommit, err := runtime.app.EvaluateObservation(firstObservation.Evidence.Sequence, firstObservation.Evidence.RawPayloadSHA256, firstLiveHash, firstObservation.Evidence, firstCandidates, firstObservation.Evidence.ReceiveTime.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := runtime.app.State()
+	commitHash, _ := contracts.CanonicalSHA256(firstCommit)
+	checkpoint := contracts.PolicyCheckpointV2{
+		SchemaVersion: contracts.PolicyCheckpointSchemaV2, LineageManifestID: lineage.MustContentID(), LineageManifestSHA256: lineage.MustContentID(),
+		SessionID: sessionID, CommitSequence: firstCommit.CommitSequence, ReferencedCommitSHA256: commitHash,
+		LastObservationSequence: state.LastObservationSequence, PolicyRevision: state.PolicyRevision, LastPolicyTimeMS: state.LastPolicyTimeMS,
+		StateHash: runtime.app.StateHash(), CreatedTimeMS: state.LastPolicyTimeMS,
+		Preview: state.Preview, DisabledRuleIDs: state.DisabledRuleIDs, Cooldowns: state.Cooldowns, Pins: state.Pins,
+		EmergencyHide: state.EmergencyHide, ActivePrimary: state.ActivePrimary, CommandResults: state.CommandResults,
+		CommandLocators: []contracts.PolicyCommandLocatorV2{}, CandidateTombstones: state.CandidateTombstones,
+	}
+	if err := runtime.store.WriteCheckpoint(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	secondObservation, err := capture.MapLiveObservationV1(secondRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCandidates := insight.Evaluate(insight.Input{Observation: secondObservation, Previous: &firstObservation, Lineage: &lineage, PolicyTimeMS: secondObservation.Evidence.ReceiveTime.UnixMilli()}, insight.DefaultConfig())
+	if err := runtime.commitCandidates(secondObservation, secondCandidates, secondObservation.Evidence.ReceiveTime.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	wantHash := runtime.app.StateHash()
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newBroadcastRuntime(config)
+	if err != nil {
+		t.Fatalf("valid checkpoint continuation failed recovery: %v", err)
+	}
+	defer restarted.Close()
+	if restarted.app.StateHash() != wantHash {
+		t.Fatalf("checkpoint continuation hash=%s want=%s", restarted.app.StateHash(), wantHash)
 	}
 }
 
@@ -409,16 +507,17 @@ func testLineage(sessionID string) contracts.PolicyLineageManifestV2 {
 		return contracts.PolicyArtifactIdentityV2{Version: version, ContentSHA256: hex.EncodeToString(digest[:])}
 	}
 	config := insight.DefaultConfig()
+	local := expectedProductLineageArtifacts()
 	return contracts.PolicyLineageManifestV2{
 		SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: sessionID,
-		RawRecordSchema: artifact("session_record.v2"), RawRecordFraming: artifact("jsonl.v1"),
-		RawPayloadSchema: artifact("dota2_gsi.v1"), LiveObservationSchema: artifact(contracts.LiveObservationSchemaV1),
-		ProjectionMapping: artifact("gsi_normalized.v1"),
+		RawRecordSchema: local.rawRecordSchema, RawRecordFraming: local.rawRecordFraming,
+		RawPayloadSchema: local.rawPayloadSchema, LiveObservationSchema: local.liveObservationSchema,
+		ProjectionMapping: local.projectionMapping,
 		TournamentScopeID: artifact("live_only_scope.v1").ContentSHA256, TournamentScopeSHA256: artifact("live_only_scope.v1").ContentSHA256,
 		HistoricalSnapshotID: artifact("history_unavailable.v1").ContentSHA256, HistoricalSnapshotSHA256: artifact("history_unavailable.v1").ContentSHA256,
 		EligibleBaselineSHA256: []string{}, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(config),
-		Catalog: artifact(presentation.CatalogVersion()), Terminology: artifact(presentation.TerminologyVersion()),
-		LocalizationParameterMapping: artifact("localization_parameter_mapping.v1"), EngineBuild: artifact("dota2-ob.product.v1"),
+		Catalog: local.catalog, Terminology: local.terminology,
+		LocalizationParameterMapping: local.localizationMapping, EngineBuild: local.engineBuild,
 	}
 }
 
