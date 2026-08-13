@@ -35,7 +35,7 @@ var ownershipRules = map[string]importRule{
 		internal: []string{"internal/contracts"},
 	},
 	"presentation": {standard: stringSet(), internal: []string{"internal/contracts"}},
-	"obscontrol":   {standard: stringSet(), internal: []string{"internal/contracts"}},
+	"obscontrol":   {standard: stringSet("context", "errors", "net", "net/url", "strconv", "strings"), internal: []string{"internal/contracts"}},
 }
 
 var policyCommitLogRule = importRule{

@@ -16,6 +16,7 @@
   const evidenceKeys = ["record_schema_version","session_id","sequence","receive_time","source","provider_version","raw_payload_sha256"];
   const observedKeys = ["state","value"];
   const claimKeys = ["title","body","asset_key"];
+  const assetGlyphs = Object.freeze({ draft: "选", economy: "金", item: "装", lane: "线", objective: "塔", teamfight: "战" });
   const maxStateBytes = 64 * 1024;
   let nextRequestGeneration = 0;
   let latestSettledGeneration = 0;
@@ -52,7 +53,7 @@
     // The shared contract is wider than the accepted OBS safe-area envelope.
     // Presentation therefore fails closed above the proven 96/180 limits.
     return onlyKeys(state.claim, claimKeys) && plainText(state.claim.title, 96) && plainText(state.claim.body, 180) &&
-      (state.claim.asset_key === "" || /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(state.claim.asset_key)) && state.evidence.length > 0;
+      (state.claim.asset_key === "" || Object.hasOwn(assetGlyphs, state.claim.asset_key)) && state.evidence.length > 0;
   }
   function hide(reason) {
     body.dataset.renderState = "hidden";
@@ -75,14 +76,10 @@
     fields.source.textContent = sources.slice(0, 3).join(" · ") + (sources.length > 3 ? " · …" : "");
     fields.confidence.textContent = state.confidence;
     fields.age.textContent = "实时";
-    fallback.textContent = "析";
+    body.dataset.family = state.claim.asset_key || "neutral";
+    fallback.textContent = assetGlyphs[state.claim.asset_key] || "析";
     image.classList.remove("loaded");
     image.removeAttribute("src");
-    if (state.claim.asset_key) {
-      image.onload = () => image.classList.add("loaded");
-      image.onerror = () => image.classList.remove("loaded");
-      image.src = `/overlay/assets/${state.claim.asset_key}.webp`;
-    }
     body.dataset.renderState = "visible";
     body.dataset.hideReason = "none";
     card.setAttribute("aria-hidden", "false");
@@ -127,6 +124,6 @@
   setInterval(() => {
     if (staleDeadline > 0 && Date.now() > staleDeadline) hide("connection-timeout");
   }, 50);
-  setInterval(refresh, 250);
+  setInterval(refresh, 750);
   refresh();
 })();

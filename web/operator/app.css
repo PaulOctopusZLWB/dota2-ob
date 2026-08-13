@@ -1,16 +1,101 @@
-:root { color-scheme: dark; font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; background:#090d0f; color:#f5f2e9; }
-* { box-sizing:border-box; }
-body { margin:0; min-height:100vh; background:radial-gradient(circle at 80% 0,#24312f 0,transparent 40%),#090d0f; }
-main { width:min(920px,calc(100% - 48px)); margin:0 auto; padding:72px 0; }
-.eyebrow { color:#dfb85a; font-size:12px; font-weight:800; letter-spacing:.24em; }
-h1 { margin:8px 0 34px; font:800 clamp(32px,5vw,58px)/1.1 "Noto Serif CJK SC",serif; }
-.panel { padding:28px; border:1px solid #ffffff26; border-left:4px solid #dfb85a; background:#0d1416e8; box-shadow:0 20px 60px #0008; }
-h2 { margin-top:0; } p { color:#bdb9ae; }
-form { display:grid; gap:18px; }
-label { display:grid; gap:8px; color:#ddd8cc; font-weight:700; }
-input,textarea,button,pre { font:inherit; }
-input,textarea { width:100%; border:1px solid #ffffff30; border-radius:3px; padding:12px; color:#f5f2e9; background:#05090b; }
-textarea { min-height:260px; resize:vertical; font-family:ui-monospace,monospace; line-height:1.55; }
-button { justify-self:start; border:0; padding:12px 22px; color:#15120a; background:#dfb85a; font-weight:900; cursor:pointer; }
-pre { min-height:84px; overflow:auto; padding:16px; border:1px solid #ffffff20; background:#05090b; white-space:pre-wrap; }
-pre[data-state="accepted"] { border-color:#67c996; } pre[data-state="rejected"] { border-color:#df7464; }
+:root {
+  color-scheme: dark;
+  --ink: #e9e5d8;
+  --muted: #8f958f;
+  --panel: #111719;
+  --panel-raised: #171e20;
+  --line: #344043;
+  --brass: #d8b464;
+  --cyan: #83d2cc;
+  --alert: #ff5b4d;
+  --safe: #78c694;
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+  background: #090d0e;
+  color: var(--ink);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    linear-gradient(#ffffff07 1px, transparent 1px),
+    linear-gradient(90deg, #ffffff07 1px, transparent 1px),
+    radial-gradient(circle at 74% -12%, #244546 0, transparent 37%),
+    #090d0e;
+  background-size: 32px 32px, 32px 32px, auto, auto;
+}
+button, input { font: inherit; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.console-shell { width: min(1500px, calc(100% - 64px)); margin: 0 auto; padding: 42px 0 72px; }
+.masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; padding: 0 0 26px; border-bottom: 1px solid var(--line); }
+.eyebrow, .section-index { margin: 0; color: var(--brass); font-size: 11px; font-weight: 900; letter-spacing: .19em; }
+h1 { margin: 6px 0 0; font: 900 clamp(38px, 5vw, 72px)/1 "Noto Serif CJK SC", "Source Han Serif SC", serif; letter-spacing: -.04em; }
+h2, h3, p { margin-top: 0; }
+h2 { margin-bottom: 8px; font-size: 22px; }
+.session-strip { display: flex; align-items: center; gap: 28px; min-width: 410px; padding: 15px 18px; border: 1px solid var(--line); background: #080c0dcc; }
+.session-strip div { display: grid; gap: 4px; min-width: 100px; }
+.session-strip small { color: var(--muted); font-size: 11px; letter-spacing: .12em; }
+.session-strip strong { max-width: 220px; overflow: hidden; color: var(--ink); font-family: ui-monospace, monospace; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.live-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--alert); box-shadow: 0 0 0 5px #ff5b4d18; }
+body[data-connection="online"] .live-dot { background: var(--safe); box-shadow: 0 0 0 5px #78c69418; }
+.connection-panel { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(420px, 1.2fr); gap: 42px; align-items: end; margin: 26px 0; padding: 22px 24px; border-left: 3px solid var(--brass); background: #111719e6; box-shadow: 0 18px 45px #0005; }
+.connection-panel h2 { margin-top: 7px; }
+.connection-panel p:not(.section-index), .emergency p:not(.section-index) { margin-bottom: 0; color: var(--muted); line-height: 1.65; }
+label { display: block; margin-bottom: 8px; color: #c8c9c2; font-size: 13px; font-weight: 800; }
+.field-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+input { width: 100%; min-height: 46px; border: 1px solid var(--line); border-radius: 0; padding: 10px 12px; color: var(--ink); background: #070b0c; }
+.button { min-height: 42px; border: 1px solid transparent; padding: 9px 15px; color: var(--ink); background: transparent; font-weight: 900; cursor: pointer; transition: background 120ms linear, border-color 120ms linear, color 120ms linear, transform 120ms ease; }
+.button:hover:not(:disabled) { transform: translateY(-1px); }
+.button:disabled { cursor: not-allowed; opacity: .38; }
+.primary, .approve { color: #10100d; background: var(--brass); }
+.quiet { border-color: var(--line); background: #0b1011; }
+.reject { border-color: #a14941; color: #ff9c91; }
+.work-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(340px, .65fr); gap: 24px; align-items: start; }
+.candidate-column, .control-column > section { border: 1px solid var(--line); background: #0d1213e8; }
+.candidate-column { min-height: 620px; padding: 24px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.section-heading h2, .control-column h2 { margin: 7px 0 0; }
+.count-badge { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid var(--brass); color: var(--brass); font: 800 18px ui-monospace, monospace; }
+.candidate-list { display: grid; gap: 14px; }
+.empty-state { display: grid; place-items: center; min-height: 460px; border: 1px dashed #344043; color: var(--muted); text-align: center; }
+.empty-state span { display: grid; place-items: center; width: 72px; height: 72px; border: 1px solid var(--line); border-radius: 50%; color: var(--brass); font: 800 20px "Noto Serif CJK SC", serif; }
+.empty-state p { max-width: 260px; }
+.candidate-card { position: relative; overflow: hidden; padding: 20px 20px 18px 26px; border: 1px solid var(--line); background: linear-gradient(115deg, #ffffff09, transparent 42%), var(--panel-raised); }
+.candidate-rail { position: absolute; inset: 0 auto 0 0; width: 4px; background: #293335; }
+.candidate-rail span { display: block; width: 100%; height: 38%; background: var(--cyan); }
+.candidate-card header, .candidate-card footer, .candidate-flags, .candidate-actions, .split-actions { display: flex; align-items: center; }
+.candidate-card header, .candidate-card footer { justify-content: space-between; gap: 16px; }
+.rule-name, .expiry { margin: 0; color: var(--muted); font: 700 11px ui-monospace, monospace; letter-spacing: .08em; }
+.candidate-flags { gap: 7px; }
+.candidate-flags span { padding: 4px 7px; border: 1px solid var(--line); color: #b7c7c3; font-size: 11px; }
+.candidate-card h3 { margin: 22px 0 8px; font: 800 26px/1.28 "Noto Serif CJK SC", "Source Han Serif SC", serif; }
+.claim-body { margin-bottom: 24px; color: #b8bdb8; line-height: 1.7; }
+.candidate-actions { flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.candidate-actions .button { min-height: 36px; padding: 7px 11px; font-size: 12px; }
+.control-column { display: grid; gap: 18px; }
+.control-column > section { padding: 22px; }
+.emergency { border-top: 3px solid var(--alert) !important; background: linear-gradient(150deg, #441b191d, transparent 55%), #0d1213 !important; }
+.emergency-button { width: 100%; margin-top: 20px; border-color: var(--alert); color: #ffd6d2; background: #4b1715; letter-spacing: .08em; }
+body[data-emergency="true"] .emergency-button { border-color: var(--safe); color: #d7f4e0; background: #173923; }
+.rule-panel form { margin-top: 18px; }
+.split-actions { gap: 8px; margin-top: 10px; }
+.split-actions .button { flex: 1; }
+.result-title { margin-bottom: 14px; }
+#result { min-height: 128px; max-height: 280px; margin: 0; overflow: auto; border: 1px solid var(--line); padding: 14px; color: #aeb6b2; background: #070b0c; font: 12px/1.6 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+#result[data-state="accepted"] { border-color: var(--safe); color: #bce4c8; }
+#result[data-state="rejected"] { border-color: var(--alert); color: #ffb1aa; }
+.text-button { width: 100%; margin-top: 8px; color: var(--muted); font-size: 12px; text-decoration: underline; }
+@media (max-width: 1050px) {
+  .console-shell { width: min(100% - 32px, 820px); }
+  .masthead, .connection-panel { align-items: stretch; grid-template-columns: 1fr; }
+  .masthead { display: grid; }
+  .session-strip { min-width: 0; }
+  .work-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .console-shell { width: min(100% - 20px, 560px); padding-top: 24px; }
+  .session-strip, .field-row, .candidate-card footer { display: grid; grid-template-columns: 1fr; }
+  .candidate-actions { justify-content: stretch; }
+  .candidate-actions .button { flex: 1 1 44%; }
+}
+@media (prefers-reduced-motion: reduce) { .button { transition: none; } }

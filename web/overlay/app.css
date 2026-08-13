@@ -1,6 +1,7 @@
+@font-face { font-family:"DOT24 Sans"; src:url("/overlay/fonts/noto-sans-cjk-sc-dot24.woff") format("woff"); font-weight:100 900; font-style:normal; font-display:block; }
 :root {
   color-scheme: dark; background: transparent; color:#f5f2e9; --muted:#bbb8ad; --paper:#090d0ff0; --line:#ffffff2e; --accent:#dfb85a;
-  font-family:"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei",sans-serif;
+  font-family:"DOT24 Sans",sans-serif;
 }
 * { box-sizing:border-box; }
 html,body { width:100%; height:100%; margin:0; overflow: hidden; background: transparent; }
@@ -20,10 +21,16 @@ p,h1 { margin:0; } .kicker { color:var(--accent); font-size:15px; font-weight:80
 .claim { display:grid; grid-template-columns:78px minmax(0,1fr); gap:20px; align-items:center; padding:22px 0 18px; }
 .asset-frame { position:relative; display:grid; place-items:center; width:78px; height:78px; overflow:hidden; border:1px solid var(--accent); border-radius:50%; background:#ffffff0b; }
 #asset-image { position:absolute; inset:0; display:none; width:100%; height:100%; object-fit:cover; } #asset-image.loaded { display:block; }
-#asset-fallback { color:var(--accent); font:700 34px "Noto Serif CJK SC",serif; }
-.copy { min-width:0; } h1 { font:800 clamp(25px,1.6vw,34px)/1.28 "Noto Serif CJK SC",serif; overflow-wrap:anywhere; }
+#asset-fallback { color:var(--accent); font:700 34px "DOT24 Sans",sans-serif; }
+.copy { min-width:0; } h1 { font:800 clamp(25px,1.6vw,34px)/1.28 "DOT24 Sans",sans-serif; overflow-wrap:anywhere; }
 #body-copy { margin-top:8px; color:var(--muted); font-size:clamp(15px,.9vw,18px); line-height:1.62; overflow-wrap:anywhere; }
 footer { padding-top:14px; border-top:1px solid var(--line); } #evidence { font-size:14px; line-height:1.55; overflow-wrap:anywhere; }
 .provenance { margin-top:9px; color:var(--muted); font-size:12px; } .provenance strong { color:var(--accent); }
 @media (max-width: 1600px), (max-height: 900px) { #overlay-card { top:clamp(46px,7vh,84px); right:clamp(42px,4vw,78px); width:clamp(480px,32vw,570px); min-height:252px; padding:22px 24px 20px 30px; } .claim { padding:18px 0 15px; } }
+body[data-family="draft"] { --accent:#d8b464; }
+body[data-family="economy"] { --accent:#f1c75b; }
+body[data-family="item"] { --accent:#b7a4ef; }
+body[data-family="lane"] { --accent:#78c694; }
+body[data-family="objective"] { --accent:#e98368; }
+body[data-family="teamfight"] { --accent:#72bde3; }
 @media (prefers-reduced-motion: reduce) { #overlay-card { transition:none; } }

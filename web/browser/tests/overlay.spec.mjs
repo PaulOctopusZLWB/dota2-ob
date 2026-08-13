@@ -25,7 +25,7 @@ function visibleState(overrides = {}) {
     }],
     confidence: "高置信度",
     source_receive_time: new Date(now - 100).toISOString(),
-    claim: { title: "肉山窗口已经打开", body: "经济领先可转化为下一阶段的地图控制。", asset_key: "roshan" },
+    claim: { title: "肉山窗口已经打开", body: "经济领先可转化为下一阶段的地图控制。", asset_key: "objective" },
     ...overrides
   };
 }
@@ -77,7 +77,7 @@ for (const canvas of canvasSizes) {
   test(`long Chinese copy remains inside the ${canvas.name} safe area`, async ({ page }, testInfo) => {
     await page.setViewportSize(canvas);
     await routeState(page, () => visibleState({
-      claim: { title: "关键装备时间点决定下一轮团战主动权".repeat(4), body: "双方资源分配已经出现明显差异，领先方可以围绕视野、兵线与肉山区域建立连续控制。".repeat(4), asset_key: "missing-local-asset" }
+      claim: { title: "关键装备时间点决定下一轮团战主动权".repeat(4), body: "双方资源分配已经出现明显差异，领先方可以围绕视野、兵线与肉山区域建立连续控制。".repeat(4), asset_key: "item" }
     }));
     await openVisible(page);
     expect(await layout(page)).toEqual({ inside: true, overflow: false, ordered: true, claimVisible: true });
@@ -86,16 +86,11 @@ for (const canvas of canvasSizes) {
   });
 }
 
-test("missing asset preserves geometry and fallback", async ({ page }) => {
-  let assetRequested = false;
-  await page.route("**/overlay/assets/**", async (route) => { assetRequested = true; await route.fulfill({ status: 404, body: "missing" }); });
-  await routeState(page);
-  await openVisible(page);
-  await page.locator("#overlay-card").evaluate((card) => card.getAnimations().forEach((animation) => animation.finish()));
-  const before = await page.locator("#overlay-card").boundingBox();
-  await expect.poll(() => assetRequested).toBe(true);
-  await expect(page.locator("#asset-fallback")).toBeVisible();
-  expect(await page.locator("#overlay-card").boundingBox()).toEqual(before);
+test("missing local asset key fails closed", async ({ page }) => {
+  await routeState(page, () => visibleState({ claim: { title: "不可显示", body: "未知本地素材不能上屏。", asset_key: "missing-local-asset" } }));
+  await page.goto("/overlay/");
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
+  await expect(page.locator("#claim")).toBeHidden();
 });
 
 for (const unsafe of ["malformed", "stale", "hidden", "disconnected"]) {
@@ -214,3 +209,51 @@ test("older delayed response cannot revive a newer unsafe state", async ({ page 
   await page.waitForTimeout(350);
   await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden");
 });
+
+const templateStates = [
+  ["draft", "Ame 的斧王", "一号位英雄池样本为 18 场；仅作当前版本选人背景。"],
+  ["economy", "天辉建立经济领先", "当前已观测经济领先 5000；领先不等同于胜势。"],
+  ["item", "Ame 的闪烁匕首", "关键装备比基准提前 75 秒，下一轮资源交换值得关注。"],
+  ["lane", "夜魇十分钟对线检查点", "相对可比基准偏差 1800 经济；结论仅覆盖已观测状态。"],
+  ["objective", "天辉拿下肉山", "本轮可见资源交换净变化 2200 经济。"],
+  ["teamfight", "夜魇团战资源就绪", "4 名英雄的可见关键资源已就绪；不推断战争迷雾信息。"]
+];
+
+for (const canvas of canvasSizes) {
+  for (const [family, title, body] of templateStates) {
+    test(`${family} template matches the ${canvas.name} visual baseline`, async ({ page }) => {
+      await page.setViewportSize(canvas);
+      await routeState(page, () => visibleState({ claim: { title, body, asset_key: family } }));
+      await openVisible(page);
+      expect(await layout(page)).toEqual({ inside: true, overflow: false, ordered: true, claimVisible: true });
+      await expect(page.locator("body")).toHaveAttribute("data-family", family);
+      await expect(page).toHaveScreenshot(`overlay-${family}-${canvas.name}.png`, { animations: "disabled", caret: "hide", omitBackground: true });
+    });
+  }
+}
+
+for (const canvas of canvasSizes) {
+  for (const unsafe of ["malformed", "stale", "disconnected", "emergency", "out-of-order", "missing-asset"]) {
+    test(`${unsafe} fail-closed frame is empty at ${canvas.name}`, async ({ page }) => {
+      await page.setViewportSize(canvas);
+      if (unsafe === "disconnected") {
+        await page.route("**/v1/overlay/state", (route) => route.abort("connectionfailed"));
+      } else if (unsafe === "malformed") {
+        await routeState(page, () => ({ schema_version: "overlay_state.v1", raw_gsi: {} }));
+      } else if (unsafe === "stale") {
+        await routeState(page, () => visibleState({ stale_deadline_ms: Date.now() - 1 }));
+      } else if (unsafe === "emergency") {
+        await routeState(page, () => visibleState({ visibility: "hidden", health_code: "emergency_hide", claim: null, decision_id: "", evidence: [], confidence: "", source_receive_time: null }));
+      } else if (unsafe === "out-of-order") {
+        let calls = 0;
+        await routeState(page, () => visibleState({ publication_time_ms: calls++ === 0 ? Date.now() : Date.now() - 1_000 }));
+      } else {
+        await routeState(page, () => visibleState({ claim: { title: "素材缺失", body: "必须隐藏。", asset_key: "not-in-catalog" } }));
+      }
+      await page.goto("/overlay/");
+      if (unsafe === "out-of-order") await page.waitForTimeout(350);
+      await expect(page.locator("body")).toHaveAttribute("data-render-state", "hidden", { timeout: 2000 });
+      await expect(page).toHaveScreenshot(`overlay-hidden-${unsafe}-${canvas.name}.png`, { animations: "disabled", caret: "hide", omitBackground: true });
+    });
+  }
+}

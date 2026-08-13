@@ -154,7 +154,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	if deliveryListener != nil {
 		gateway, gatewayErr := delivery.NewGateway(delivery.Config{
 			BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
-			Commands: unavailableCommands{}, Overlay: unavailableOverlay{}, ReadAsset: webassets.ReadAsset, Now: time.Now,
+			Commands: unavailableCommands{}, Operator: unavailableOperatorState{}, Overlay: unavailableOverlay{}, ReadAsset: webassets.ReadAsset, Now: time.Now,
 		})
 		if gatewayErr != nil {
 			_ = deliveryListener.Close()
@@ -238,6 +238,12 @@ type unavailableOverlay struct{}
 
 func (unavailableOverlay) Current(context.Context) (contracts.OverlayStateV1, error) {
 	return contracts.OverlayStateV1{}, errors.New("committed overlay state unavailable")
+}
+
+type unavailableOperatorState struct{}
+
+func (unavailableOperatorState) Current(context.Context) (delivery.OperatorState, error) {
+	return delivery.OperatorState{}, errors.New("committed operator state unavailable")
 }
 
 func newEphemeralToken() (string, error) {

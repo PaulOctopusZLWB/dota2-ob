@@ -17,3 +17,4 @@
 /web/browser/node_modules/
 /web/browser/test-results/
 /web/browser/playwright-report/
+/.dot24-p3-run/

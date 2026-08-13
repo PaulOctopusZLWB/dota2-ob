@@ -9,7 +9,7 @@ const runtimeRoot = createOwnedRuntime();
 const playwright = path.join(path.dirname(fileURLToPath(import.meta.url)), "node_modules", ".bin", "playwright");
 let status = 1;
 try {
-  const result = spawnSync(playwright, ["test"], {
+  const result = spawnSync(playwright, ["test", ...process.argv.slice(2)], {
     env: { ...process.env, DOTA2_OB_BROWSER_RUNTIME: runtimeRoot },
     stdio: "inherit"
   });

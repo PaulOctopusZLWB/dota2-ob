@@ -33,7 +33,7 @@ const (
 	operatorCSPPrefix = "default-src 'none'; connect-src "
 	operatorCSPSuffix = "; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 	overlayCSPPrefix  = "default-src 'none'; connect-src "
-	overlayCSPSuffix  = "; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+	overlayCSPSuffix  = "; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 )
 
 // CommandPort is the narrow policy command/result boundary owned by the policy
@@ -47,10 +47,78 @@ type OverlayPort interface {
 	Current(context.Context) (contracts.OverlayStateV1, error)
 }
 
+// OperatorStatePort supplies a localized, ephemeral operator view. This M3
+// HTTP view is not a persisted cross-track contract and has no mutation
+// capability; every policy change still traverses CommandPort.
+type OperatorStatePort interface {
+	Current(context.Context) (OperatorState, error)
+}
+
+type OperatorPreview struct {
+	CandidateID string                   `json:"candidate_id"`
+	RuleID      string                   `json:"rule_id"`
+	RuleVersion string                   `json:"rule_version"`
+	Confidence  string                   `json:"confidence"`
+	SampleSize  uint64                   `json:"sample_size"`
+	ExpiresAtMS int64                    `json:"expires_at_ms"`
+	Pinned      bool                     `json:"pinned"`
+	Claim       contracts.OverlayClaimV1 `json:"claim"`
+}
+
+type OperatorState struct {
+	SchemaVersion   string            `json:"schema_version"`
+	SessionID       string            `json:"session_id"`
+	PolicyRevision  uint64            `json:"policy_revision"`
+	EmergencyHidden bool              `json:"emergency_hidden"`
+	Previews        []OperatorPreview `json:"previews"`
+}
+
+func (v OperatorState) Validate() error {
+	if v.SchemaVersion != "operator_state.v1" || v.SessionID == "" || len(v.Previews) > contracts.MaxPreviewCandidates {
+		return errors.New("invalid operator state")
+	}
+	previous := ""
+	for _, preview := range v.Previews {
+		if preview.CandidateID == "" || preview.CandidateID <= previous || preview.RuleID == "" || preview.RuleVersion == "" || preview.Confidence == "" || preview.ExpiresAtMS <= 0 ||
+			!safeText(preview.Claim.Title, 160, false) || !safeText(preview.Claim.Body, 1024, true) || !safeAssetKey(preview.Claim.AssetKey) {
+			return errors.New("invalid operator preview")
+		}
+		previous = preview.CandidateID
+	}
+	return nil
+}
+
+func safeText(value string, maximum int, emptyAllowed bool) bool {
+	count := 0
+	for _, r := range value {
+		count++
+		if r == '<' || r == '>' || r <= 0x1f || (r >= 0x7f && r <= 0x9f) || r == 0x061c || r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return false
+		}
+	}
+	return count <= maximum && (emptyAllowed || count > 0)
+}
+
+func safeAssetKey(value string) bool {
+	if value == "" {
+		return true
+	}
+	previousSeparator := true
+	for _, r := range value {
+		separator := r == '.' || r == '_' || r == '-'
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || separator) || (separator && previousSeparator) {
+			return false
+		}
+		previousSeparator = separator
+	}
+	return !previousSeparator
+}
+
 type Config struct {
 	BearerToken   string
 	AllowedOrigin string
 	Commands      CommandPort
+	Operator      OperatorStatePort
 	Overlay       OverlayPort
 	ReadAsset     func(string) ([]byte, error)
 	Now           func() time.Time
@@ -60,6 +128,7 @@ type Gateway struct {
 	token         string
 	allowedOrigin string
 	commands      CommandPort
+	operator      OperatorStatePort
 	overlay       OverlayPort
 	readAsset     func(string) ([]byte, error)
 	now           func() time.Time
@@ -77,7 +146,7 @@ type Rejection struct {
 }
 
 func NewGateway(config Config) (*Gateway, error) {
-	if strings.TrimSpace(config.BearerToken) == "" || !validLoopbackOrigin(config.AllowedOrigin) || config.Commands == nil || config.Overlay == nil || config.ReadAsset == nil {
+	if strings.TrimSpace(config.BearerToken) == "" || !validLoopbackOrigin(config.AllowedOrigin) || config.Commands == nil || config.Operator == nil || config.Overlay == nil || config.ReadAsset == nil {
 		return nil, errors.New("invalid delivery gateway configuration")
 	}
 	if config.Now == nil {
@@ -85,8 +154,8 @@ func NewGateway(config Config) (*Gateway, error) {
 	}
 	return &Gateway{
 		token: config.BearerToken, allowedOrigin: strings.TrimRight(config.AllowedOrigin, "/"),
-		commands: config.Commands, overlay: config.Overlay, readAsset: config.ReadAsset, now: config.Now,
-		operatorCSP: operatorCSPPrefix + strings.TrimRight(config.AllowedOrigin, "/") + "/v1/operator/commands" + operatorCSPSuffix,
+		commands: config.Commands, operator: config.Operator, overlay: config.Overlay, readAsset: config.ReadAsset, now: config.Now,
+		operatorCSP: operatorCSPPrefix + strings.TrimRight(config.AllowedOrigin, "/") + "/v1/operator/commands " + strings.TrimRight(config.AllowedOrigin, "/") + "/v1/operator/state" + operatorCSPSuffix,
 		overlayCSP:  overlayCSPPrefix + strings.TrimRight(config.AllowedOrigin, "/") + "/v1/overlay/state" + overlayCSPSuffix,
 	}, nil
 }
@@ -113,6 +182,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/operator/commands":
 		w.Header().Set("Content-Security-Policy", g.operatorCSP)
 		g.handleCommand(w, r)
+	case r.URL.Path == "/v1/operator/state":
+		w.Header().Set("Content-Security-Policy", g.operatorCSP)
+		g.handleOperatorState(w, r)
 	case r.URL.Path == "/v1/overlay/state":
 		w.Header().Set("Content-Security-Policy", g.overlayCSP)
 		g.handleOverlay(w, r)
@@ -124,6 +196,37 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveAsset(w, r, "overlay")
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (g *Gateway) handleOperatorState(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r.Header.Get("Origin"), g.allowedOrigin) {
+		writeRejection(w, http.StatusForbidden, "origin_rejected")
+		return
+	}
+	if !bearerMatches(r.Header.Get("Authorization"), g.token) {
+		writeRejection(w, http.StatusUnauthorized, "bearer_required")
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeRejection(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	state, err := g.operator.Current(r.Context())
+	if err != nil || state.Validate() != nil {
+		writeRejection(w, http.StatusServiceUnavailable, "operator_state_unavailable")
+		return
+	}
+	encoded, err := contracts.MarshalCanonical(state)
+	if err != nil || len(encoded) > MaxResponseBytes {
+		writeRejection(w, http.StatusServiceUnavailable, "operator_state_unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(encoded)
 	}
 }
 
@@ -284,6 +387,8 @@ func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request, root string
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	case ".css":
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case ".woff":
+		w.Header().Set("Content-Type", "font/woff")
 	default:
 		http.NotFound(w, r)
 		return
@@ -296,7 +401,7 @@ func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request, root string
 }
 
 func allowedAsset(name string) bool {
-	return name == "index.html" || name == "app.js" || name == "app.css"
+	return name == "index.html" || name == "app.js" || name == "app.css" || name == "fonts/noto-sans-cjk-sc-dot24.woff"
 }
 
 func writeRejection(w http.ResponseWriter, status int, reason string) {

@@ -41,6 +41,27 @@ func (p *overlayPort) Current(context.Context) (contracts.OverlayStateV1, error)
 	return p.state, p.err
 }
 
+type operatorStatePort struct {
+	state delivery.OperatorState
+	err   error
+}
+
+func (p *operatorStatePort) Current(context.Context) (delivery.OperatorState, error) {
+	return p.state, p.err
+}
+
+func validOperatorState() delivery.OperatorState {
+	return delivery.OperatorState{
+		SchemaVersion: "operator_state.v1", SessionID: "session-1", PolicyRevision: 4,
+		EmergencyHidden: false,
+		Previews: []delivery.OperatorPreview{{
+			CandidateID: "candidate-1", RuleID: "lane-checkpoint", RuleVersion: "lane-checkpoint.v1",
+			Confidence: "已观测", SampleSize: 12, ExpiresAtMS: 5_000,
+			Claim: contracts.OverlayClaimV1{Title: "十分钟对线检查点", Body: "天辉经济领先 1800。", AssetKey: "lane"},
+		}},
+	}
+}
+
 func validCommand() contracts.OperatorCommandV1 {
 	return contracts.OperatorCommandV1{
 		SchemaVersion: contracts.OperatorCommandSchemaV1,
@@ -74,21 +95,75 @@ func validOverlay(publication int64) contracts.OverlayStateV1 {
 func testGateway(t *testing.T, commands *commandPort, overlay *overlayPort, now *time.Time) http.Handler {
 	t.Helper()
 	assets := fstest.MapFS{
-		"operator/index.html": {Data: []byte(`<html lang="zh-CN">operator</html>`)},
-		"operator/app.js":     {Data: []byte(`window.operatorApp = true`)},
-		"operator/app.css":    {Data: []byte(`body{color:white}`)},
-		"overlay/index.html":  {Data: []byte(`<html lang="zh-CN">overlay</html>`)},
-		"overlay/app.js":      {Data: []byte(`fetch("/v1/overlay/state")`)},
-		"overlay/app.css":     {Data: []byte(`body{background:transparent}`)},
+		"operator/index.html":                       {Data: []byte(`<html lang="zh-CN">operator</html>`)},
+		"operator/app.js":                           {Data: []byte(`window.operatorApp = true`)},
+		"operator/app.css":                          {Data: []byte(`body{color:white}`)},
+		"overlay/index.html":                        {Data: []byte(`<html lang="zh-CN">overlay</html>`)},
+		"overlay/app.js":                            {Data: []byte(`fetch("/v1/overlay/state")`)},
+		"overlay/app.css":                           {Data: []byte(`body{background:transparent}`)},
+		"overlay/fonts/noto-sans-cjk-sc-dot24.woff": {Data: []byte(`wOFF-local-font`)},
 	}
 	gateway, err := delivery.NewGateway(delivery.Config{
 		BearerToken: testToken, AllowedOrigin: "http://127.0.0.1:43211",
-		Commands: commands, Overlay: overlay, ReadAsset: func(name string) ([]byte, error) { return fs.ReadFile(assets, name) }, Now: func() time.Time { return *now },
+		Commands: commands, Operator: &operatorStatePort{state: validOperatorState()}, Overlay: overlay,
+		ReadAsset: func(name string) ([]byte, error) { return fs.ReadFile(assets, name) }, Now: func() time.Time { return *now },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return gateway
+}
+
+func TestOperatorStateIsAuthenticatedBoundedAndReadOnly(t *testing.T) {
+	now := time.UnixMilli(1_000).UTC()
+	commands := &commandPort{result: validResult()}
+	handler := testGateway(t, commands, &overlayPort{state: validOverlay(1_000)}, &now)
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		want    int
+	}{
+		{name: "missing bearer", headers: map[string]string{"Origin": "http://127.0.0.1:43211"}, want: http.StatusUnauthorized},
+		{name: "hostile origin", headers: map[string]string{"Authorization": "Bearer " + testToken, "Origin": "https://hostile.invalid"}, want: http.StatusForbidden},
+		{name: "null origin", headers: map[string]string{"Authorization": "Bearer " + testToken, "Origin": "null"}, want: http.StatusForbidden},
+		{name: "authorized", headers: map[string]string{"Authorization": "Bearer " + testToken, "Origin": "http://127.0.0.1:43211"}, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/operator/state", "", tc.headers)
+			if rec.Code != tc.want || rec.Body.Len() > delivery.MaxResponseBytes {
+				t.Fatalf("status=%d want=%d len=%d body=%s", rec.Code, tc.want, rec.Body.Len(), rec.Body.String())
+			}
+			if commands.calls != 0 || strings.Contains(rec.Body.String(), testToken) || strings.Contains(rec.Body.String(), "raw_gsi") {
+				t.Fatalf("operator state leaked capability or mutated policy: calls=%d body=%s", commands.calls, rec.Body.String())
+			}
+		})
+	}
+	if rec := doRequest(handler, http.MethodPost, "/v1/operator/state", "{}", authHeaders()); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("operator state POST status=%d", rec.Code)
+	}
+}
+
+func TestOperatorStateFailsClosedOnInvalidOrUnavailableView(t *testing.T) {
+	now := time.UnixMilli(1_000).UTC()
+	assets := fstest.MapFS{"operator/index.html": {Data: []byte("ok")}}
+	for _, port := range []*operatorStatePort{
+		{err: errors.New("/private/operator-state")},
+		{state: delivery.OperatorState{SchemaVersion: "operator_state.v1", SessionID: "session-1", Previews: []delivery.OperatorPreview{{CandidateID: "candidate", Claim: contracts.OverlayClaimV1{Title: "<unsafe>", Body: "x"}}}}},
+	} {
+		gateway, err := delivery.NewGateway(delivery.Config{
+			BearerToken: testToken, AllowedOrigin: "http://127.0.0.1:43211", Commands: &commandPort{result: validResult()},
+			Operator: port, Overlay: &overlayPort{state: validOverlay(1_000)},
+			ReadAsset: func(name string) ([]byte, error) { return fs.ReadFile(assets, name) }, Now: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doRequest(gateway, http.MethodGet, "/v1/operator/state", "", map[string]string{"Authorization": "Bearer " + testToken, "Origin": "http://127.0.0.1:43211"})
+		if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "private") || strings.Contains(rec.Body.String(), "unsafe") {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func doRequest(handler http.Handler, method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -293,6 +368,10 @@ func TestStaticEntryPointsHaveSeparateCSPAndNoPrivilegeLeakage(t *testing.T) {
 	overlay := doRequest(handler, http.MethodGet, "/overlay/", "", nil)
 	if operator.Code != http.StatusOK || overlay.Code != http.StatusOK {
 		t.Fatalf("static statuses=%d/%d", operator.Code, overlay.Code)
+	}
+	font := doRequest(handler, http.MethodGet, "/overlay/fonts/noto-sans-cjk-sc-dot24.woff", "", nil)
+	if font.Code != http.StatusOK || font.Header().Get("Content-Type") != "font/woff" {
+		t.Fatalf("font status=%d content-type=%q", font.Code, font.Header().Get("Content-Type"))
 	}
 	operatorCSP, overlayCSP := operator.Header().Get("Content-Security-Policy"), overlay.Header().Get("Content-Security-Policy")
 	if operatorCSP == overlayCSP || !strings.Contains(operatorCSP, "connect-src http://127.0.0.1:43211/v1/operator/commands") || !strings.Contains(overlayCSP, "connect-src http://127.0.0.1:43211/v1/overlay/state") || !strings.Contains(operatorCSP, "frame-ancestors 'none'") || !strings.Contains(overlayCSP, "frame-ancestors 'self'") {

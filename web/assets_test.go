@@ -11,6 +11,11 @@ func TestOperatorAndOverlayAreSeparateLocalBundles(t *testing.T) {
 	paths := []string{
 		"operator/index.html", "operator/app.js", "operator/app.css",
 		"overlay/index.html", "overlay/app.js", "overlay/app.css",
+		"overlay/fonts/noto-sans-cjk-sc-dot24.woff", "overlay/fonts/LICENSE.txt",
+	}
+	font, _ := fs.ReadFile(assets, "overlay/fonts/noto-sans-cjk-sc-dot24.woff")
+	if len(font) > 128<<10 || !strings.HasPrefix(string(font), "wOFF") {
+		t.Fatalf("overlay font must be a bounded local WOFF asset, size=%d", len(font))
 	}
 	for _, name := range paths {
 		data, err := fs.ReadFile(assets, name)
@@ -38,7 +43,7 @@ func TestOperatorAndOverlayAreSeparateLocalBundles(t *testing.T) {
 	}
 
 	operatorJS, _ := fs.ReadFile(assets, "operator/app.js")
-	for _, want := range []string{"/v1/operator/commands", "authorization", "x-dota2-ob-csrf"} {
+	for _, want := range []string{"/v1/operator/commands", "/v1/operator/state", "authorization", "x-dota2-ob-csrf", "crypto.randomuuid", "expected_policy_revision"} {
 		if !strings.Contains(strings.ToLower(string(operatorJS)), want) {
 			t.Fatalf("operator JS missing %q", want)
 		}
@@ -46,6 +51,25 @@ func TestOperatorAndOverlayAreSeparateLocalBundles(t *testing.T) {
 	for _, forbidden := range []string{"/v1/overlay/state", "/api/", "/gsi", "localstorage", "sessionstorage", "document.cookie"} {
 		if strings.Contains(strings.ToLower(string(operatorJS)), forbidden) {
 			t.Fatalf("operator JS contains forbidden capability %q", forbidden)
+		}
+	}
+}
+
+func TestOperatorConsoleExposesStructuredRevisionCheckedControls(t *testing.T) {
+	assets := Assets()
+	html, _ := fs.ReadFile(assets, "operator/index.html")
+	css, _ := fs.ReadFile(assets, "operator/app.css")
+	for _, want := range []string{
+		`id="connect-form"`, `id="candidate-list"`, `id="rule-form"`, `id="emergency-toggle"`,
+		`id="retry-command"`, `id="policy-revision"`, `aria-live="polite"`,
+	} {
+		if !strings.Contains(strings.ToLower(string(html)), want) {
+			t.Fatalf("operator HTML missing %q", want)
+		}
+	}
+	for _, want := range []string{"--alert", ".candidate-card", ".emergency", "@media"} {
+		if !strings.Contains(strings.ToLower(string(css)), want) {
+			t.Fatalf("operator CSS missing %q", want)
 		}
 	}
 }
