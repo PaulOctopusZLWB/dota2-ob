@@ -24,7 +24,8 @@ func expectedProductLineageArtifacts() productLineageArtifacts {
 		terminology:           sourceArtifact(presentation.TerminologyVersion(), presentationCatalogSHA256),
 		localizationMapping:   sourceArtifact("localization_parameter_mapping.v1", presentationCatalogSHA256),
 		engineBuild: sourceArtifact("dota2-ob.product.v1", productMainSourceSHA256, productPortsSourceSHA256,
-			productRecoverySourceSHA256, productRuntimeSourceSHA256, productLineageSourceSHA256, insight.RulesArtifact().ContentSHA256),
+			productRecoverySourceSHA256, productRuntimeSourceSHA256, productLineageSourceSHA256,
+			insightEngineSourceSHA256, policyEngineSourceSHA256, policyApplicationSourceSHA256, insight.RulesArtifact().ContentSHA256),
 	}
 }
 

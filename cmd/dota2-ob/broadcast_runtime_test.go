@@ -161,6 +161,9 @@ func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 		"broadcast_recovery.go":                      productRecoverySourceSHA256,
 		"broadcast_runtime.go":                       productRuntimeSourceSHA256,
 		"broadcast_lineage.go":                       productLineageSourceSHA256,
+		"../../internal/insight/engine.go":           insightEngineSourceSHA256,
+		"../../internal/policy/engine.go":            policyEngineSourceSHA256,
+		"../../internal/policy/application.go":       policyApplicationSourceSHA256,
 	}
 	for path, want := range files {
 		payload, err := os.ReadFile(path)
@@ -345,6 +348,34 @@ func TestObservationResolverStreamsRawSessionOnce(t *testing.T) {
 		if _, err := resolver.resolve(commit); err != nil {
 			t.Fatalf("indexed resolver rejected out-of-order or repeated observation: %v", err)
 		}
+	}
+}
+
+func TestObservationResolverUnlinksIndexAndAcceptsMaximumPersistedCapture(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "maximum-raw-record"
+	store, err := session.NewStore(root, session.WithSessionID(sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const maximumCaptureBody = 10 << 20
+	prefix, suffix := `{"padding":"`, `"}`
+	body := []byte(prefix + strings.Repeat("x", maximumCaptureBody-len(prefix)-len(suffix)) + suffix)
+	record, err := store.Append(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resolver := newObservationResolver(filepath.Join(root, sessionID, "raw.jsonl"), sessionID, testLineage(sessionID))
+	defer resolver.Close()
+	resolved, err := resolver.readCommittedRecord(record.Sequence)
+	if err != nil || resolved.Sequence != record.Sequence {
+		t.Fatalf("maximum persisted capture was not recoverable: record=%#v err=%v", resolved, err)
+	}
+	if resolver.indexPath != "" {
+		t.Fatalf("recovery index remains named and can leak across SIGKILL: %q", resolver.indexPath)
 	}
 }
 

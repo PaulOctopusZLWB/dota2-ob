@@ -18,7 +18,10 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-const maximumPersistedRecordBytes = 12 << 20
+// The capture listener accepts at most 10 MiB of JSON. Persisted records retain
+// both decoded payload and the exact raw JSON, so recovery allows twice that
+// body plus a bounded envelope margin.
+const maximumPersistedRecordBytes = (2 * (10 << 20)) + (1 << 20)
 
 type observationResolver struct {
 	rawPath   string
@@ -186,6 +189,12 @@ func (r *observationResolver) ensureIndex() (resultErr error) {
 		return err
 	}
 	indexPath := index.Name()
+	if err := os.Remove(indexPath); err != nil {
+		_ = raw.Close()
+		_ = index.Close()
+		return err
+	}
+	indexPath = ""
 	defer func() {
 		if resultErr != nil {
 			_ = raw.Close()
