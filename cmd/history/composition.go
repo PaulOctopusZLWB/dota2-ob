@@ -11,6 +11,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/history"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay"
 )
 
 type stageComposition struct {
@@ -82,6 +83,9 @@ func newLocalReplayStageComposition(facts []history.NormalizedMatchFacts, root s
 					}
 					return fmt.Errorf("%s artifact missing", port.stage)
 				}
+				if port.stage == e.ReachedStage {
+					break
+				}
 			}
 			return nil
 		},
@@ -120,11 +124,13 @@ func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContex
 				return e, &history.StageFailure{Stage: p.stage, Reason: "nondeterministic_normalize", Terminal: true}
 			}
 			pass := history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: id, MatchID: e.MatchID, ReplaySHA256: raw.Facts.ReplaySHA256, FactsSHA256: raw.Facts.ContentSHA256, ParserVersion: "local-replay-fixture/v1", AdapterVersion: history.AdapterName + "/" + history.AdapterVersion, ConfigSHA256: sha256Text("local-replay-config-v1"), ParsedArtifactSHA256: sha256Text(id + ":parsed:" + raw.Facts.ContentSHA256), NormalizedArtifactSHA256: sha256Text(id + ":normalized:" + raw.Facts.ContentSHA256), RunArtifactSHA256: sha256Text(id + ":run:" + raw.Facts.ContentSHA256), CheckpointSHA256: sha256Text(id + ":checkpoint:" + raw.Facts.ContentSHA256), Deterministic: true}
-			normalizedJSON, err := contracts.MarshalCanonical(raw.Facts)
-			if err != nil {
-				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+			parsed := replay.ReplayFactsV1{
+				SchemaVersion: replay.FactsSchema,
+				Provenance:    replay.Provenance{ParserName: "local-replay-fixture", ParserVersion: "v1", AdapterName: history.AdapterName, AdapterVersion: history.AdapterVersion, SchemaVersion: replay.FactsSchema},
+				Availability:  replay.Availability{Available: []string{"fixture"}}, Meta: replay.MatchMeta{GameBuild: raw.Facts.GameBuild, ServerName: "fixture"},
+				MessageCounts: map[string]uint64{}, CombatLogTypeCounts: map[string]uint64{}, ItemUses: map[string]uint64{},
 			}
-			pass, err = materializeParseExecution(filepath.Join(p.root, "executions"), pass, payload, normalizedJSON)
+			pass, err = materializeParseExecution(filepath.Join(p.root, "executions"), pass, parseExecutionMaterial{Parsed: parsed, Normalized: raw.Facts})
 			if err != nil {
 				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
 			}

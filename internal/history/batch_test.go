@@ -277,6 +277,40 @@ func TestBatchResumesMidStage(t *testing.T) {
 	_ = contracts.IdentityVerified
 }
 
+func TestBatchValidatesReachedArtifactsBeforeRunningDownstreamEffects(t *testing.T) {
+	manifest := buildBatchManifest(t, "m1")
+	entrySHA, err := DiscoveryEntrySHA256(manifest, manifest.Matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := NewStageBatch(manifest)
+	prior.Entries["m1"] = StageEntry{
+		MatchID:      "m1",
+		Status:       StageQueued,
+		ReachedStage: StageVerification,
+		ReplaySHA256: manifest.Matches[0].ReplaySHA256,
+		ArtifactSHA256: map[string]string{
+			StageAcquisition:  manifest.Matches[0].ReplaySHA256,
+			StageVerification: manifest.Matches[0].ReplaySHA256,
+		},
+		ArtifactInputSHA256: map[string]string{
+			StageAcquisition:  entrySHA,
+			StageVerification: manifest.Matches[0].ReplaySHA256,
+		},
+	}
+	sc := newStageCounts()
+	p := sc.buildPipeline(1, nil)
+	p.ValidateCompleted = func(StageEntry, MatchContext) error {
+		return errors.New("reached verification artifact is externally unrelated")
+	}
+	if _, err := p.Run(manifest, prior); err == nil {
+		t.Fatal("externally unrelated reached checkpoint was accepted")
+	}
+	if len(sc.calls) != 0 {
+		t.Fatalf("downstream effects ran before reached artifacts were validated: %#v", sc.calls)
+	}
+}
+
 // TestBatchRejectsMismatchedManifestCheckpoint proves a checkpoint bound to
 // one discovery manifest cannot be applied to a different manifest (which
 // could skip or replay matching ids). The run must fail closed.

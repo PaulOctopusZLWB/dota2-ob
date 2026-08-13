@@ -255,11 +255,7 @@ func (c *realReplayComposition) normalizeTwice() error {
 		if err != nil {
 			return err
 		}
-		normalizedJSON, err := contracts.MarshalCanonical(normalized)
-		if err != nil {
-			return err
-		}
-		pass, err := materializeParseExecution(c.executionRoot(), history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: run.ExecutionID, MatchID: c.cfg.MatchID, ReplaySHA256: c.manifest.Matches[0].ReplaySHA256, FactsSHA256: normalized.ContentSHA256, ParserVersion: replay.ParserName + "/" + replay.ParserVersion, AdapterVersion: replay.AdapterName + "/" + replay.AdapterVersion, ConfigSHA256: configSHA, Deterministic: true}, parsedJSON, normalizedJSON)
+		pass, err := materializeParseExecution(c.executionRoot(), history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: run.ExecutionID, MatchID: c.cfg.MatchID, ReplaySHA256: c.manifest.Matches[0].ReplaySHA256, FactsSHA256: normalized.ContentSHA256, ParserVersion: replay.ParserName + "/" + replay.ParserVersion, AdapterVersion: replay.AdapterName + "/" + replay.AdapterVersion, ConfigSHA256: configSHA, Deterministic: true}, parseExecutionMaterial{Parsed: parsed, Normalized: *normalized})
 		if err != nil {
 			return err
 		}
@@ -307,7 +303,18 @@ func (c *realReplayComposition) validateStage(e history.StageEntry, ctx history.
 		return c.verifyReplay(ctx.Discovery.ReplaySHA256)
 	case history.StageParse:
 		_, err := c.readParseIndex()
-		return err
+		if err != nil {
+			return err
+		}
+		sha, err := fileSHA(c.parseIndexPath())
+		if err != nil {
+			return err
+		}
+		if checkpointSHA := e.ArtifactSHA256[stage]; checkpointSHA != "" && sha != checkpointSHA {
+			return errors.New("parse index artifact identity mismatch")
+		}
+		c.parseIndexSHA = sha
+		return nil
 	case history.StageNormalize:
 		return c.validateNormalized()
 	case history.StageAggregate:
@@ -327,6 +334,9 @@ func (c *realReplayComposition) validateCompleted(e history.StageEntry, ctx hist
 	for _, stage := range []string{history.StageAcquisition, history.StageVerification, history.StageParse, history.StageNormalize, history.StageAggregate} {
 		if err := c.validateStage(e, ctx, stage); err != nil {
 			return fmt.Errorf("real replay completed %s: %w", stage, err)
+		}
+		if stage == e.ReachedStage {
+			break
 		}
 	}
 	return nil
@@ -356,9 +366,21 @@ func (c *realReplayComposition) readParseIndex() (realParseIndex, error) {
 		return realParseIndex{}, errors.New("invalid real parse index")
 	}
 	for _, run := range index.Runs {
+		if run.PayloadPath != filepath.Base(c.parsePayloadPath(run.ExecutionID)) {
+			return realParseIndex{}, errors.New("parsed run path identity mismatch")
+		}
 		b, err := os.ReadFile(c.parsePayloadPath(run.ExecutionID))
-		if err != nil || shaBytes(trimNewline(b)) != run.PayloadSHA {
+		payload := trimNewline(b)
+		if err != nil || shaBytes(payload) != run.PayloadSHA || run.FactsHash != run.PayloadSHA {
 			return realParseIndex{}, errors.New("parsed run artifact missing or mismatched")
+		}
+		var facts replay.ReplayFactsV1
+		if err := contracts.DecodeStrict(payload, &facts); err != nil || facts.SchemaVersion != replay.FactsSchema || facts.Provenance.ParserName+"/"+facts.Provenance.ParserVersion != replay.ParserName+"/"+replay.ParserVersion || facts.Provenance.AdapterName+"/"+facts.Provenance.AdapterVersion != replay.AdapterName+"/"+replay.AdapterVersion || validateReplayFactsStructure(facts) != nil {
+			return realParseIndex{}, errors.New("parsed run typed payload invalid")
+		}
+		canonical, err := facts.CanonicalJSON()
+		if err != nil || string(canonical) != string(payload) {
+			return realParseIndex{}, errors.New("parsed run payload is not canonical")
 		}
 	}
 	c.parseIndexSHA, err = fileSHA(c.parseIndexPath())

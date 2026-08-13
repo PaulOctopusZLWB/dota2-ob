@@ -7,20 +7,43 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/history"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay"
 )
 
 const executionArtifactSchema = "history.parse-run-artifact.v1"
 
-type executionPayloadArtifact struct {
-	SchemaVersion string          `json:"schema_version"`
-	ExecutionID   string          `json:"execution_id"`
-	Kind          string          `json:"kind"`
-	PayloadSHA256 string          `json:"payload_sha256"`
-	Payload       json.RawMessage `json:"payload"`
+type executionPayloadBinding struct {
+	SchemaVersion       string `json:"schema_version"`
+	ExecutionID         string `json:"execution_id"`
+	Kind                string `json:"kind"`
+	MatchID             string `json:"match_id"`
+	ReplaySHA256        string `json:"replay_sha256"`
+	FactsSHA256         string `json:"facts_sha256"`
+	ParserVersion       string `json:"parser_version"`
+	AdapterVersion      string `json:"adapter_version"`
+	ConfigSHA256        string `json:"config_sha256"`
+	ParsedPayloadSHA256 string `json:"parsed_payload_sha256"`
+	PayloadSHA256       string `json:"payload_sha256"`
+}
+
+type parsedExecutionArtifact struct {
+	executionPayloadBinding
+	Payload replay.ReplayFactsV1 `json:"payload"`
+}
+
+type normalizedExecutionArtifact struct {
+	executionPayloadBinding
+	Payload history.NormalizedMatchFacts `json:"payload"`
+}
+
+type parseExecutionMaterial struct {
+	Parsed     replay.ReplayFactsV1
+	Normalized history.NormalizedMatchFacts
 }
 
 type executionBindingArtifact struct {
@@ -38,19 +61,37 @@ type executionBindingArtifact struct {
 	CheckpointSHA256         string `json:"checkpoint_sha256,omitempty"`
 }
 
-func materializeParseExecution(root string, draft history.ParseExecutionEvidence, parsedJSON, normalizedJSON []byte) (history.ParseExecutionEvidence, error) {
-	if root == "" || draft.ExecutionID == "" || draft.MatchID == "" || !json.Valid(parsedJSON) || !json.Valid(normalizedJSON) {
+func materializeParseExecution(root string, draft history.ParseExecutionEvidence, material parseExecutionMaterial) (history.ParseExecutionEvidence, error) {
+	if root == "" || draft.ExecutionID == "" || draft.MatchID == "" {
 		return history.ParseExecutionEvidence{}, errors.New("invalid parse execution material")
 	}
 	draft.ContentSHA256, draft.ParsedArtifactSHA256, draft.NormalizedArtifactSHA256, draft.RunArtifactSHA256, draft.CheckpointSHA256 = "", "", "", "", ""
-	parsed, parsedSHA, err := marshalExecutionPayload(draft.ExecutionID, "parsed", parsedJSON)
+	canonicalParsed, err := material.Parsed.CanonicalJSON()
 	if err != nil {
 		return history.ParseExecutionEvidence{}, err
 	}
-	normalized, normalizedSHA, err := marshalExecutionPayload(draft.ExecutionID, "normalized", normalizedJSON)
+	if err := validateReplayFactsPayload(material.Parsed, draft); err != nil {
+		return history.ParseExecutionEvidence{}, err
+	}
+	canonicalNormalized, err := contracts.MarshalCanonical(material.Normalized)
 	if err != nil {
 		return history.ParseExecutionEvidence{}, err
 	}
+	if err := validateNormalizedFactsPayload(material.Normalized, draft); err != nil {
+		return history.ParseExecutionEvidence{}, err
+	}
+	parsedPayloadSHA := bytesSHA256(canonicalParsed)
+	parsedBinding := executionPayloadEnvelope(draft, "parsed", bytesSHA256(canonicalParsed), parsedPayloadSHA)
+	parsed, err := json.Marshal(parsedExecutionArtifact{executionPayloadBinding: parsedBinding, Payload: material.Parsed})
+	if err != nil {
+		return history.ParseExecutionEvidence{}, err
+	}
+	normalizedBinding := executionPayloadEnvelope(draft, "normalized", bytesSHA256(canonicalNormalized), parsedPayloadSHA)
+	normalized, err := json.Marshal(normalizedExecutionArtifact{executionPayloadBinding: normalizedBinding, Payload: material.Normalized})
+	if err != nil {
+		return history.ParseExecutionEvidence{}, err
+	}
+	parsedSHA, normalizedSHA := bytesSHA256(parsed), bytesSHA256(normalized)
 	draft.ParsedArtifactSHA256, draft.NormalizedArtifactSHA256 = parsedSHA, normalizedSHA
 	dir := executionDir(root, draft.MatchID, draft.ExecutionID)
 	if err := atomicfile.WriteFile(filepath.Join(dir, "parsed.json"), append(parsed, '\n'), 0o644); err != nil {
@@ -97,6 +138,20 @@ func validateParseExecutionArtifacts(root string, pass history.ParseExecutionEvi
 			return errors.New("parse execution artifact missing or mismatched")
 		}
 	}
+	parsedArtifact, parsedFacts, err := readExecutionPayload(filepath.Join(dir, "parsed.json"), pass, "parsed")
+	if err != nil {
+		return err
+	}
+	normalizedArtifact, normalizedFacts, err := readNormalizedExecutionPayload(filepath.Join(dir, "normalized.json"), pass)
+	if err != nil {
+		return err
+	}
+	if parsedArtifact.ParsedPayloadSHA256 != parsedArtifact.PayloadSHA256 || normalizedArtifact.ParsedPayloadSHA256 != parsedArtifact.PayloadSHA256 {
+		return errors.New("parse execution payload lineage mismatch")
+	}
+	if parserIdentity(parsedFacts) != pass.ParserVersion || adapterIdentity(parsedFacts) != pass.AdapterVersion || normalizedFacts.ContentSHA256 != pass.FactsSHA256 || normalizedFacts.MatchID != pass.MatchID || normalizedFacts.ReplaySHA256 != pass.ReplaySHA256 {
+		return errors.New("parse execution typed payload binding mismatch")
+	}
 	checkpoint := executionBinding(pass, "checkpoint")
 	checkpoint.CheckpointSHA256 = ""
 	wantCheckpoint, err := contracts.MarshalCanonical(checkpoint)
@@ -128,13 +183,101 @@ func sealExecutionEvidence(p *history.ParseExecutionEvidence) error {
 	return p.Validate()
 }
 
-func marshalExecutionPayload(executionID, kind string, payload []byte) ([]byte, string, error) {
-	a := executionPayloadArtifact{SchemaVersion: executionArtifactSchema, ExecutionID: executionID, Kind: kind, PayloadSHA256: bytesSHA256(payload), Payload: json.RawMessage(payload)}
-	b, err := json.Marshal(a)
-	if err != nil {
-		return nil, "", err
+func executionPayloadEnvelope(pass history.ParseExecutionEvidence, kind, payloadSHA, parsedPayloadSHA string) executionPayloadBinding {
+	return executionPayloadBinding{
+		SchemaVersion: executionArtifactSchema, ExecutionID: pass.ExecutionID, Kind: kind,
+		MatchID: pass.MatchID, ReplaySHA256: pass.ReplaySHA256, FactsSHA256: pass.FactsSHA256,
+		ParserVersion: pass.ParserVersion, AdapterVersion: pass.AdapterVersion, ConfigSHA256: pass.ConfigSHA256,
+		ParsedPayloadSHA256: parsedPayloadSHA, PayloadSHA256: payloadSHA,
 	}
-	return b, bytesSHA256(b), nil
+}
+
+func validateReplayFactsPayload(facts replay.ReplayFactsV1, pass history.ParseExecutionEvidence) error {
+	if facts.SchemaVersion != replay.FactsSchema || facts.Provenance.SchemaVersion != replay.FactsSchema || facts.Provenance.ParserName == "" || facts.Provenance.ParserVersion == "" || facts.Provenance.AdapterName == "" || facts.Provenance.AdapterVersion == "" || parserIdentity(facts) != pass.ParserVersion || adapterIdentity(facts) != pass.AdapterVersion {
+		return errors.New("parsed execution payload identity mismatch")
+	}
+	if err := validateReplayFactsStructure(facts); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateReplayFactsStructure(facts replay.ReplayFactsV1) error {
+	if facts.MessageCounts == nil || facts.CombatLogTypeCounts == nil || facts.ItemUses == nil || len(facts.Availability.Available)+len(facts.Availability.Deferred)+len(facts.Availability.Unavailable) == 0 {
+		return errors.New("parsed execution payload is incomplete")
+	}
+	var combatTotal uint64
+	for _, count := range facts.CombatLogTypeCounts {
+		if combatTotal > ^uint64(0)-count {
+			return errors.New("parsed execution combat counts overflow")
+		}
+		combatTotal += count
+	}
+	if combatTotal != facts.CombatLogTotal {
+		return errors.New("parsed execution combat total mismatch")
+	}
+	if !sort.SliceIsSorted(facts.Heroes, func(i, j int) bool { return facts.Heroes[i].Name < facts.Heroes[j].Name }) {
+		return errors.New("parsed execution heroes are not canonical")
+	}
+	seenHeroes := map[string]bool{}
+	for _, hero := range facts.Heroes {
+		if hero.Name == "" || hero.ItemUses == nil || seenHeroes[hero.Name] {
+			return errors.New("parsed execution hero identity mismatch")
+		}
+		seenHeroes[hero.Name] = true
+	}
+	return nil
+}
+
+func validateNormalizedFactsPayload(facts history.NormalizedMatchFacts, pass history.ParseExecutionEvidence) error {
+	if facts.Validate() != nil {
+		return errors.New("normalized execution payload is not NormalizedMatchFacts")
+	}
+	if facts.ContentSHA256 != pass.FactsSHA256 || facts.MatchID != pass.MatchID || facts.ReplaySHA256 != pass.ReplaySHA256 {
+		return errors.New("normalized execution payload identity mismatch")
+	}
+	return nil
+}
+
+func readExecutionPayload(path string, pass history.ParseExecutionEvidence, kind string) (parsedExecutionArtifact, replay.ReplayFactsV1, error) {
+	var artifact parsedExecutionArtifact
+	b, err := os.ReadFile(path)
+	if err != nil || contracts.DecodeStrict(trimFinalNewline(b), &artifact) != nil || validatePayloadEnvelope(artifact.executionPayloadBinding, pass, kind) != nil {
+		return artifact, replay.ReplayFactsV1{}, errors.New("parse execution parsed envelope mismatch")
+	}
+	payload, err := artifact.Payload.CanonicalJSON()
+	if err != nil || bytesSHA256(payload) != artifact.PayloadSHA256 || validateReplayFactsPayload(artifact.Payload, pass) != nil {
+		return artifact, replay.ReplayFactsV1{}, errors.New("parse execution parsed payload mismatch")
+	}
+	return artifact, artifact.Payload, nil
+}
+
+func readNormalizedExecutionPayload(path string, pass history.ParseExecutionEvidence) (normalizedExecutionArtifact, history.NormalizedMatchFacts, error) {
+	var artifact normalizedExecutionArtifact
+	b, err := os.ReadFile(path)
+	if err != nil || contracts.DecodeStrict(trimFinalNewline(b), &artifact) != nil || validatePayloadEnvelope(artifact.executionPayloadBinding, pass, "normalized") != nil {
+		return artifact, history.NormalizedMatchFacts{}, errors.New("parse execution normalized envelope mismatch")
+	}
+	payload, err := contracts.MarshalCanonical(artifact.Payload)
+	if err != nil || bytesSHA256(payload) != artifact.PayloadSHA256 || validateNormalizedFactsPayload(artifact.Payload, pass) != nil {
+		return artifact, history.NormalizedMatchFacts{}, errors.New("parse execution normalized payload mismatch")
+	}
+	return artifact, artifact.Payload, nil
+}
+
+func validatePayloadEnvelope(a executionPayloadBinding, pass history.ParseExecutionEvidence, kind string) error {
+	if a.SchemaVersion != executionArtifactSchema || a.Kind != kind || a.ExecutionID != pass.ExecutionID || a.MatchID != pass.MatchID || a.ReplaySHA256 != pass.ReplaySHA256 || a.FactsSHA256 != pass.FactsSHA256 || a.ParserVersion != pass.ParserVersion || a.AdapterVersion != pass.AdapterVersion || a.ConfigSHA256 != pass.ConfigSHA256 || a.PayloadSHA256 == "" || a.ParsedPayloadSHA256 == "" {
+		return errors.New("parse execution payload envelope mismatch")
+	}
+	return nil
+}
+
+func parserIdentity(f replay.ReplayFactsV1) string {
+	return f.Provenance.ParserName + "/" + f.Provenance.ParserVersion
+}
+
+func adapterIdentity(f replay.ReplayFactsV1) string {
+	return f.Provenance.AdapterName + "/" + f.Provenance.AdapterVersion
 }
 
 func executionBinding(p history.ParseExecutionEvidence, kind string) executionBindingArtifact {

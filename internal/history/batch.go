@@ -168,13 +168,19 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 			entry = StageEntry{MatchID: m.MatchID, Status: StageQueued, ReachedStage: StageDiscovery}
 			prior.Entries[m.MatchID] = entry
 		}
-		if entry.Status == StageSucceeded {
+		// Every durable stage already reached must be externally validated
+		// before its effect is skipped or any downstream effect is allowed to
+		// run. Structural checkpoint linkage alone is not proof that the
+		// referenced replay/facts/product artifacts exist or have those bytes.
+		if entry.ReachedStage != StageDiscovery {
 			if p.ValidateCompleted == nil {
-				return prior, errors.New("batch: succeeded entry has no durable artifact validator")
+				return prior, errors.New("batch: reached entry has no durable artifact validator")
 			}
 			if err := p.ValidateCompleted(entry, ctx); err != nil {
 				return prior, err
 			}
+		}
+		if entry.Status == StageSucceeded {
 			continue
 		}
 		if entry.Status == StageFailedTerminal {
