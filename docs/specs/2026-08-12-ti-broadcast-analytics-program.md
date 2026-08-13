@@ -887,12 +887,31 @@ Acceptance:
 - Browser Source works without obs-websocket. If scene/source control is enabled,
   the separate obs-websocket adapter is loopback-only, authenticated, optional,
   and cannot mutate analytical state.
+- Production OBS scenes use one native 750x450 transparent Browser Source
+  viewport positioned inside the audited sidebar safe area of each 1920x1080
+  and 2560x1440 output canvas. The source is not stretched and does not render
+  an otherwise transparent full-canvas CEF surface. Full-output screenshot and
+  recording checks still cover both target canvases.
 - A 60-minute OBS recording passes measurement protocol P3: no crash or refresh
-  flash; Browser Source incremental PSS at most 256 MiB over an empty-scene OBS
-  baseline; post-warmup growth at most 1 MiB/minute and 64 MiB total; median
-  overlay CPU at most 5% of one logical core; overlay-attributable rendering-lag
-  delta at most 1.0 percentage point; and zero analytical frames visible after
-  any fail-closed deadline. Frame/update evidence is attached.
+  flash; median incremental PSS for the complete OBS plus Browser Source process
+  tree is at most 256 MiB over the same-resolution empty-scene OBS baseline;
+  median overlay process-tree PSS is at most 1 GiB; post-warmup growth is at
+  most 1 MiB/minute and 64 MiB total; median Browser Source CPU is at most 5% of
+  one logical core; overlay-attributable rendering-lag delta is at most 1.0
+  percentage point; and zero analytical frames are visible after any fail-closed
+  deadline. Frame/update evidence is attached.
+
+P3 geometry was corrected after exact M3 successor
+`5ad9a26d34712196e9b155d760aba61566b7d493` completed both unchanged full runs
+on OBS 32.2.1 / Browser Source 2.26.9 / CEF 127.0.6533.120. Independent review
+reproduced that all code, evidence-integrity, duration, growth, CPU, lag,
+visibility, crash, and network gates passed, while full-canvas Browser Sources
+used 266,647 KiB incremental PSS at 1080p and 289,851 KiB at 1440p. The audited
+claim region in both recordings is 750x450. This revision removes the unused
+full-canvas CEF surface instead of raising the pre-measurement 256 MiB ceiling.
+Those two runs remain failed evidence and do not accept M3. P3 must be rerun at
+both resolutions after the bounded viewport is implemented and again on the
+exact composed M3 candidate.
 
 ### M4: Replay-driven end-to-end integration
 
@@ -1015,15 +1034,25 @@ and excluded samples are reported, never silently removed.
 
 ### P3 — 60-minute OBS resource/render run
 
-- Use the isolated OBS profile/scene, fixed 1080p and 1440p Browser Sources,
-  software/GPU mode and CEF version recorded by the run manifest.
+- Use the isolated OBS profile/scene and fixed 1920x1080 and 2560x1440 output
+  canvases. In each overlay scene, position one native 750x450 transparent
+  Browser Source at the documented safe-area coordinates with no source
+  scaling. The empty baseline uses the same canvas, renderer, encoder, preview,
+  recording, and color-source settings but no Browser Source. Record source
+  geometry and transform, output FPS, Browser Source FPS, software/GPU mode,
+  OBS/Browser Source/CEF versions, and GPU/driver in the run manifest.
 - Record a ten-minute empty-scene baseline, ten-minute overlay warmup, then 60
   minutes cycling all five families, longest zh-CN strings, hide/reconnect, and
   missing assets at the production update cadence.
-- Sample process-tree CPU/PSS, GPU memory, rendered/missed/skipped frames, claim
-  visibility, and socket/remote-request activity every five seconds. Compare
-  lag to the same scene without the Browser Source. Apply the numeric M3 bounds
-  to raw samples and attach sanitized frames/logs.
+- Sample whole OBS-plus-browser process-tree CPU/PSS and separate OBS/browser
+  components, GPU memory, rendered/missed/skipped frames, claim visibility, and
+  socket/remote-request activity every five seconds. Incremental PSS is the
+  overlay-recording median whole-tree PSS minus the empty-baseline median
+  whole-tree PSS; a negative OBS component cannot replace reporting the browser
+  component or the absolute overlay-process-tree median. Compare lag to the same
+  scene without the Browser Source. Apply every numeric M3 bound to raw samples
+  and attach sanitized frames/logs. A short preflight can reject a configuration
+  but cannot pass P3 or justify a threshold change.
 
 ### P4 — 12-hour bounded soak
 
