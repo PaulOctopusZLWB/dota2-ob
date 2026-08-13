@@ -407,8 +407,11 @@ durable idempotency index whether policy accepts or rejects them. After basic
 authenticated request/session/command-ID validation, indexed-ID lookup precedes
 capacity and action/target evaluation: repeating an indexed ID returns its exact
 committed result and creates no new commit. A stale expected revision on a new
-admitted ID is rejected without mutation. Emergency hide has precedence over
-pin/show/approve and remains active until an explicit later command clears it.
+admitted ID leaves policy revision, domain state, and policy-time high-water
+unchanged, but its terminal rejection commit inserts the idempotency entry and
+therefore changes `policy_state.v2` and its hash. Emergency hide has precedence
+over pin/show/approve and remains active until an explicit later command clears
+it.
 
 Once the durable index contains 4,096 IDs, the authenticated command adapter
 rejects every unknown ID before policy evaluation with the fixed admission
@@ -461,23 +464,32 @@ retains the V1 identities, sequence, revision/state hashes, resulting
 observation-sequence and policy-time high-water marks, ordered
 `BroadcastDecisionV1` values, optional `OperatorCommandResultV1`, causal
 `AuditEventV1` values, and publication outcome. It also contains the complete
-canonical `OperatorCommandV1` for every command commit. Exactly one causal input
-exists: an observation sequence, or both a command ID and matching embedded
-command. The embedded command's ID/session must match the commit, result,
-decisions, and audits. Its action, candidate/rule target, expected revision, and
-policy time are source data; recovery must never infer them from reason strings,
-candidate IDs, cooldowns, or another frozen field. Every policy-rejected
-admitted command and no-display/suppressed observation also receives one
-terminal commit. Equal prior/resulting hashes are required only when the
-canonical semantic state is unchanged; deterministic time advancement, expiry,
-or bounded-index maintenance is represented in the resulting hash even when
-publication remains unchanged.
+canonical `OperatorCommandV1` for every command commit. Every observation
+commit instead contains the exact input's `EvidenceRefV1` and SHA-256 of its RFC
+8785 canonical `LiveObservationV1`. Exactly one causal input exists: an
+observation sequence plus matching evidence/hash, or both a command ID and
+matching embedded command. Observation evidence must match the commit session
+and sequence. Its raw-payload SHA-256 must match the immutable accepted session
+record, and deterministic projection through the bound mapping must reproduce
+the committed live-observation hash before policy evaluation.
+
+The embedded command's ID/session must match the commit, result, decisions, and
+audits. Its action, candidate/rule target, expected revision, and policy time
+are source data; recovery must never infer them from reason strings, candidate
+IDs, cooldowns, or another frozen field. Every policy-rejected admitted command
+and no-display/suppressed observation also receives one terminal commit. Equal
+prior/resulting hashes are required only when the canonical semantic state is
+unchanged; deterministic time advancement, expiry, or bounded-index maintenance
+is represented in the resulting hash even when publication remains unchanged.
+In particular, a policy-rejected admitted command keeps revision/domain/time
+state unchanged while its one new durable idempotency entry changes the semantic
+state hash.
 
 Before its first commit, each V2 policy-log lineage synchronously seals one
 content-addressed, 2 MiB-bounded `PolicyLineageManifestV2`. It binds the
-session ID and committed session-log manifest/hash; raw/live schema and mapping
-identities;
-`TournamentScopeV1` and `HistoricalSnapshotManifestV1` identities; the ordered
+session ID; append-only raw-record schema/framing; raw/live schema and mapping
+identities; `TournamentScopeV1` and `HistoricalSnapshotManifestV1` identities;
+the ordered
 eligible `HistoricalBaselineV1` content hashes; rule, config, catalog, and
 localization-parameter-mapping versions plus content hashes; and pure-engine
 build identity. Every `PolicyCommitV2` and `PolicyCheckpointV2` carries the
@@ -487,7 +499,9 @@ content, and its write uses file sync, atomic rename, and parent-directory sync
 before the first commit. A manifest write/validation failure hides policy output
 and rejects commands without affecting capture. A different artifact set starts
 a new lineage; recovery never searches alternative configs or snapshots until a
-state hash happens to match.
+state hash happens to match. The manifest intentionally does not hash the
+growing session-log contents; each later observation commit is content-bound by
+its own evidence and live-observation hashes above.
 
 The pure core deterministically returns the unpersisted commit payload from its
 explicit input and prior state. The application layer supplies the next commit
@@ -567,8 +581,11 @@ candidate. Expired tombstones are removed deterministically when the policy-time
 high-water mark advances. If all 4,096 tombstones remain live, a new unique
 candidate is suppressed without insertion using `candidate_index_capacity`;
 the resulting hash includes any accepted time/index maintenance. An input
-policy time below the high-water mark is rejected without mutation using
-`out_of_order_policy_time`. Only successfully time-ordered observations and
+policy time below the high-water mark is rejected using
+`out_of_order_policy_time`. An out-of-order observation changes no semantic
+state. A new admitted out-of-order command leaves revision/domain/time state
+unchanged but inserts its idempotency entry, so only the index and resulting
+state hash change. Only successfully time-ordered observations and
 policy-accepted commands advance the high-water mark; stale-revision, duplicate,
 over-limit, malformed, and out-of-order commands do not.
 
@@ -581,14 +598,17 @@ hash.
 
 Restart validates the complete V2 checkpoint anchor and state, then replays
 later commits strictly by commit sequence. For an observation commit, recovery
-uses the exact immutable observation and evaluation artifacts selected by its
-`PolicyLineageManifestV2`; for a command commit, it re-evaluates the embedded
-canonical command. The reproduced result, decisions, audits, publication
-outcome, revision, and state hash must be byte-equivalent to the committed
-record or recovery fails closed. A missing/incompatible checkpoint loads the
-same sealed lineage manifest and performs the same replay from sequence one. A
-missing or hash-mismatched manifest/artifact fails closed; recovery never
-silently resets state or guesses an evaluation context.
+loads the named session record, validates the embedded `EvidenceRefV1` including
+raw-payload hash, reprojects it with the lineage-bound mapping, and verifies the
+canonical `LiveObservationV1` hash before evaluation. A mismatch fails even when
+the altered field would not change a decision. For a command commit, recovery
+re-evaluates the embedded canonical command. The reproduced result, decisions,
+audits, publication outcome, revision, and state hash must be byte-equivalent to
+the committed record or recovery fails closed. A missing/incompatible checkpoint
+loads the same sealed lineage manifest and performs the same replay from sequence
+one. A missing or hash-mismatched manifest, record, evidence, observation, or
+artifact fails closed; recovery never silently resets state or guesses an
+evaluation context.
 
 V1 and V2 frames cannot be mixed in one policy-log lineage. Because no V1
 production session has been accepted, new production sessions start with V2.
@@ -602,12 +622,13 @@ migration must never synthesize missing command data.
 
 The migration gate requires V2 documentation, validators, canonical
 goldens/hashes, dependency checks, and recovery tests for admitted versus
-over-limit IDs, exact duplicate frame lookup, accepted/rejected
-`disable_rule`/`enable_rule`, lineage-manifest loss/mismatch, size/identifier
-admission limits, preview ordering/expiry, tombstone eviction/capacity, time
-high-water ordering, active-primary continuation, pins, valid/missing/corrupt
-checkpoint anchors, later-frame replay, mixed-version rejection, and state/hash
-mismatch before M2 resumes.
+over-limit IDs, rejected-command index-only hash mutation, exact duplicate frame
+lookup, accepted/rejected `disable_rule`/`enable_rule`, lineage-manifest
+loss/mismatch, later-appended observation evidence/raw/live hash mismatch,
+size/identifier admission limits, preview ordering/expiry, tombstone
+eviction/capacity, time high-water ordering, active-primary continuation, pins,
+valid/missing/corrupt checkpoint anchors, later-frame replay, mixed-version
+rejection, and state/hash mismatch before M2 resumes.
 
 ## Dependency Direction
 
