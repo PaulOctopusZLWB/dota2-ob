@@ -21,7 +21,15 @@ func buildReadinessInput(t *testing.T, pairs [][2]string, parsePasses uint32) Re
 		m.ReplaySHA256 = f.ReplaySHA256
 		m.GameBuild = f.GameBuild
 		matches = append(matches, m)
-		processed = append(processed, ProcessedReplayEvidence{MatchID: mid, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, SuccessfulParsePasses: parsePasses})
+		proof := ProcessedReplayEvidence{MatchID: mid}
+		for pass := uint32(0); pass < parsePasses; pass++ {
+			receipt := ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: mid + "-pass-" + string(rune('a'+pass)), MatchID: mid, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, ParserVersion: "manta/v1.5.0", AdapterVersion: AdapterName + "/" + AdapterVersion, ConfigSHA256: testSHA("config"), Deterministic: true}
+			if err := SealParseExecutionEvidence(&receipt); err != nil {
+				t.Fatal(err)
+			}
+			proof.Passes = append(proof.Passes, receipt)
+		}
+		processed = append(processed, proof)
 	}
 	dm := buildDiscovery(t, scope, roster, matches)
 	return ReadinessInput{Scope: scope, Roster: roster, Manifest: dm, Facts: facts, Processed: processed, Windows: NewCutoffWindow(scope.HistoryCutoff, PatchWindow{PatchID: "60"}, mustParseTime(t, "2026-03-24T00:00:00Z")), Patch: PatchWindow{PatchID: "60"}, GeneratedAt: scope.HistoryCutoff.Add(-time.Hour)}
@@ -92,5 +100,20 @@ func TestReadinessGateRejectsUnboundManifest(t *testing.T) {
 	e := ReadinessGate(in)
 	if e.Outcome != ReadinessHistoricalNoGo {
 		t.Fatalf("expected no-go for unbound manifest, got %#v", e)
+	}
+}
+
+func TestReadinessRejectsCopiedParseReceipt(t *testing.T) {
+	scope := buildScope(t)
+	ids := make([]string, len(scope.Teams))
+	for i := range scope.Teams {
+		ids[i] = scope.Teams[i].TeamID
+	}
+	in := buildReadinessInput(t, fullPairs(ids), 1)
+	for i := range in.Processed {
+		in.Processed[i].Passes = append(in.Processed[i].Passes, in.Processed[i].Passes[0])
+	}
+	if got := ReadinessGate(in); got.Outcome == ReadinessFullHistoryGo {
+		t.Fatalf("copied receipt passed readiness: %#v", got)
 	}
 }

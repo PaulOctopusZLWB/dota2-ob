@@ -1,6 +1,7 @@
 package history
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -97,6 +98,16 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 		teamByID[t.TeamID] = t
 	}
 	groups := map[aggKey]*aggGroup{}
+	var arithmeticErr error
+	add := func(dst *int64, v int64) bool {
+		n, ok := checkedAddInt64(*dst, v)
+		if !ok {
+			arithmeticErr = errors.New("history: aggregate int64 overflow")
+			return false
+		}
+		*dst = n
+		return true
+	}
 	ensure := func(k aggKey, kind CellKind) *aggGroup {
 		g, ok := groups[k]
 		if !ok {
@@ -114,8 +125,9 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 	addScalar := func(g *aggGroup, matchID string, val *int64) {
 		mark(g, matchID, val != nil)
 		if val != nil {
-			g.sum += *val
-			g.count++
+			if add(&g.sum, *val) {
+				add(&g.count, 1)
+			}
 		}
 	}
 	addDec := func(g *aggGroup, matchID string, v contracts.Decimal) {
@@ -126,8 +138,9 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 		}
 		if num, ok := parseDec(v); ok {
 			mark(g, matchID, true)
-			g.sum += num
-			g.count++
+			if add(&g.sum, num) {
+				add(&g.count, 1)
+			}
 			return
 		}
 		mark(g, matchID, false)
@@ -254,14 +267,20 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 							teamPresent = false
 							continue
 						}
-						total += *v
+						if n, ok := checkedAddInt64(total, *v); ok {
+							total = n
+						} else {
+							arithmeticErr = errors.New("history: team total int64 overflow")
+							teamPresent = false
+						}
 					}
 					if memberCount != 5 {
 						teamPresent = false
 					}
 					if teamPresent {
-						gm.sum += total
-						gm.count++
+						if add(&gm.sum, total) {
+							add(&gm.count, 1)
+						}
 					}
 					mark(gm, f.MatchID, teamPresent)
 				}
@@ -270,6 +289,9 @@ func Aggregate(in AggregateInput) ([]BaselineCell, error) {
 		}
 	}
 
+	if arithmeticErr != nil {
+		return nil, arithmeticErr
+	}
 	cells := buildCells(groups, in)
 	sort.Slice(cells, func(i, j int) bool { return cellLess(cells[i].Key, cells[j].Key) })
 	return cells, nil
@@ -294,9 +316,22 @@ func emitBuckets(ensure func(aggKey, CellKind) *aggGroup, mark func(*aggGroup, s
 			g.buckets[bucket] = b
 		}
 		if num, ok := parseDecString(val); ok {
-			b.sum += num // cent-scaled; mean divides once via meanDec
-			b.count++
-			b.presentObs++
+			var ok bool
+			b.sum, ok = checkedAddInt64(b.sum, num)
+			if !ok {
+				continue
+			}
+			b.count, ok = checkedAddInt64(b.count, 1)
+			if !ok {
+				b.sum -= num
+				continue
+			}
+			b.presentObs, ok = checkedAddInt64(b.presentObs, 1)
+			if !ok {
+				b.sum -= num
+				b.count--
+				continue
+			}
 		}
 	}
 }
@@ -395,7 +430,11 @@ func emitWins(ensure func(aggKey, CellKind) *aggGroup, winKnown, won bool, k agg
 	if winKnown {
 		g.presentMatches[matchID] = true
 		if won {
-			g.winCount++
+			if n, ok := checkedAddInt64(g.winCount, 1); ok {
+				g.winCount = n
+			} else {
+				delete(g.presentMatches, matchID)
+			}
 		}
 	}
 }
@@ -414,10 +453,17 @@ func meanFromInt(sum, count int64) contracts.Decimal {
 	if count <= 0 {
 		return ""
 	}
-	return formatScaled(sum * 100 / count)
+	scaled, ok := checkedMulInt64(sum, 100)
+	if !ok {
+		return ""
+	}
+	return formatScaled(scaled / count)
 }
 
 func formatScaled(scaled int64) contracts.Decimal {
+	if scaled == -1<<63 {
+		return ""
+	}
 	neg := scaled < 0
 	if neg {
 		scaled = -scaled
@@ -493,7 +539,11 @@ func killParticipationValue(p ParticipantFacts, team []ParticipantFacts) contrac
 			complete = false
 			break
 		}
-		teamKills += *tp.Kills
+		var ok bool
+		teamKills, ok = checkedAddInt64(teamKills, *tp.Kills)
+		if !ok {
+			return ""
+		}
 	}
 	if !complete || teamKills == 0 {
 		return ""
@@ -501,7 +551,15 @@ func killParticipationValue(p ParticipantFacts, team []ParticipantFacts) contrac
 	// KP = (kills+assists)/teamKills expressed as a 2-decimal ratio in [0,1]
 	// (e.g. "0.42"), not a percent. The numerator is scaled to cents so
 	// meanDec divides once rather than double-scaling through meanFromInt.
-	num := (*p.Kills + *p.Assists) * 100 / teamKills
+	numerator, ok := checkedAddInt64(*p.Kills, *p.Assists)
+	if !ok {
+		return ""
+	}
+	numerator, ok = checkedMulInt64(numerator, 100)
+	if !ok {
+		return ""
+	}
+	num := numerator / teamKills
 	return formatScaled(num)
 }
 
@@ -598,6 +656,27 @@ func parseDecString(s string) (int64, bool) {
 		return -int64(value), true
 	}
 	return int64(value), true
+}
+
+func checkedAddInt64(a, b int64) (int64, bool) {
+	if (b > 0 && a > (1<<63-1)-b) || (b < 0 && a < (-1<<63)-b) {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedMulInt64(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if (a == -1 && b == -1<<63) || (b == -1 && a == -1<<63) {
+		return 0, false
+	}
+	n := a * b
+	if n/b != a {
+		return 0, false
+	}
+	return n, true
 }
 
 func cellLess(a, b contracts.HistoricalBaselineKeyV1) bool {

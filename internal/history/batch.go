@@ -22,16 +22,17 @@ const (
 // reached, terminal reason, attempt count, and content identities so resume
 // does not duplicate facts or aggregates.
 type StageEntry struct {
-	MatchID        string            `json:"match_id"`
-	Status         StageState        `json:"status"`
-	ReachedStage   string            `json:"reached_stage"`
-	InFlightStage  string            `json:"in_flight_stage,omitempty"`
-	Attempts       int               `json:"attempts"`
-	ReplaySHA256   string            `json:"replay_sha256,omitempty"`
-	FactsSHA256    string            `json:"facts_sha256,omitempty"`
-	ArtifactSHA256 map[string]string `json:"artifact_sha256,omitempty"`
-	LastError      string            `json:"last_error,omitempty"`
-	TerminalReason string            `json:"terminal_reason,omitempty"`
+	MatchID             string            `json:"match_id"`
+	Status              StageState        `json:"status"`
+	ReachedStage        string            `json:"reached_stage"`
+	InFlightStage       string            `json:"in_flight_stage,omitempty"`
+	Attempts            int               `json:"attempts"`
+	ReplaySHA256        string            `json:"replay_sha256,omitempty"`
+	FactsSHA256         string            `json:"facts_sha256,omitempty"`
+	ArtifactSHA256      map[string]string `json:"artifact_sha256,omitempty"`
+	ArtifactInputSHA256 map[string]string `json:"artifact_input_sha256,omitempty"`
+	LastError           string            `json:"last_error,omitempty"`
+	TerminalReason      string            `json:"terminal_reason,omitempty"`
 }
 
 // StageBatch is the complete resumable state for one discovery manifest run.
@@ -120,6 +121,9 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		prior = NewStageBatch(manifest)
 	} else if prior.SchemaVersion != StageSchema || prior.ManifestID != manifest.ContentSHA256 || prior.Entries == nil {
 		return prior, ErrBatchManifestMismatch
+	}
+	if err := p.validateCheckpoint(manifest, prior); err != nil {
+		return prior, err
 	}
 	if p.MaxRetries < 1 {
 		p.MaxRetries = 1
@@ -267,6 +271,67 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		return prior, &ErrRetryablePending{IDs: retryable}
 	}
 	return prior, nil
+}
+
+func (p *StagePipeline) validateCheckpoint(manifest DiscoveryManifestV1, b StageBatch) error {
+	if len(p.StageOrder) == 0 {
+		return errors.New("batch: empty stage order")
+	}
+	order := map[string]int{StageDiscovery: -1}
+	seen := map[string]bool{StageDiscovery: true}
+	for i, stage := range p.StageOrder {
+		if stage == "" || seen[stage] {
+			return errors.New("batch: invalid stage order")
+		}
+		seen[stage] = true
+		order[stage] = i
+	}
+	manifestIDs := map[string]bool{}
+	for _, m := range manifest.Matches {
+		manifestIDs[m.MatchID] = true
+	}
+	for key, e := range b.Entries {
+		if !manifestIDs[key] || e.MatchID != key {
+			return errors.New("batch: checkpoint entry identity mismatch")
+		}
+		reached, ok := order[e.ReachedStage]
+		if !ok {
+			return errors.New("batch: invalid reached stage")
+		}
+		switch e.Status {
+		case StageQueued, StageRunning, StageSucceeded, StageFailedTerminal:
+		default:
+			return errors.New("batch: invalid entry status")
+		}
+		if e.InFlightStage != "" {
+			flight, ok := order[e.InFlightStage]
+			if !ok || flight != reached+1 || e.Status == StageSucceeded {
+				return errors.New("batch: contradictory in-flight stage")
+			}
+		}
+		for i := 0; i <= reached; i++ {
+			stage := p.StageOrder[i]
+			if e.ArtifactSHA256 == nil || e.ArtifactInputSHA256 == nil || !isSHA(e.ArtifactSHA256[stage]) || !isSHA(e.ArtifactInputSHA256[stage]) {
+				return errors.New("batch: incomplete stage identity chain")
+			}
+			if i > 0 && e.ArtifactInputSHA256[stage] != e.ArtifactSHA256[p.StageOrder[i-1]] {
+				return errors.New("batch: contradictory stage identity chain")
+			}
+		}
+		if reached >= 0 && !isSHA(e.ReplaySHA256) {
+			return errors.New("batch: missing acquisition replay identity")
+		}
+		if normalize, exists := order[StageNormalize]; exists && reached >= normalize && !isSHA(e.FactsSHA256) {
+			return errors.New("batch: missing normalized facts identity")
+		}
+		if e.Status == StageSucceeded && (reached != len(p.StageOrder)-1 || e.InFlightStage != "") {
+			return errors.New("batch: inconsistent succeeded cursor")
+		}
+		if e.Status == StageFailedTerminal && e.TerminalReason == "" {
+			return errors.New("batch: terminal entry missing reason")
+		}
+	}
+	return nil
 }
 
 // TerminalFailures signals the final state still holds terminal entries so an

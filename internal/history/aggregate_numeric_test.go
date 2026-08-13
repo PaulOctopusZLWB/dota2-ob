@@ -334,3 +334,31 @@ func TestAggregateRequiresOwningTeamEffectiveInterval(t *testing.T) {
 		t.Fatalf("only [effective_from,effective_until) matches may count, got %#v", games)
 	}
 }
+
+func TestAggregateRejectsContractValidSumOverflow(t *testing.T) {
+	scope := buildScope(t)
+	roster := buildRoster(t, scope)
+	base := mustParseTime(t, "2026-07-01T00:00:00Z")
+	max := "92233720368547758.07"
+	var facts []NormalizedMatchFacts
+	for i := 0; i < 10; i++ {
+		f := buildFacts(t, "overflow-"+pidSuffix(i), base.Add(time.Duration(i)*time.Hour), "team-a", "team-b", true, roster)
+		for pi := range f.Participants {
+			f.Participants[pi].NetWorth = &max
+		}
+		if err := SealNormalizedMatchFacts(&f); err != nil {
+			t.Fatal(err)
+		}
+		facts = append(facts, f)
+	}
+	windows := NewCutoffWindow(scope.HistoryCutoff, PatchWindow{PatchID: "60"}, mustParseTime(t, "2026-03-24T00:00:00Z"))
+	if _, err := Aggregate(AggregateInput{Facts: facts, Roster: roster, Windows: windows, Patch: PatchWindow{PatchID: "60"}, GeneratedAt: scope.HistoryCutoff.Add(-time.Hour)}); err == nil {
+		t.Fatal("contract-valid multi-value overflow published a wrapped value")
+	}
+}
+
+func TestCheckedMeanRejectsScaleOverflow(t *testing.T) {
+	if got := meanFromInt(1<<62, 1); got.Valid() {
+		t.Fatalf("overflowing integer scale published %q", got)
+	}
+}

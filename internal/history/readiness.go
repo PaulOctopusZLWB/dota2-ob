@@ -1,17 +1,55 @@
 package history
 
 import (
+	"errors"
 	"sort"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 )
 
+type ParseExecutionEvidence struct {
+	SchemaVersion  string `json:"schema_version"`
+	ContentSHA256  string `json:"content_sha256"`
+	ExecutionID    string `json:"execution_id"`
+	MatchID        string `json:"match_id"`
+	ReplaySHA256   string `json:"replay_sha256"`
+	FactsSHA256    string `json:"facts_sha256"`
+	ParserVersion  string `json:"parser_version"`
+	AdapterVersion string `json:"adapter_version"`
+	ConfigSHA256   string `json:"config_sha256"`
+	Deterministic  bool   `json:"deterministic"`
+}
+
+func SealParseExecutionEvidence(p *ParseExecutionEvidence) error {
+	if p == nil {
+		return errors.New("nil parse execution evidence")
+	}
+	p.ContentSHA256 = ""
+	h, err := contentSHA256("parse-execution", *p)
+	if err != nil {
+		return err
+	}
+	p.ContentSHA256 = h
+	return p.Validate()
+}
+
+func (p ParseExecutionEvidence) Validate() error {
+	if p.SchemaVersion != "history.parse-execution.v1" || p.ExecutionID == "" || p.MatchID == "" || !isSHA(p.ReplaySHA256) || !isSHA(p.FactsSHA256) || p.ParserVersion == "" || p.AdapterVersion == "" || !isSHA(p.ConfigSHA256) || !p.Deterministic || !isSHA(p.ContentSHA256) {
+		return errors.New("invalid parse execution evidence")
+	}
+	got := p.ContentSHA256
+	p.ContentSHA256 = ""
+	want, err := contentSHA256("parse-execution", p)
+	if err != nil || got != want {
+		return errors.New("parse execution evidence identity mismatch")
+	}
+	return nil
+}
+
 type ProcessedReplayEvidence struct {
-	MatchID               string `json:"match_id"`
-	ReplaySHA256          string `json:"replay_sha256"`
-	FactsSHA256           string `json:"facts_sha256"`
-	SuccessfulParsePasses uint32 `json:"successful_parse_passes"`
+	MatchID string                   `json:"match_id"`
+	Passes  []ParseExecutionEvidence `json:"passes"`
 }
 
 type ReadinessInput struct {
@@ -89,7 +127,7 @@ func ReadinessGate(in ReadinessInput) ReadinessEvidence {
 		processedSeen[p.MatchID] = true
 		m, mok := manifestByID[p.MatchID]
 		f, fok := factsByID[p.MatchID]
-		if !mok || !fok || m.State != MatchReplayAccessible || p.SuccessfulParsePasses < 2 || p.ReplaySHA256 != m.ReplaySHA256 || p.ReplaySHA256 != f.ReplaySHA256 || p.FactsSHA256 != f.ContentSHA256 || correlateMatch(m, f) != "" {
+		if !mok || !fok || m.State != MatchReplayAccessible || !consistentParsePasses(p, m, f) || correlateMatch(m, f) != "" {
 			continue
 		}
 		eligible = append(eligible, f)
@@ -157,6 +195,20 @@ func ReadinessGate(in ReadinessInput) ReadinessEvidence {
 		e.RestrictedReason = "team_below_minimum_matches"
 	}
 	return e
+}
+
+func consistentParsePasses(p ProcessedReplayEvidence, m DiscoveryMatch, f NormalizedMatchFacts) bool {
+	if len(p.Passes) < 2 {
+		return false
+	}
+	ids, receipts := map[string]bool{}, map[string]bool{}
+	for _, pass := range p.Passes {
+		if pass.Validate() != nil || pass.MatchID != p.MatchID || pass.MatchID != f.MatchID || pass.ReplaySHA256 != m.ReplaySHA256 || pass.ReplaySHA256 != f.ReplaySHA256 || pass.FactsSHA256 != f.ContentSHA256 || ids[pass.ExecutionID] || receipts[pass.ContentSHA256] {
+			return false
+		}
+		ids[pass.ExecutionID], receipts[pass.ContentSHA256] = true, true
+	}
+	return true
 }
 
 func readinessCellMinimum(sampleDefinition string) uint64 {

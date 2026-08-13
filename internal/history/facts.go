@@ -38,20 +38,20 @@ type NormalizedMatchFacts struct {
 // is a pointer: nil means the source did not expose it (missingness), not
 // zero. Zero is a real value only when the pointer is non-nil.
 type ParticipantFacts struct {
-	PersonID  string `json:"person_id"`
-	TeamID    string `json:"team_id"`
-	HeroName  string `json:"hero_name,omitempty"`
-	Role      string `json:"role,omitempty"`
-	Slot      int    `json:"slot"`
-	Kills     *int64 `json:"kills,omitempty"`
-	Deaths    *int64 `json:"deaths,omitempty"`
-	Assists   *int64 `json:"assists,omitempty"`
-	GPM       *int64 `json:"gpm,omitempty"`
-	XPM       *int64 `json:"xpm,omitempty"`
-	LastHits  *int64 `json:"last_hits,omitempty"`
-	Denies    *int64 `json:"denies,omitempty"`
-	NetWorth  *string `json:"net_worth,omitempty"`
-	Level     *int64 `json:"level,omitempty"`
+	PersonID string  `json:"person_id"`
+	TeamID   string  `json:"team_id"`
+	HeroName string  `json:"hero_name,omitempty"`
+	Role     string  `json:"role,omitempty"`
+	Slot     int     `json:"slot"`
+	Kills    *int64  `json:"kills,omitempty"`
+	Deaths   *int64  `json:"deaths,omitempty"`
+	Assists  *int64  `json:"assists,omitempty"`
+	GPM      *int64  `json:"gpm,omitempty"`
+	XPM      *int64  `json:"xpm,omitempty"`
+	LastHits *int64  `json:"last_hits,omitempty"`
+	Denies   *int64  `json:"denies,omitempty"`
+	NetWorth *string `json:"net_worth,omitempty"`
+	Level    *int64  `json:"level,omitempty"`
 	// FarmCheckpoints maps minute boundary -> net worth at that minute. Source
 	// the entity-state reconstruction (M1 deferred). Empty when unavailable.
 	FarmCheckpoints map[int64]string `json:"farm_checkpoints,omitempty"`
@@ -75,18 +75,18 @@ type FactsAvailability struct {
 const (
 	MetricGames             = "games"
 	MetricWins              = "wins"
-	MetricKills              = "kills"
-	MetricDeaths             = "deaths"
-	MetricAssists            = "assists"
-	MetricGPM                = "gpm"
-	MetricXPM                = "xpm"
-	MetricLastHits           = "last_hits"
-	MetricDenies             = "denies"
-	MetricNetWorth           = "net_worth"
-	MetricLevel              = "level"
-	MetricKillParticipation  = "kill_participation"
+	MetricKills             = "kills"
+	MetricDeaths            = "deaths"
+	MetricAssists           = "assists"
+	MetricGPM               = "gpm"
+	MetricXPM               = "xpm"
+	MetricLastHits          = "last_hits"
+	MetricDenies            = "denies"
+	MetricNetWorth          = "net_worth"
+	MetricLevel             = "level"
+	MetricKillParticipation = "kill_participation"
 	MetricFarmCheckpoint    = "farm_checkpoint"
-	MetricKeyItemTiming      = "key_item_timing"
+	MetricKeyItemTiming     = "key_item_timing"
 )
 
 // RequiredMetric returns whether a metric requires source coverage to be
@@ -106,9 +106,9 @@ func RequiredMetric(metric string) bool {
 // matches; lane/item distribution cells need >=8 eligible observations;
 // team-level comparative cells need >=10 eligible matches.
 const (
-	MinDraftCell      = 5
-	MinLaneItemCell   = 8
-	MinTeamCompCell   = 10
+	MinDraftCell    = 5
+	MinLaneItemCell = 8
+	MinTeamCompCell = 10
 )
 
 // Validate checks the normalized facts are self-consistent. It does NOT
@@ -178,13 +178,16 @@ func decimalFromInt(v int64) string {
 		return "0"
 	}
 	neg := v < 0
+	var magnitude uint64
 	if neg {
-		v = -v
+		magnitude = uint64(-(v + 1)) + 1
+	} else {
+		magnitude = uint64(v)
 	}
 	digits := []byte{}
-	for v > 0 {
-		digits = append([]byte{byte('0' + v%10)}, digits...)
-		v /= 10
+	for magnitude > 0 {
+		digits = append([]byte{byte('0' + magnitude%10)}, digits...)
+		magnitude /= 10
 	}
 	if neg {
 		return "-" + string(digits)

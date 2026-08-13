@@ -214,6 +214,11 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		radiant := radiantTeams[i%len(radiantTeams)]
 		dire := direTeams[i%len(direTeams)]
 		f := buildVerifiedFacts(idx, mid, base.Add(time.Duration(i)*time.Hour), radiant, dire, teams, heroes, i%2 == 0)
+		var err error
+		f, err = bindLocalReplayFixture(f)
+		if err != nil {
+			return nil, fmt.Errorf("bind local replay fixture: %w", err)
+		}
 		facts = append(facts, f)
 		discoveryMatches = append(discoveryMatches, history.DiscoveryMatch{
 			MatchID: mid, SourceEventTime: f.SourceEventTime, PatchID: "60", GameBuild: f.GameBuild,
@@ -277,7 +282,18 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		return nil, err
 	}
 	statePath := dataDir + "/history/corpus-batch-state.json"
-	mu := newFixtureStageComposition(facts, dataDir+"/history/artifacts")
+	aggregateArtifact := func(f history.NormalizedMatchFacts) (string, error) {
+		cells, err := history.Aggregate(history.AggregateInput{Facts: []history.NormalizedMatchFacts{f}, Roster: roster, Windows: windows, Patch: history.PatchWindow{PatchID: "60", DotaPatch: "7.41"}, GeneratedAt: cutoff.Add(-time.Hour)})
+		if err != nil {
+			return "", err
+		}
+		b, err := contracts.MarshalCanonical(cells)
+		if err != nil {
+			return "", err
+		}
+		return sha256Hex(string(b)), nil
+	}
+	mu := newLocalReplayStageComposition(facts, dataDir+"/history/artifacts", aggregateArtifact)
 	pipeline := &history.StagePipeline{
 		Stages:     mu.stages,
 		Reconcile:  mu.reconcile,
@@ -356,7 +372,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 	for k, v := range callsRecorder {
 		resumeCalls[k] = v
 	}
-	interruptionCalls, err := verifyInterruptionRecovery(dm, facts, dataDir+"/history/interruption-matrix")
+	interruptionCalls, err := verifyInterruptionRecovery(dm, facts, dataDir+"/history/interruption-matrix", aggregateArtifact)
 	if err != nil {
 		return nil, fmt.Errorf("interruption matrix: %w", err)
 	}
@@ -370,7 +386,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		discovery:         dm,
 		roster:            roster,
 		facts:             facts,
-		processed:         processedEvidence(facts),
+		processed:         sortedProcessedEvidence(mu.processed),
 		windows:           windows,
 		patch:             history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
 		snapshotID:        snap.Snapshot.ContentSHA256,
@@ -483,13 +499,10 @@ func participantIDs(in []history.ParticipantFacts) []string {
 	return out
 }
 
-func processedEvidence(facts []history.NormalizedMatchFacts) []history.ProcessedReplayEvidence {
+func sortedProcessedEvidence(byID map[string]history.ProcessedReplayEvidence) []history.ProcessedReplayEvidence {
 	out := []history.ProcessedReplayEvidence{}
-	for _, f := range facts {
-		if f.IdentityStatus != contracts.IdentityVerified {
-			continue
-		}
-		out = append(out, history.ProcessedReplayEvidence{MatchID: f.MatchID, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, SuccessfulParsePasses: 2})
+	for _, proof := range byID {
+		out = append(out, proof)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].MatchID < out[j].MatchID })
 	return out

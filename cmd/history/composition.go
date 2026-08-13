@@ -13,29 +13,12 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/history"
 )
 
-// historyStagePort is the production-shaped boundary for one durable stage.
-// Execute may write an external artifact; Reconcile must recognize that exact
-// content identity after a crash before cursor advancement is checkpointed.
-type historyStagePort interface {
-	Execute(history.StageEntry, history.MatchContext) (history.StageEntry, *history.StageFailure)
-	Reconcile(history.StageEntry, history.MatchContext) (history.StageEntry, bool, *history.StageFailure)
-}
-
 type stageComposition struct {
 	stages    map[string]history.StageFunc
 	reconcile map[string]history.StageReconcileFunc
 	order     []string
 	calls     map[string]int
-}
-
-func composeStagePorts(ports map[string]historyStagePort, order []string, calls map[string]int) stageComposition {
-	c := stageComposition{stages: map[string]history.StageFunc{}, reconcile: map[string]history.StageReconcileFunc{}, order: append([]string(nil), order...), calls: calls}
-	for _, stage := range order {
-		port := ports[stage]
-		c.stages[stage] = port.Execute
-		c.reconcile[stage] = port.Reconcile
-	}
-	return c
+	processed map[string]history.ProcessedReplayEvidence
 }
 
 type fixtureArtifact struct {
@@ -46,24 +29,51 @@ type fixtureArtifact struct {
 }
 
 type fileArtifactPort struct {
-	stage string
-	root  string
-	facts map[string]history.NormalizedMatchFacts
-	calls map[string]int
+	stage     string
+	root      string
+	facts     map[string]history.NormalizedMatchFacts
+	calls     map[string]int
+	processed map[string]history.ProcessedReplayEvidence
+	aggregate func(history.NormalizedMatchFacts) (string, error)
 }
 
-func newFixtureStageComposition(facts []history.NormalizedMatchFacts, root string) stageComposition {
+type localReplayFixture struct {
+	Facts history.NormalizedMatchFacts `json:"facts"`
+}
+
+func localReplayBytes(f history.NormalizedMatchFacts) ([]byte, error) {
+	f.ContentSHA256, f.ReplaySHA256 = "", ""
+	return contracts.MarshalCanonical(localReplayFixture{Facts: f})
+}
+
+func bindLocalReplayFixture(f history.NormalizedMatchFacts) (history.NormalizedMatchFacts, error) {
+	b, err := localReplayBytes(f)
+	if err != nil {
+		return f, err
+	}
+	h := sha256.Sum256(b)
+	f.ReplaySHA256 = hex.EncodeToString(h[:])
+	return f, history.SealNormalizedMatchFacts(&f)
+}
+
+func newLocalReplayStageComposition(facts []history.NormalizedMatchFacts, root string, aggregate func(history.NormalizedMatchFacts) (string, error)) stageComposition {
 	byID := map[string]history.NormalizedMatchFacts{}
 	for _, f := range facts {
 		byID[f.MatchID] = f
 	}
 	calls := map[string]int{}
+	processed := map[string]history.ProcessedReplayEvidence{}
 	order := []string{history.StageAcquisition, history.StageVerification, history.StageParse, history.StageNormalize, history.StageAggregate}
-	ports := map[string]historyStagePort{}
-	for _, stage := range order {
-		ports[stage] = &fileArtifactPort{stage: stage, root: root, facts: byID, calls: calls}
+	makePort := func(stage string) *fileArtifactPort {
+		return &fileArtifactPort{stage: stage, root: root, facts: byID, calls: calls, processed: processed, aggregate: aggregate}
 	}
-	return composeStagePorts(ports, order, calls)
+	acquire, verify, parse := makePort(history.StageAcquisition), makePort(history.StageVerification), makePort(history.StageParse)
+	normalize, aggregatePort := makePort(history.StageNormalize), makePort(history.StageAggregate)
+	return stageComposition{
+		stages:    map[string]history.StageFunc{history.StageAcquisition: acquire.Execute, history.StageVerification: verify.Execute, history.StageParse: parse.Execute, history.StageNormalize: normalize.Execute, history.StageAggregate: aggregatePort.Execute},
+		reconcile: map[string]history.StageReconcileFunc{history.StageAcquisition: acquire.Reconcile, history.StageVerification: verify.Reconcile, history.StageParse: parse.Reconcile, history.StageNormalize: normalize.Reconcile, history.StageAggregate: aggregatePort.Reconcile},
+		order:     order, calls: calls, processed: processed,
+	}
 }
 
 func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContext) (history.StageEntry, *history.StageFailure) {
@@ -75,9 +85,42 @@ func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContex
 		}
 		return e, &history.StageFailure{Stage: p.stage, Reason: reason, Terminal: true}
 	}
+	if sf := p.executeSourceOperation(e, ctx); sf != nil {
+		return e, sf
+	}
 	a, ok := p.expected(e, ctx)
 	if !ok {
 		return e, &history.StageFailure{Stage: p.stage, Reason: "missing_fixture_input", Terminal: true}
+	}
+	if p.stage == history.StageNormalize {
+		payload, err := localReplayBytes(p.facts[e.MatchID])
+		if err != nil {
+			return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+		}
+		proof := history.ProcessedReplayEvidence{MatchID: e.MatchID}
+		for _, id := range []string{"independent-pass-a", "independent-pass-b"} {
+			var raw localReplayFixture
+			if err := contracts.DecodeStrict(payload, &raw); err != nil {
+				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+			}
+			raw.Facts.ReplaySHA256 = ctx.Discovery.ReplaySHA256
+			if err := history.SealNormalizedMatchFacts(&raw.Facts); err != nil || raw.Facts.ContentSHA256 != p.facts[e.MatchID].ContentSHA256 {
+				return e, &history.StageFailure{Stage: p.stage, Reason: "nondeterministic_normalize", Terminal: true}
+			}
+			pass := history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: id, MatchID: e.MatchID, ReplaySHA256: raw.Facts.ReplaySHA256, FactsSHA256: raw.Facts.ContentSHA256, ParserVersion: "local-replay-fixture/v1", AdapterVersion: history.AdapterName + "/" + history.AdapterVersion, ConfigSHA256: sha256Text("local-replay-config-v1"), Deterministic: true}
+			if err := history.SealParseExecutionEvidence(&pass); err != nil {
+				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+			}
+			proof.Passes = append(proof.Passes, pass)
+		}
+		p.processed[e.MatchID] = proof
+		proofBytes, err := contracts.MarshalCanonical(proof)
+		if err != nil {
+			return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+		}
+		if err := atomicfile.WriteFile(p.parseProofPath(e.MatchID), append(proofBytes, '\n'), 0o644); err != nil {
+			return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: false}
+		}
 	}
 	b, err := contracts.MarshalCanonical(a)
 	if err != nil {
@@ -90,6 +133,11 @@ func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContex
 }
 
 func (p *fileArtifactPort) Reconcile(e history.StageEntry, ctx history.MatchContext) (history.StageEntry, bool, *history.StageFailure) {
+	if p.stage != history.StageAcquisition {
+		if sf := p.verifyReplaySource(e, ctx); sf != nil {
+			return e, false, sf
+		}
+	}
 	want, ok := p.expected(e, ctx)
 	if !ok {
 		return e, false, nil
@@ -108,7 +156,85 @@ func (p *fileArtifactPort) Reconcile(e history.StageEntry, ctx history.MatchCont
 	if got != want {
 		return e, false, &history.StageFailure{Stage: p.stage, Reason: "artifact_identity_mismatch", Terminal: true}
 	}
+	if p.stage == history.StageNormalize {
+		b, err := os.ReadFile(p.parseProofPath(e.MatchID))
+		if err != nil {
+			return e, false, &history.StageFailure{Stage: p.stage, Reason: "parse_evidence_missing", Terminal: true}
+		}
+		var proof history.ProcessedReplayEvidence
+		if err := contracts.DecodeStrict(b, &proof); err != nil || proof.MatchID != e.MatchID || len(proof.Passes) < 2 {
+			return e, false, &history.StageFailure{Stage: p.stage, Reason: "parse_evidence_corrupt", Terminal: true}
+		}
+		seen := map[string]bool{}
+		for _, pass := range proof.Passes {
+			if pass.Validate() != nil || pass.MatchID != e.MatchID || pass.ReplaySHA256 != ctx.Discovery.ReplaySHA256 || pass.FactsSHA256 != p.facts[e.MatchID].ContentSHA256 || seen[pass.ContentSHA256] {
+				return e, false, &history.StageFailure{Stage: p.stage, Reason: "parse_evidence_mismatch", Terminal: true}
+			}
+			seen[pass.ContentSHA256] = true
+		}
+		p.processed[e.MatchID] = proof
+	}
 	return p.apply(e, got), true, nil
+}
+
+func (p *fileArtifactPort) replayPath(matchID string) string {
+	return filepath.Join(p.root, "replays", sha256Text(matchID)+".dem")
+}
+
+func (p *fileArtifactPort) parseProofPath(matchID string) string {
+	return filepath.Join(p.root, "parse-evidence", sha256Text(matchID)+".json")
+}
+
+func (p *fileArtifactPort) verifyReplaySource(e history.StageEntry, ctx history.MatchContext) *history.StageFailure {
+	b, err := os.ReadFile(p.replayPath(e.MatchID))
+	if err != nil {
+		return &history.StageFailure{Stage: p.stage, Reason: "replay_source_missing", Terminal: false}
+	}
+	h := sha256.Sum256(b)
+	if hex.EncodeToString(h[:]) != ctx.Discovery.ReplaySHA256 {
+		return &history.StageFailure{Stage: p.stage, Reason: "replay_checksum_mismatch", Terminal: true}
+	}
+	return nil
+}
+
+func (p *fileArtifactPort) executeSourceOperation(e history.StageEntry, ctx history.MatchContext) *history.StageFailure {
+	f, ok := p.facts[e.MatchID]
+	if !ok {
+		return &history.StageFailure{Stage: p.stage, Reason: "missing_source_input", Terminal: true}
+	}
+	if p.stage == history.StageAcquisition {
+		b, err := localReplayBytes(f)
+		if err != nil {
+			return &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+		}
+		if err := atomicfile.WriteFile(p.replayPath(e.MatchID), b, 0o644); err != nil {
+			return &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: false}
+		}
+		return p.verifyReplaySource(e, ctx)
+	}
+	if sf := p.verifyReplaySource(e, ctx); sf != nil {
+		return sf
+	}
+	if p.stage == history.StageParse || p.stage == history.StageNormalize {
+		b, _ := os.ReadFile(p.replayPath(e.MatchID))
+		var raw localReplayFixture
+		if err := contracts.DecodeStrict(b, &raw); err != nil {
+			return &history.StageFailure{Stage: p.stage, Reason: "parse_failed", Terminal: true}
+		}
+		raw.Facts.ReplaySHA256 = ctx.Discovery.ReplaySHA256
+		if err := history.SealNormalizedMatchFacts(&raw.Facts); err != nil || raw.Facts.ContentSHA256 != f.ContentSHA256 {
+			return &history.StageFailure{Stage: p.stage, Reason: "normalize_identity_mismatch", Terminal: true}
+		}
+	}
+	if p.stage == history.StageAggregate {
+		if p.aggregate == nil {
+			return &history.StageFailure{Stage: p.stage, Reason: "aggregate_not_configured", Terminal: true}
+		}
+		if _, err := p.aggregate(f); err != nil {
+			return &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+		}
+	}
+	return nil
 }
 
 func (p *fileArtifactPort) expected(e history.StageEntry, ctx history.MatchContext) (fixtureArtifact, bool) {
@@ -116,13 +242,28 @@ func (p *fileArtifactPort) expected(e history.StageEntry, ctx history.MatchConte
 	if !ok {
 		return fixtureArtifact{}, false
 	}
-	input := ctx.Discovery.ReplaySHA256
+	input := sha256Text("discovery:" + e.MatchID + ":" + ctx.Discovery.ReplaySHA256)
+	order := []string{history.StageAcquisition, history.StageVerification, history.StageParse, history.StageNormalize, history.StageAggregate}
+	for i, stage := range order {
+		if stage == p.stage && i > 0 {
+			input = e.ArtifactSHA256[order[i-1]]
+		}
+	}
 	output := sha256Text(p.stage + ":" + e.MatchID + ":" + input + ":" + f.ContentSHA256)
 	switch p.stage {
 	case history.StageAcquisition:
 		output = f.ReplaySHA256
 	case history.StageNormalize:
 		output = f.ContentSHA256
+	case history.StageAggregate:
+		if p.aggregate == nil {
+			return fixtureArtifact{}, false
+		}
+		var err error
+		output, err = p.aggregate(f)
+		if err != nil {
+			return fixtureArtifact{}, false
+		}
 	}
 	return fixtureArtifact{Stage: p.stage, MatchID: e.MatchID, InputSHA256: input, OutputSHA256: output}, true
 }
@@ -131,6 +272,10 @@ func (p *fileArtifactPort) apply(e history.StageEntry, a fixtureArtifact) histor
 	if e.ArtifactSHA256 == nil {
 		e.ArtifactSHA256 = map[string]string{}
 	}
+	if e.ArtifactInputSHA256 == nil {
+		e.ArtifactInputSHA256 = map[string]string{}
+	}
+	e.ArtifactInputSHA256[p.stage] = a.InputSHA256
 	e.ArtifactSHA256[p.stage] = a.OutputSHA256
 	if p.stage == history.StageAcquisition {
 		e.ReplaySHA256 = a.OutputSHA256
@@ -182,7 +327,7 @@ func artifactTreeSHA(root string) (string, int64, int, error) {
 	return hex.EncodeToString(sum[:]), total, len(items), nil
 }
 
-func verifyInterruptionRecovery(manifest history.DiscoveryManifestV1, facts []history.NormalizedMatchFacts, root string) (map[string]int, error) {
+func verifyInterruptionRecovery(manifest history.DiscoveryManifestV1, facts []history.NormalizedMatchFacts, root string, aggregate func(history.NormalizedMatchFacts) (string, error)) (map[string]int, error) {
 	var match history.DiscoveryMatch
 	for _, m := range manifest.Matches {
 		if m.State == history.MatchReplayAccessible {
@@ -211,7 +356,7 @@ func verifyInterruptionRecovery(manifest history.DiscoveryManifestV1, facts []hi
 	totals := map[string]int{}
 	for failAt := 1; failAt <= 12; failAt++ {
 		caseRoot := filepath.Join(root, fmt.Sprintf("boundary-%02d", failAt))
-		first := newFixtureStageComposition([]history.NormalizedMatchFacts{fact}, caseRoot)
+		first := newLocalReplayStageComposition([]history.NormalizedMatchFacts{fact}, caseRoot, aggregate)
 		var durable []byte
 		saves := 0
 		p := &history.StagePipeline{Stages: first.stages, Reconcile: first.reconcile, StageOrder: first.order, MaxRetries: 1, Save: func(b history.StageBatch) error {
@@ -235,7 +380,7 @@ func verifyInterruptionRecovery(manifest history.DiscoveryManifestV1, facts []hi
 				return nil, err
 			}
 		}
-		second := newFixtureStageComposition([]history.NormalizedMatchFacts{fact}, caseRoot)
+		second := newLocalReplayStageComposition([]history.NormalizedMatchFacts{fact}, caseRoot, aggregate)
 		p = &history.StagePipeline{Stages: second.stages, Reconcile: second.reconcile, StageOrder: second.order, MaxRetries: 1, Save: func(b history.StageBatch) error { return nil }}
 		if _, err := p.Run(one, prior); err != nil {
 			return nil, fmt.Errorf("boundary %d resume: %w", failAt, err)

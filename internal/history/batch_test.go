@@ -17,6 +17,25 @@ type stageCounts struct {
 	calls       map[string]int
 }
 
+func stampStage(e StageEntry, stage string) StageEntry {
+	if e.ArtifactSHA256 == nil {
+		e.ArtifactSHA256 = map[string]string{}
+	}
+	if e.ArtifactInputSHA256 == nil {
+		e.ArtifactInputSHA256 = map[string]string{}
+	}
+	order := []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate}
+	input := testSHA("discovery:" + e.MatchID)
+	for i, s := range order {
+		if s == stage && i > 0 {
+			input = e.ArtifactSHA256[order[i-1]]
+		}
+	}
+	e.ArtifactInputSHA256[stage] = input
+	e.ArtifactSHA256[stage] = testSHA(stage + ":" + e.MatchID)
+	return e
+}
+
 func newStageCounts() *stageCounts {
 	return &stageCounts{acquireFail: map[string]bool{}, parseFail: map[string]bool{}, calls: map[string]int{}}
 }
@@ -28,27 +47,27 @@ func (sc *stageCounts) buildPipeline(maxRetries int, save func(StageBatch) error
 			return e, &StageFailure{Stage: StageAcquisition, Reason: "checksum_mismatch", Terminal: true}
 		}
 		e.ReplaySHA256 = testSHA(e.MatchID)
-		return e, nil
+		return stampStage(e, StageAcquisition), nil
 	}
 	verify := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["verify:"+e.MatchID]++
-		return e, nil
+		return stampStage(e, StageVerification), nil
 	}
 	parse := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["parse:"+e.MatchID]++
 		if sc.parseFail[e.MatchID] {
 			return e, &StageFailure{Stage: StageParse, Reason: "parse_error", Terminal: false}
 		}
-		return e, nil
+		return stampStage(e, StageParse), nil
 	}
 	normalize := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["normalize:"+e.MatchID]++
 		e.FactsSHA256 = testSHA(e.MatchID + "_facts")
-		return e, nil
+		return stampStage(e, StageNormalize), nil
 	}
 	aggregate := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["aggregate:"+e.MatchID]++
-		return e, nil
+		return stampStage(e, StageAggregate), nil
 	}
 	return &StagePipeline{
 		Stages: map[string]StageFunc{
@@ -204,7 +223,7 @@ func TestBatchResumesMidStage(t *testing.T) {
 	p := sc.buildPipeline(1, func(b StageBatch) error { saved = b; return nil })
 	// Start from an identity-bound state where m1 reached acquire but not succeeded.
 	prior := NewStageBatch(manifest)
-	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageQueued, ReachedStage: StageAcquisition, ReplaySHA256: testSHA("m1")}
+	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageQueued, ReachedStage: StageAcquisition, ReplaySHA256: testSHA("m1"), ArtifactSHA256: map[string]string{StageAcquisition: testSHA("acquisition:m1")}, ArtifactInputSHA256: map[string]string{StageAcquisition: testSHA("discovery:m1")}}
 	if _, err := p.Run(manifest, prior); err != nil {
 		t.Fatalf("resume mid-stage: %v", err)
 	}
@@ -300,4 +319,22 @@ func cloneStageBatch(in StageBatch) StageBatch {
 		out.Entries[k] = v
 	}
 	return out
+}
+
+func TestBatchRejectsSucceededCursorWithoutArtifactIdentity(t *testing.T) {
+	manifest := buildBatchManifest(t, "m1")
+	prior := NewStageBatch(manifest)
+	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageSucceeded, ReachedStage: StageAggregate}
+	if _, err := newStageCounts().buildPipeline(1, nil).Run(manifest, prior); err == nil {
+		t.Fatal("identity-free succeeded cursor was trusted")
+	}
+}
+
+func TestBatchRejectsEntryKeyIdentityMismatch(t *testing.T) {
+	manifest := buildBatchManifest(t, "m1")
+	prior := NewStageBatch(manifest)
+	prior.Entries["m1"] = StageEntry{MatchID: "other", Status: StageQueued, ReachedStage: StageDiscovery}
+	if _, err := newStageCounts().buildPipeline(1, nil).Run(manifest, prior); err == nil {
+		t.Fatal("entry key/match identity mismatch was trusted")
+	}
 }
