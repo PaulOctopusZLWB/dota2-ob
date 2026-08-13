@@ -158,6 +158,23 @@ test("valid response reconnects after connection loss", async ({ page }) => {
   await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible", { timeout: 2000 });
 });
 
+test("freshness-only publications do not rewrite an unchanged visible claim", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.claimMutationCount = 0;
+    addEventListener("DOMContentLoaded", () => {
+      new MutationObserver((records) => { window.claimMutationCount += records.length; })
+        .observe(document.getElementById("claim"), { subtree: true, childList: true, characterData: true, attributes: true });
+    });
+  });
+  await routeState(page, () => visibleState());
+  await openVisible(page);
+  await page.waitForTimeout(100);
+  const afterInitialRender = await page.evaluate(() => window.claimMutationCount);
+  await page.waitForTimeout(1700);
+  expect(await page.evaluate(() => window.claimMutationCount)).toBe(afterInitialRender);
+  await expect(page.locator("body")).toHaveAttribute("data-render-state", "visible");
+});
+
 test("hostile null-origin page cannot invoke operator commands", async ({ page }) => {
   await page.goto("data:text/html,<title>hostile</title>");
   const result = await page.evaluate(async () => {

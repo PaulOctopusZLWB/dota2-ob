@@ -67,3 +67,22 @@ software stack, host and power context, raw five-second samples, state
 transitions, derived metrics, checksums, and the overall result. The two PNGs
 are sanitized full-canvas examples of a visible claim and a correctly hidden
 claim.
+
+## Current fixed-stack result
+
+The 2026-08-13 full run completed all 600 seconds of empty-scene sampling, 600
+seconds of overlay warmup, and 3,600 seconds of overlay resource sampling. It
+then failed P3 because an isolated OBS stop-recording hotkey ended the MKV after
+879.6 seconds and, before the recording stopped, the 2560x1440 CEF software path
+used more than 256 MiB incremental PSS. The runner correctly reported
+`passed: false`; that file is superseded by the post-fix evidence committed with
+this change.
+
+The hotkeys have been removed and the runner now aborts if an MKV stops growing
+for 30 seconds. A 600-second warmup plus 120-second post-fix measurement then
+recorded the full 720.2 seconds with zero hidden/recovery frame violations, but
+the conservative OBS+CEF process-tree PSS delta remained 285,617 KiB. A 10 FPS
+Browser Source reduced the three-minute sample only to 269,569 KiB, while the
+official obs-browser `--enable-gpu` path increased it to 452,377 KiB. Both
+experiments were reverted. This is a reproducible P3 blocker on the pinned CEF
+127 software-composited 2560x1440 stack, not a passing claim.

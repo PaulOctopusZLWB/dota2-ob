@@ -194,7 +194,7 @@ def latest_obs_log() -> Path:
     return max(logs, key=lambda path: path.stat().st_mtime_ns)
 
 
-def collect_phase(name: str, duration: int) -> list[dict]:
+def collect_phase(name: str, duration: int, recording: Path | None = None) -> list[dict]:
     samples = []
     hz = os.sysconf("SC_CLK_TCK")
     previous_ticks = None
@@ -210,6 +210,13 @@ def collect_phase(name: str, duration: int) -> list[dict]:
         elapsed = now - start
         if elapsed > duration and samples:
             break
+        if recording is not None:
+            try:
+                recording_age = time.time() - recording.stat().st_mtime
+            except FileNotFoundError as error:
+                raise RuntimeError(f"{name} recording disappeared") from error
+            if recording_age > max(30, SAMPLE_SECONDS * 4):
+                raise RuntimeError(f"{name} recording stopped updating {recording_age:.1f}s ago")
         pids = obs_pids()
         ticks_by_kind = {
             "obs": sum(ticks(pid) for pid in pids if process_kind(pid) == "obs"),
@@ -375,7 +382,7 @@ def main() -> int:
         before = recording_files()
         baseline_obs, baseline_stream, _ = launch_obs("DOT24-P3-Empty", RUN / "baseline-launcher.log", record=True)
         baseline_video, baseline_started = started_recording(before)
-        baseline_samples = collect_phase("empty-baseline", BASELINE_SECONDS)
+        baseline_samples = collect_phase("empty-baseline", BASELINE_SECONDS, baseline_video)
         stop_obs(baseline_obs, baseline_stream)
         baseline_obs = baseline_stream = None
         baseline_log = RUN / "baseline-obs.log"
@@ -384,8 +391,8 @@ def main() -> int:
         before = recording_files()
         overlay_obs, overlay_stream, _ = launch_obs("DOT24-P3-Overlay", RUN / "overlay-launcher.log", record=True)
         overlay_video, overlay_started = started_recording(before)
-        warmup_samples = collect_phase("overlay-warmup", WARMUP_SECONDS)
-        recording_samples = collect_phase("overlay-recording", RECORD_SECONDS)
+        warmup_samples = collect_phase("overlay-warmup", WARMUP_SECONDS, overlay_video)
+        recording_samples = collect_phase("overlay-recording", RECORD_SECONDS, overlay_video)
         stop_obs(overlay_obs, overlay_stream)
         overlay_obs = overlay_stream = None
         overlay_log = RUN / "overlay-obs.log"
@@ -451,7 +458,7 @@ def main() -> int:
         pss_increment = statistics.median(recording_pss) - statistics.median(baseline_pss)
         total_growth = max(recording_pss) - min(recording_pss)
         passed = all([
-            overlay_duration >= RECORD_SECONDS - 2,
+            overlay_duration >= WARMUP_SECONDS + RECORD_SECONDS - 2,
             pss_increment <= 256 * 1024,
             growth_slope <= 1024,
             total_growth <= 64 * 1024,

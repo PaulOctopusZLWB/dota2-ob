@@ -22,6 +22,7 @@
   let latestSettledGeneration = 0;
   let lastPublication = 0;
   let staleDeadline = 0;
+  let visibleSignature = "";
 
   function onlyKeys(value, allowed) {
     return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => allowed.includes(key));
@@ -69,10 +70,12 @@
     lastPublication = state.publication_time_ms;
     staleDeadline = state.stale_deadline_ms;
     if (state.visibility !== "visible" || Date.now() > staleDeadline) { hide(state.health_code || "unsafe-state"); return; }
+    const sources = [...new Set(state.evidence.map((item) => item.source))];
+    const signature = JSON.stringify([state.decision_id, state.claim, state.confidence, state.evidence.length, sources]);
+    if (signature === visibleSignature && body.dataset.renderState === "visible") return;
     fields.title.textContent = state.claim.title;
     fields.body.textContent = state.claim.body;
     fields.evidence.textContent = `${state.evidence.length} 条已提交证据`;
-    const sources = [...new Set(state.evidence.map((item) => item.source))];
     fields.source.textContent = sources.slice(0, 3).join(" · ") + (sources.length > 3 ? " · …" : "");
     fields.confidence.textContent = state.confidence;
     fields.age.textContent = "实时";
@@ -83,6 +86,7 @@
     body.dataset.renderState = "visible";
     body.dataset.hideReason = "none";
     card.setAttribute("aria-hidden", "false");
+    visibleSignature = signature;
   }
   async function readBoundedState(response) {
     const declaredLength = Number(response.headers.get("Content-Length") || 0);

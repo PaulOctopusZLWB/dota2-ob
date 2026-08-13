@@ -47,9 +47,6 @@ ChannelSetup=Stereo
 MonitoringDeviceName=Default
 MonitoringDeviceId=default
 
-[Hotkeys]
-OBSBasic.StartRecording={{"bindings":[{{"key":"OBS_KEY_F9"}}]}}
-OBSBasic.StopRecording={{"bindings":[{{"key":"OBS_KEY_F10"}}]}}
 """
 
 
@@ -80,7 +77,6 @@ def collection(name: str, browser: bool) -> dict:
         sources.append(source("Analytics Sidebar", browser_uuid, "browser_source", {
             "url": URL, "width": WIDTH, "height": HEIGHT, "fps": 30, "shutdown": False,
             "restart_when_active": False, "reroute_audio": False,
-            "css": "body { background-color: rgba(0,0,0,0); margin:0; overflow:hidden; }",
         }))
         items.append({
             "name": "Analytics Sidebar", "source_uuid": browser_uuid, "visible": True, "locked": True,
@@ -113,7 +109,7 @@ def main() -> None:
     recording.mkdir(parents=True, exist_ok=True, mode=0o700)
     obs = root / "config/obs-studio"
     write(obs / "global.ini", "[General]\nMaxLogs=10\nInfoIncrement=-1\nProcessPriority=Normal\nEnableAutoUpdates=false\nBrowserHWAccel=false\nLastVersion=537001985\n\n[Video]\nRenderer=OpenGL\n")
-    write(obs / "user.ini", "[General]\nFirstRun=false\nConfirmOnExit=false\nHotkeyFocusType=NeverDisableHotkeys\n\n[BasicWindow]\nPreviewEnabled=true\nShowStatusBar=true\nDocksLocked=true\n")
+    write(obs / "user.ini", "[General]\nFirstRun=false\nConfirmOnExit=false\n\n[BasicWindow]\nPreviewEnabled=true\nShowStatusBar=true\nDocksLocked=true\n")
     for name, browser in (("DOT24-P3-Empty", False), ("DOT24-P3-Overlay", True)):
         write(obs / "basic/profiles" / name / "basic.ini", profile(name, recording))
         write(obs / "basic/scenes" / f"{name}.json", json.dumps(collection(name, browser), ensure_ascii=False, indent=2) + "\n")

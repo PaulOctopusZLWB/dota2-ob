@@ -1,0 +1,178 @@
+{
+  "protocol": "P2",
+  "measuredAt": "2026-08-13T03:40:23.417Z",
+  "baseCommit": "3f8f4417f4b04dffe572ae59bd93eca876eaab38",
+  "sourceDiffSHA256": "99bec88626f45a9137538c55998ebad086a1bd2aaeb22b21c44bf1088384b5ba",
+  "browser": {
+    "product": "Google Chrome",
+    "version": "150.0.7871.181",
+    "headless": true
+  },
+  "pollIntervalMs": 750,
+  "trialsPerScenarioPerCanvas": 100,
+  "timingStart": "completed unsafe response/transport error",
+  "timingStop": "DOM claim hidden followed by alpha-empty captured frame",
+  "results": [
+    {
+      "canvas": "1080p",
+      "scenario": "stale-deadline",
+      "trials": 100,
+      "p50Ms": 2.311,
+      "p95Ms": 3.586,
+      "maxMs": 18.177,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "disconnect",
+      "trials": 100,
+      "p50Ms": 4.3,
+      "p95Ms": 571.171,
+      "maxMs": 1017.48,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "malformed",
+      "trials": 100,
+      "p50Ms": 1.055,
+      "p95Ms": 2.055,
+      "maxMs": 646.447,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "schema-mismatch",
+      "trials": 100,
+      "p50Ms": 1.075,
+      "p95Ms": 1.955,
+      "maxMs": 478.04,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "oversize",
+      "trials": 100,
+      "p50Ms": 2.367,
+      "p95Ms": 3.445,
+      "maxMs": 18.262,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "missing-asset",
+      "trials": 100,
+      "p50Ms": 2.349,
+      "p95Ms": 4.808,
+      "maxMs": 19.056,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "emergency-hide",
+      "trials": 100,
+      "p50Ms": 2.366,
+      "p95Ms": 7.435,
+      "maxMs": 79.097,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1080p",
+      "scenario": "delayed-older-response",
+      "trials": 100,
+      "p50Ms": 1.44,
+      "p95Ms": 1.977,
+      "maxMs": 2.117,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "stale-deadline",
+      "trials": 100,
+      "p50Ms": 1.477,
+      "p95Ms": 4.537,
+      "maxMs": 7.491,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "disconnect",
+      "trials": 100,
+      "p50Ms": 2.146,
+      "p95Ms": 5.922,
+      "maxMs": 608.425,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "malformed",
+      "trials": 100,
+      "p50Ms": 2.469,
+      "p95Ms": 5.103,
+      "maxMs": 601.316,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "schema-mismatch",
+      "trials": 100,
+      "p50Ms": 2.469,
+      "p95Ms": 4.391,
+      "maxMs": 6.586,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "oversize",
+      "trials": 100,
+      "p50Ms": 3.535,
+      "p95Ms": 5.658,
+      "maxMs": 605.045,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "missing-asset",
+      "trials": 100,
+      "p50Ms": 3.32,
+      "p95Ms": 5.353,
+      "maxMs": 6.233,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "emergency-hide",
+      "trials": 100,
+      "p50Ms": 2.606,
+      "p95Ms": 4.75,
+      "maxMs": 7.248,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    },
+    {
+      "canvas": "1440p",
+      "scenario": "delayed-older-response",
+      "trials": 100,
+      "p50Ms": 1.538,
+      "p95Ms": 2.471,
+      "maxMs": 17.881,
+      "transientReappearances": 0,
+      "nonEmptyCapturedFrames": 0
+    }
+  ],
+  "passed": true
+}
