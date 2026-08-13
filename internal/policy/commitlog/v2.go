@@ -332,6 +332,28 @@ func (s *StoreV2) LookupCommand(commandID string) (contracts.OperatorCommandResu
 	return result, true, nil
 }
 
+// LookupPolicyCommand resolves the complete original canonical command commit
+// for application-level idempotency after restart.
+func (s *StoreV2) LookupPolicyCommand(commandID string) (contracts.PolicyCommitV2, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resultHash, ok := s.state.CommandResults[commandID]
+	if !ok {
+		return contracts.PolicyCommitV2{}, false, nil
+	}
+	locator, ok := s.state.CommandLocators[commandID]
+	if !ok {
+		s.sealed = true
+		return contracts.PolicyCommitV2{}, false, ErrCorrupt
+	}
+	committed, err := s.readLocator(locator, resultHash)
+	if err != nil {
+		s.sealed = true
+		return contracts.PolicyCommitV2{}, false, err
+	}
+	return committed.Commit, true, nil
+}
+
 func (s *StoreV2) rollback(prior int64, cause error) error {
 	if err := s.hooks.Truncate(s.file, prior); err != nil {
 		s.sealed = true
@@ -515,6 +537,17 @@ func (s *StoreV2) LoadCheckpoint(visit func(CommittedV2) error) (*contracts.Poli
 	}
 	copyCheckpoint := cloneCheckpointV2(checkpoint)
 	return &copyCheckpoint, nil
+}
+
+// VisitAll streams the complete committed history without retaining payloads.
+// It is used when the checkpoint cache is missing or corrupt.
+func (s *StoreV2) VisitAll(visit func(CommittedV2) error) error {
+	if visit == nil {
+		return errors.New("v2 replay visitor required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scanFrames(visit)
 }
 
 func locatorShapeMatches(checkpoint contracts.PolicyCheckpointV2) bool {

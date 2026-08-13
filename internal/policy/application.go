@@ -14,6 +14,10 @@ type CommitAppender interface {
 	AppendPolicyCommit(contracts.PolicyCommitV2) error
 }
 
+type CommandCommitLookup interface {
+	LookupPolicyCommand(string) (contracts.PolicyCommitV2, bool, error)
+}
+
 // Application never exposes tentative policy state. A failed append retains
 // the prior engine and requests a deterministic hide publication.
 type Application struct {
@@ -36,8 +40,27 @@ func (a *Application) ApplyCommand(command contracts.OperatorCommandV1) (contrac
 	if existing, ok := a.engine.commandCommits[command.CommandID]; ok {
 		return existing, nil
 	}
-	if _, err := contracts.AdmitOperatorCommandV2(a.engine.state.SessionID, command, a.engine.state.CommandResults); err != nil {
+	admission, err := contracts.AdmitOperatorCommandV2(a.engine.state.SessionID, command, a.engine.state.CommandResults)
+	if err != nil {
 		return contracts.PolicyCommitV2{}, err
+	}
+	if admission.Duplicate {
+		lookup, ok := a.log.(CommandCommitLookup)
+		if !ok {
+			return contracts.PolicyCommitV2{}, ErrCommitFailedHidden
+		}
+		commit, found, err := lookup.LookupPolicyCommand(command.CommandID)
+		if err != nil || !found || commit.CommandResult == nil {
+			if err == nil {
+				err = ErrCommitFailedHidden
+			}
+			return contracts.PolicyCommitV2{}, errors.Join(ErrCommitFailedHidden, err)
+		}
+		resultHash, hashErr := contracts.CanonicalSHA256(*commit.CommandResult)
+		if hashErr != nil || resultHash != admission.ResultSHA256 {
+			return contracts.PolicyCommitV2{}, ErrCommitFailedHidden
+		}
+		return commit, nil
 	}
 	next := a.engine.clone()
 	commit := next.ApplyCommand(command)

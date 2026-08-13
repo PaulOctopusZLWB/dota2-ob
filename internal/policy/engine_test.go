@@ -97,7 +97,26 @@ func TestDisableEnablePinStaleRevisionAndCooldown(t *testing.T) {
 	engine.ApplyCommand(approve)
 	engine.EvaluateObservation(3, hash('c'), hash('d'), evidence(3), []contracts.InsightCandidateV1{candidate("c", "draft.v1", "high", 3, 10)}, 6)
 	if len(engine.State().Preview) != 0 {
-		t.Fatal("rule cooldown admitted candidate")
+		t.Fatalf("rule cooldown admitted candidate: %#v", engine.State())
+	}
+}
+
+func TestRestoreCheckpointContinuesIdentically(t *testing.T) {
+	config := policy.DefaultConfig()
+	uninterrupted := policy.New("session", config)
+	first := uninterrupted.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 1)
+	state := uninterrupted.State()
+	cp := contracts.PolicyCheckpointV2{SchemaVersion: contracts.PolicyCheckpointSchemaV2, LineageManifestID: config.LineageID, LineageManifestSHA256: config.LineageID, SessionID: "session", CommitSequence: first.CommitSequence, ReferencedCommitSHA256: hash('f'), LastObservationSequence: state.LastObservationSequence, PolicyRevision: state.PolicyRevision, LastPolicyTimeMS: state.LastPolicyTimeMS, StateHash: uninterrupted.StateHash(), CreatedTimeMS: 1, Preview: state.Preview, DisabledRuleIDs: state.DisabledRuleIDs, Cooldowns: state.Cooldowns, Pins: state.Pins, EmergencyHide: state.EmergencyHide, ActivePrimary: state.ActivePrimary, CommandResults: state.CommandResults, CandidateTombstones: state.CandidateTombstones}
+	recovered, err := policy.NewFromCheckpoint(cp, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextA := uninterrupted.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{candidate("b", "lane.v1", "high", 2, 11)}, 2)
+	nextB := recovered.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{candidate("b", "lane.v1", "high", 2, 11)}, 2)
+	a, _ := contracts.MarshalCanonical(nextA)
+	b, _ := contracts.MarshalCanonical(nextB)
+	if !bytes.Equal(a, b) || uninterrupted.StateHash() != recovered.StateHash() {
+		t.Fatal("checkpoint continuation diverged")
 	}
 }
 

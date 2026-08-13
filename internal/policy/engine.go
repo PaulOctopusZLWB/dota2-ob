@@ -4,7 +4,9 @@ package policy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,8 +57,52 @@ func New(sessionID string, config Config) *Engine {
 	return e
 }
 
+// NewFromCheckpoint restores the complete pure semantic projection. The
+// commit-log adapter must first validate the checkpoint anchor and locators.
+func NewFromCheckpoint(checkpoint contracts.PolicyCheckpointV2, config Config) (*Engine, error) {
+	if err := checkpoint.Validate(); err != nil {
+		return nil, err
+	}
+	e := New(checkpoint.SessionID, config)
+	if checkpoint.LineageManifestID != e.config.LineageID || checkpoint.LineageManifestSHA256 != e.config.LineageID {
+		return nil, errors.New("policy checkpoint lineage mismatch")
+	}
+	e.state = cloneState(checkpoint.StateProjection())
+	e.sequence = checkpoint.CommitSequence
+	e.hash = checkpoint.StateHash
+	return e, nil
+}
+
 func (e *Engine) State() contracts.PolicyStateV2 { return cloneState(e.state) }
 func (e *Engine) StateHash() string              { return e.hash }
+
+// ReplayCommit re-evaluates one committed causal input against restored state
+// and requires exact canonical equivalence before recovery may continue.
+func (e *Engine) ReplayCommit(committed contracts.PolicyCommitV2, candidates []contracts.InsightCandidateV1) error {
+	if committed.SessionID != e.state.SessionID || committed.LineageManifestID != e.config.LineageID {
+		return errors.New("replay lineage mismatch")
+	}
+	var replayed contracts.PolicyCommitV2
+	if committed.Command != nil {
+		replayed = e.ApplyCommand(*committed.Command)
+	} else if committed.ObservationEvidence != nil {
+		replayed = e.EvaluateObservation(committed.ObservationSequence, committed.RawRecordSHA256, committed.LiveObservationSHA256, *committed.ObservationEvidence, candidates, committed.ResultingPolicyTimeMS)
+	} else {
+		return errors.New("replay missing causal input")
+	}
+	want, err := contracts.MarshalCanonical(committed)
+	if err != nil {
+		return err
+	}
+	got, err := contracts.MarshalCanonical(replayed)
+	if err != nil {
+		return err
+	}
+	if string(want) != string(got) {
+		return errors.New("replay canonical mismatch")
+	}
+	return nil
+}
 
 func SortCandidates(values []contracts.InsightCandidateV1) {
 	sort.SliceStable(values, func(i, j int) bool {
@@ -107,7 +153,9 @@ func (e *Engine) EvaluateObservation(observationSequence uint64, rawRecordHash, 
 		e.state.Preview = append(e.state.Preview, candidate)
 		SortCandidates(e.state.Preview)
 		changed = true
-		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, policyTimeMS, "candidate_queued", candidate.CandidateID, "", "", "approval_required"))
+		decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("queued", candidate.CandidateID, strconv.FormatUint(observationSequence, 10)), SessionID: e.state.SessionID, PolicyRevision: priorRevision + 1, CandidateID: candidate.CandidateID, PriorState: contracts.DecisionQueued, ResultingState: contracts.DecisionQueued, PolicyTimeMS: policyTimeMS, Reason: "approval_required"}
+		commit.Decisions = append(commit.Decisions, decision)
+		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, policyTimeMS, "candidate_queued", candidate.CandidateID, decision.DecisionID, "", "approval_required"))
 	}
 	e.state.LastObservationSequence, e.state.LastPolicyTimeMS = observationSequence, policyTimeMS
 	if changed || len(commit.Decisions) > 0 {
@@ -149,8 +197,12 @@ func (e *Engine) ApplyCommand(command contracts.OperatorCommandV1) contracts.Pol
 	for i := range decisions {
 		decisions[i].PolicyRevision = resultingRevision
 	}
-	if e.state.ActivePrimary != nil && len(decisions) > 0 && e.state.ActivePrimary.Candidate.CandidateID == decisions[0].CandidateID {
-		e.state.ActivePrimary.Decision = decisions[0]
+	if e.state.ActivePrimary != nil {
+		for _, decision := range decisions {
+			if e.state.ActivePrimary.Candidate.CandidateID == decision.CandidateID {
+				e.state.ActivePrimary.Decision = decision
+			}
+		}
 	}
 	result := contracts.OperatorCommandResultV1{SchemaVersion: contracts.OperatorCommandResultSchemaV1, CommandID: command.CommandID, SessionID: e.state.SessionID, Status: status, PreviousRevision: priorRevision, ResultingRevision: resultingRevision, Reason: reason}
 	for _, decision := range decisions {
@@ -162,6 +214,9 @@ func (e *Engine) ApplyCommand(command contracts.OperatorCommandV1) contracts.Pol
 	sort.Slice(e.state.CommandResults, func(i, j int) bool { return e.state.CommandResults[i].CommandID < e.state.CommandResults[j].CommandID })
 	commit.Decisions, commit.CommandResult = decisions, &result
 	commit.AuditEvents = []contracts.AuditEventV1{audit(e.state.SessionID, command.PolicyTimeMS, "operator_command", command.TargetCandidateID, firstDecision(decisions), command.CommandID, reason)}
+	for i := 1; i < len(decisions); i++ {
+		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, command.PolicyTimeMS, "policy_transition", decisions[i].CandidateID, decisions[i].DecisionID, command.CommandID, decisions[i].Reason))
+	}
 	if e.state.EmergencyHide {
 		commit.Publication = contracts.PublicationHide
 	} else if status == contracts.CommandAccepted && e.state.ActivePrimary != nil {
@@ -178,18 +233,17 @@ func (e *Engine) mutate(command contracts.OperatorCommandV1) ([]contracts.Broadc
 	switch command.Action {
 	case contracts.ActionEmergencyHide:
 		e.state.EmergencyHide = true
-		return nil, "emergency_hide", contracts.CommandAccepted
+		return []contracts.BroadcastDecisionV1{e.emergencyDecision(command, true)}, "emergency_hide", contracts.CommandAccepted
 	case contracts.ActionClearEmergencyHide:
 		e.state.EmergencyHide = false
-		return nil, "emergency_hide_cleared", contracts.CommandAccepted
+		return []contracts.BroadcastDecisionV1{e.emergencyDecision(command, false)}, "emergency_hide_cleared", contracts.CommandAccepted
 	case contracts.ActionDisableRule:
 		if contains(e.state.DisabledRuleIDs, command.TargetRuleID) {
 			return nil, "rule_already_disabled", contracts.CommandRejected
 		}
 		e.state.DisabledRuleIDs = append(e.state.DisabledRuleIDs, command.TargetRuleID)
 		sort.Strings(e.state.DisabledRuleIDs)
-		e.removeRule(command.TargetRuleID, command.PolicyTimeMS)
-		return nil, "rule_disabled", contracts.CommandAccepted
+		return e.removeRule(command.TargetRuleID, command.PolicyTimeMS, command.CommandID), "rule_disabled", contracts.CommandAccepted
 	case contracts.ActionEnableRule:
 		if !removeString(&e.state.DisabledRuleIDs, command.TargetRuleID) {
 			return nil, "rule_not_disabled", contracts.CommandRejected
@@ -241,7 +295,19 @@ func (e *Engine) mutate(command contracts.OperatorCommandV1) ([]contracts.Broadc
 	}
 	decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("decision", candidate.CandidateID, command.CommandID), SessionID: e.state.SessionID, CandidateID: candidate.CandidateID, CommandID: command.CommandID, PriorState: prior, ResultingState: resulting, PolicyTimeMS: command.PolicyTimeMS, Reason: command.Action}
 	if command.Action == contracts.ActionApprove || command.Action == contracts.ActionShow {
+		decisions := []contracts.BroadcastDecisionV1{}
+		if e.state.ActivePrimary != nil && e.state.ActivePrimary.Candidate.CandidateID != candidate.CandidateID {
+			old := e.state.ActivePrimary.Candidate
+			superseded := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("superseded", old.CandidateID, command.CommandID), SessionID: e.state.SessionID, CandidateID: old.CandidateID, CommandID: command.CommandID, PriorState: e.state.ActivePrimary.Decision.ResultingState, ResultingState: contracts.DecisionSuperseded, PolicyTimeMS: command.PolicyTimeMS, Reason: "superseded_by_primary"}
+			decisions = append(decisions, superseded)
+			e.tombstone(old, superseded, command.PolicyTimeMS)
+			e.setCooldown(old.RuleVersion, command.PolicyTimeMS)
+			removePin(&e.state.Pins, old.CandidateID)
+		}
 		e.state.ActivePrimary = &contracts.PolicyActivePrimaryV2{Candidate: candidate, Decision: decision}
+		e.setCooldown(candidate.RuleVersion, command.PolicyTimeMS)
+		decisions = append(decisions, decision)
+		return decisions, command.Action, contracts.CommandAccepted
 	}
 	if resulting == contracts.DecisionRejected {
 		e.tombstone(candidate, decision, command.PolicyTimeMS)
@@ -322,20 +388,45 @@ func (e *Engine) setCooldown(rule string, now int64) {
 	e.state.Cooldowns = append(e.state.Cooldowns, contracts.RuleCooldownV2{RuleID: rule, UntilPolicyTimeMS: until})
 	sort.Slice(e.state.Cooldowns, func(i, j int) bool { return e.state.Cooldowns[i].RuleID < e.state.Cooldowns[j].RuleID })
 }
-func (e *Engine) removeRule(rule string, now int64) {
+func (e *Engine) removeRule(rule string, now int64, commandID string) []contracts.BroadcastDecisionV1 {
+	decisions := []contracts.BroadcastDecisionV1{}
 	remaining := e.state.Preview[:0]
 	for _, c := range e.state.Preview {
 		if c.RuleVersion == rule {
-			d := contracts.BroadcastDecisionV1{DecisionID: id("disabled", c.CandidateID), ResultingState: contracts.DecisionRejected}
+			d := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("disabled", c.CandidateID, commandID), SessionID: e.state.SessionID, CandidateID: c.CandidateID, CommandID: commandID, PriorState: contracts.DecisionQueued, ResultingState: contracts.DecisionRejected, PolicyTimeMS: now, Reason: "rule_disabled"}
 			e.tombstone(c, d, now)
+			removePin(&e.state.Pins, c.CandidateID)
+			decisions = append(decisions, d)
 		} else {
 			remaining = append(remaining, c)
 		}
 	}
 	e.state.Preview = remaining
 	if e.state.ActivePrimary != nil && e.state.ActivePrimary.Candidate.RuleVersion == rule {
+		c := e.state.ActivePrimary.Candidate
+		d := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("disabled", c.CandidateID, commandID), SessionID: e.state.SessionID, CandidateID: c.CandidateID, CommandID: commandID, PriorState: e.state.ActivePrimary.Decision.ResultingState, ResultingState: contracts.DecisionSuperseded, PolicyTimeMS: now, Reason: "rule_disabled"}
+		e.tombstone(c, d, now)
+		removePin(&e.state.Pins, c.CandidateID)
+		decisions = append(decisions, d)
 		e.state.ActivePrimary = nil
 	}
+	return decisions
+}
+
+func (e *Engine) emergencyDecision(command contracts.OperatorCommandV1, hide bool) contracts.BroadcastDecisionV1 {
+	candidate, prior, resulting, reason := "", contracts.DecisionQueued, contracts.DecisionEmergencyHidden, "emergency_hide"
+	if e.state.ActivePrimary != nil {
+		candidate = e.state.ActivePrimary.Candidate.CandidateID
+		prior = e.state.ActivePrimary.Decision.ResultingState
+	}
+	if !hide {
+		prior, resulting, reason = contracts.DecisionEmergencyHidden, contracts.DecisionShown, "emergency_hide_cleared"
+	}
+	d := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id(reason, candidate, command.CommandID), SessionID: e.state.SessionID, CandidateID: candidate, CommandID: command.CommandID, PriorState: prior, ResultingState: resulting, PolicyTimeMS: command.PolicyTimeMS, Reason: reason}
+	if e.state.ActivePrimary != nil {
+		e.state.ActivePrimary.Decision = d
+	}
+	return d
 }
 func (e *Engine) baseCommit(prior string, revision uint64) contracts.PolicyCommitV2 {
 	return contracts.PolicyCommitV2{SchemaVersion: contracts.PolicyCommitSchemaV2, LineageManifestID: e.config.LineageID, LineageManifestSHA256: e.config.LineageID, SessionID: e.state.SessionID, CommitSequence: e.sequence, PriorPolicyRevision: revision, PriorStateHash: prior, Decisions: []contracts.BroadcastDecisionV1{}, AuditEvents: []contracts.AuditEventV1{}}
