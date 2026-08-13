@@ -158,6 +158,15 @@ func Open(root, sessionID string, opts ...Option) (*Store, State, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, State{}, fmt.Errorf("protect policy log: %w", err)
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, State{}, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+			return nil, State{}, ErrMixedLineage
+		}
+	}
 	s := &Store{dir: dir, sessionID: sessionID, hooks: defaultHooks(), segmentLimit: MaxSegmentBytes, maxSessionBytes: MaxSessionBytes, maxSessionSegments: MaxSessionSegments}
 	for _, opt := range opts {
 		opt(s)

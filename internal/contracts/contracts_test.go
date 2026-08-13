@@ -32,6 +32,9 @@ func TestGoldenContractsStrictRoundTrip(t *testing.T) {
 		{"audit_event_v1.json", func() contracts.Contract { return &contracts.AuditEventV1{} }},
 		{"policy_commit_v1.json", func() contracts.Contract { return &contracts.PolicyCommitV1{} }},
 		{"policy_checkpoint_v1.json", func() contracts.Contract { return &contracts.PolicyCheckpointV1{} }},
+		{"policy_lineage_manifest_v2.json", func() contracts.Contract { return &contracts.PolicyLineageManifestV2{} }},
+		{"policy_commit_v2.json", func() contracts.Contract { return &contracts.PolicyCommitV2{} }},
+		{"policy_checkpoint_v2.json", func() contracts.Contract { return &contracts.PolicyCheckpointV2{} }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
@@ -61,6 +64,7 @@ func TestGoldenContractsStrictRoundTrip(t *testing.T) {
 			if strings.TrimSpace(string(wantHash)) != hex.EncodeToString(digest[:]) {
 				t.Fatalf("golden hash mismatch")
 			}
+			t.Logf("canonical_sha256=%s", hex.EncodeToString(digest[:]))
 			roundTripped := tc.new()
 			if err := contracts.DecodeStrict(got, roundTripped); err != nil {
 				t.Fatalf("canonical decode: %v", err)
@@ -140,10 +144,30 @@ func TestGoldenCrossContractBindingsAndRecovery(t *testing.T) {
 	if !checkpoint.EmergencyHide || len(checkpoint.CommandResults) != 1 || len(checkpoint.Pins) != 1 {
 		t.Fatal("recovery fixture omits emergency-hide/idempotency/pin state")
 	}
+	var lineageV2 contracts.PolicyLineageManifestV2
+	readGolden(t, "policy_lineage_manifest_v2.json", &lineageV2)
+	var commitV2 contracts.PolicyCommitV2
+	readGolden(t, "policy_commit_v2.json", &commitV2)
+	var checkpointV2 contracts.PolicyCheckpointV2
+	readGolden(t, "policy_checkpoint_v2.json", &checkpointV2)
+	lineageID, err := lineageV2.ContentID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHash, err := contracts.CanonicalSHA256(commitV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitV2.LineageManifestID != lineageID || checkpointV2.LineageManifestID != lineageID {
+		t.Fatal("V2 recovery goldens are not bound to the lineage content")
+	}
+	if err := checkpointV2.ValidateAgainstCommit(commitV2, commitHash); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPersistedContractTypesContainNoFloatsOrMaps(t *testing.T) {
-	types := []reflect.Type{reflect.TypeOf(contracts.TournamentScopeV1{}), reflect.TypeOf(contracts.LiveObservationV1{}), reflect.TypeOf(contracts.HistoricalSnapshotManifestV1{}), reflect.TypeOf(contracts.HistoricalBaselineV1{}), reflect.TypeOf(contracts.InsightCandidateV1{}), reflect.TypeOf(contracts.BroadcastDecisionV1{}), reflect.TypeOf(contracts.OverlayStateV1{}), reflect.TypeOf(contracts.OperatorCommandV1{}), reflect.TypeOf(contracts.OperatorCommandResultV1{}), reflect.TypeOf(contracts.AuditEventV1{}), reflect.TypeOf(contracts.PolicyCommitV1{}), reflect.TypeOf(contracts.PolicyCheckpointV1{})}
+	types := []reflect.Type{reflect.TypeOf(contracts.TournamentScopeV1{}), reflect.TypeOf(contracts.LiveObservationV1{}), reflect.TypeOf(contracts.HistoricalSnapshotManifestV1{}), reflect.TypeOf(contracts.HistoricalBaselineV1{}), reflect.TypeOf(contracts.InsightCandidateV1{}), reflect.TypeOf(contracts.BroadcastDecisionV1{}), reflect.TypeOf(contracts.OverlayStateV1{}), reflect.TypeOf(contracts.OperatorCommandV1{}), reflect.TypeOf(contracts.OperatorCommandResultV1{}), reflect.TypeOf(contracts.AuditEventV1{}), reflect.TypeOf(contracts.PolicyCommitV1{}), reflect.TypeOf(contracts.PolicyCheckpointV1{}), reflect.TypeOf(contracts.PolicyLineageManifestV2{}), reflect.TypeOf(contracts.PolicyCommitV2{}), reflect.TypeOf(contracts.PolicyCheckpointV2{}), reflect.TypeOf(contracts.PolicyStateV2{})}
 	seen := map[reflect.Type]bool{}
 	var visit func(reflect.Type)
 	visit = func(typ reflect.Type) {
