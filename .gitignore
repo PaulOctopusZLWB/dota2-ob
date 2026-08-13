@@ -1,3 +1,8 @@
+# Built command binaries (named after their package dir by `go build`).
+/history
+/dota2-ob
+/spike
+
 /data/sessions/*
 !/data/sessions/.gitkeep
 

@@ -27,7 +27,16 @@ var ownershipRules = map[string]importRule{
 		standard: stringSet("bytes", "crypto/sha256", "encoding/hex", "encoding/json", "errors", "fmt", "io", "reflect", "regexp", "sort", "strconv", "strings", "time", "unicode", "unicode/utf16", "unicode/utf8"),
 	},
 	"liveprojection": {standard: stringSet(), internal: []string{"internal/contracts", "internal/session"}},
-	"history":        {standard: stringSet(), internal: []string{"internal/contracts"}},
+	// M1 evolves internal/history from its M0 doc-only boundary: it now owns
+	// the pure historical domain (roster, discovery, facts, aggregation,
+	// snapshot, batch, readiness). It imports only a small standard-library
+	// set plus internal/contracts — still no net/http, os, io/fs,
+	// internal/replay, database, or presentation. Adapters live in
+	// internal/replay and cmd.
+	"history": {
+		standard: stringSet("crypto/sha256", "encoding/hex", "errors", "sort", "strings", "time"),
+		internal: []string{"internal/contracts"},
+	},
 	"insight":        {standard: stringSet(), internal: []string{"internal/contracts"}},
 	"policy":         {standard: stringSet(), internal: []string{"internal/contracts"}},
 	"delivery": {
