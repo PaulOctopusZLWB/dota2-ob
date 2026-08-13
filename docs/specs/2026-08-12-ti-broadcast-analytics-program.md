@@ -887,11 +887,16 @@ Acceptance:
 - Browser Source works without obs-websocket. If scene/source control is enabled,
   the separate obs-websocket adapter is loopback-only, authenticated, optional,
   and cannot mutate analytical state.
-- Production OBS scenes use one native 750x450 transparent Browser Source
-  viewport positioned inside the audited sidebar safe area of each 1920x1080
-  and 2560x1440 output canvas. The source is not stretched and does not render
-  an otherwise transparent full-canvas CEF surface. Full-output screenshot and
-  recording checks still cover both target canvases.
+- Production OBS scenes use one native 750x640 transparent Browser Source with
+  no crop, rotation, bounds transform, or scaling. Its top-left position is
+  `(1130,60)` in the 1920x1080 canvas and `(1770,80)` in the 2560x1440 canvas.
+  Viewport-native tests must cycle every template, the accepted longest `zh-CN`
+  fixture, and every fail-closed state after render transitions settle. Every
+  visible card must remain inside the source with at least 24 px clearance from
+  each source edge, no client/scroll overflow, and ordered header/claim/footer
+  regions; every hidden frame must be empty across the complete source. The
+  source does not render an otherwise transparent full-canvas CEF surface.
+  Full-output screenshots and recording checks still cover both target canvases.
 - A 60-minute OBS recording passes measurement protocol P3: no crash or refresh
   flash; median incremental PSS for the complete OBS plus Browser Source process
   tree is at most 256 MiB over the same-resolution empty-scene OBS baseline;
@@ -907,10 +912,16 @@ on OBS 32.2.1 / Browser Source 2.26.9 / CEF 127.0.6533.120. Independent review
 reproduced that all code, evidence-integrity, duration, growth, CPU, lag,
 visibility, crash, and network gates passed, while full-canvas Browser Sources
 used 266,647 KiB incremental PSS at 1080p and 289,851 KiB at 1440p. The audited
-claim region in both recordings is 750x450. This revision removes the unused
-full-canvas CEF surface instead of raising the pre-measurement 256 MiB ceiling.
-Those two runs remain failed evidence and do not accept M3. P3 must be rerun at
-both resolutions after the bounded viewport is implemented and again on the
+750x450 crop in those recordings was only a visibility-analysis ROI, not proof
+that the production layout fit a viewport of that size. Exact-candidate browser
+reproduction showed the longest fixture at native 750x450 extended to
+`bottom=608.1` and clipped. A bounded-geometry preflight against the same code
+selected 750x640: the longest card bounds were `(228,46)-(708,608.1)`, all six
+templates stayed ordered without overflow, and the minimum edge clearance was
+31.9 px; 750x600 still clipped. This revision removes the unused full-canvas CEF
+surface instead of raising the pre-measurement 256 MiB ceiling. The two prior
+full runs remain failed evidence and do not accept M3. P3 must be rerun at both
+resolutions after the exact 750x640 geometry is implemented and again on the
 exact composed M3 candidate.
 
 ### M4: Replay-driven end-to-end integration
@@ -1035,19 +1046,24 @@ and excluded samples are reported, never silently removed.
 ### P3 — 60-minute OBS resource/render run
 
 - Use the isolated OBS profile/scene and fixed 1920x1080 and 2560x1440 output
-  canvases. In each overlay scene, position one native 750x450 transparent
-  Browser Source at the documented safe-area coordinates with no source
-  scaling. The empty baseline uses the same canvas, renderer, encoder, preview,
-  recording, and color-source settings but no Browser Source. Record source
-  geometry and transform, output FPS, Browser Source FPS, software/GPU mode,
-  OBS/Browser Source/CEF versions, and GPU/driver in the run manifest.
+  canvases. In each overlay scene, position one native 750x640 transparent
+  Browser Source at `(1130,60)` for 1080p and `(1770,80)` for 1440p, with no
+  crop, rotation, bounds transform, or scaling. Before either full run, reproduce
+  the viewport-native geometry acceptance above and attach full-output composed
+  frames; a failure rejects the configuration. The empty baseline uses the same
+  canvas, renderer, encoder, preview, recording, and color-source settings but
+  no Browser Source. Record source geometry and transform, output FPS, Browser
+  Source FPS, software/GPU mode, OBS/Browser Source/CEF versions, and GPU/driver
+  in the run manifest.
 - Record a ten-minute empty-scene baseline, ten-minute overlay warmup, then 60
-  minutes cycling all five families, longest zh-CN strings, hide/reconnect, and
+  minutes cycling all six template families, longest zh-CN strings, hide/reconnect, and
   missing assets at the production update cadence.
 - Sample whole OBS-plus-browser process-tree CPU/PSS and separate OBS/browser
   components, GPU memory, rendered/missed/skipped frames, claim visibility, and
-  socket/remote-request activity every five seconds. Incremental PSS is the
-  overlay-recording median whole-tree PSS minus the empty-baseline median
+  socket/remote-request activity every five seconds. Claim visibility sampling
+  covers the complete 750x640 source rectangle and is corroborated by sanitized
+  full-output frames; the former 750x450 ROI is not reused. Incremental PSS is
+  the overlay-recording median whole-tree PSS minus the empty-baseline median
   whole-tree PSS; a negative OBS component cannot replace reporting the browser
   component or the absolute overlay-process-tree median. Compare lag to the same
   scene without the Browser Source. Apply every numeric M3 bound to raw samples
