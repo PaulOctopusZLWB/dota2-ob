@@ -2,9 +2,12 @@
 
 Date: 2026-08-12
 
+Amended: 2026-08-13
+
 Decision owner: Paul
 
-Status: M0 architecture-correction candidate
+Status: M0 integration base accepted; M1 and M3 active; M2 blocked on the
+recovery-contract V2 gate
 
 ## Objective
 
@@ -421,22 +424,44 @@ transition, and every accepted or rejected command. An event is individually
 bounded to 16 KiB and is never persisted independently of its causal policy
 result.
 
-`PolicyCommitV1` is the narrow recoverable unit for the policy plane. It is not
+### Recovery contract V2 correction
+
+M2 pre-implementation analysis proved that the M0 `PolicyCommitV1` and
+`PolicyCheckpointV1` supporting contracts cannot meet their stated recovery
+requirements. A V1 command commit retains only the command ID and result, so a
+restart cannot recover the action or rule/candidate target. A V1 checkpoint
+retains only preview candidate IDs and omits disabled rules and complete active
+state, so `checkpoint + later frames` cannot deterministically continue ranking,
+expiry, command targeting, or display state.
+
+This correction does not change `LiveObservationV1`, `HistoricalBaselineV1`,
+`InsightCandidateV1`, `BroadcastDecisionV1`, or `OverlayStateV1`, nor the
+accepted M0 replay, OBS, capture, projector, delivery, or security evidence. It
+explicitly withdraws only `PolicyCommitV1` and `PolicyCheckpointV1` as
+production restart formats; they remain immutable legacy compatibility/test
+contracts. M2 must first implement and obtain independent review of the V2
+supporting contracts below before insight or policy feature work resumes.
+
+`PolicyCommitV2` is the narrow recoverable unit for the policy plane. It is not
 a source envelope or event bus. One canonical record, bounded to 256 KiB,
-contains schema/session identity, monotonic commit sequence, causal
-observation/command identity, prior/resulting policy revision and state hashes,
-ordered `BroadcastDecisionV1` values, optional `OperatorCommandResultV1`, all
-causal `AuditEventV1` values, and whether presentation must publish, remain
-unchanged, or hide. Rejected commands and no-display/suppressed observations
-also receive a commit with an unchanged state hash, giving every accepted input
-one terminal recoverable outcome.
+retains the V1 identities, sequence, revision/state hashes, ordered
+`BroadcastDecisionV1` values, optional `OperatorCommandResultV1`, causal
+`AuditEventV1` values, and publication outcome. It also contains the complete
+canonical `OperatorCommandV1` for every command commit. Exactly one causal input
+exists: an observation sequence, or both a command ID and matching embedded
+command. The embedded command's ID/session must match the commit, result,
+decisions, and audits. Its action, candidate/rule target, expected revision, and
+policy time are source data; recovery must never infer them from reason strings,
+candidate IDs, cooldowns, or another frozen field. Rejected commands and
+no-display/suppressed observations also receive a commit with an unchanged state
+hash, giving every accepted input one terminal recoverable outcome.
 
 The pure core deterministically returns the unpersisted commit payload from its
 explicit input and prior state. The application layer supplies the next commit
 sequence and performs the storage protocol; no filesystem operation or retry
 policy enters the core.
 
-The application adapter serializes `PolicyCommitV1` frames into a policy-only
+The application adapter serializes `PolicyCommitV2` frames into a policy-only
 append log. Each frame is `length || canonical payload || SHA-256 || commit
 marker`. Before any command response or presentation publication, the writer
 must complete the frame and `fdatasync`/`fsync` its segment. Segment creation or
@@ -478,16 +503,37 @@ priority descending, confidence descending, evidence time ascending, rule ID
 ascending, then candidate ID ascending. Every other set has a documented total
 order.
 
-Policy checkpoints contain schema/rule/config versions, bound session and
+`PolicyCheckpointV2` contains schema/rule/config versions, bound session and
 snapshot identities, last processed observation sequence, current revision,
-command-idempotency set, queue contents, cooldowns, pins, and emergency-hide
-state. The preview queue holds at most 64 candidates; the checkpoint caches the
-complete bounded set of at most 4,096 command results in revision order. Restart
-validates the checkpoint against its referenced `PolicyCommitV1` hash and
-replays later committed frames. A missing/incompatible checkpoint rebuilds from
-the session log plus policy-commit log; it never silently resets policy state.
-Reprocessing produces identical decision and audit identities, so persistence
-adapters deduplicate safely.
+the complete bounded command-result idempotency index, complete preview
+`InsightCandidateV1` records in deterministic queue order, sorted unique
+disabled-rule IDs, cooldowns, pins, emergency-hide state, and the optional
+active primary as its complete candidate plus latest `BroadcastDecisionV1`.
+The preview queue holds at most 64 candidates and the checkpoint caches at most
+4,096 command results in canonical revision/command order. Candidate IDs are
+unique across preview and active state; every pin references a retained
+candidate. The checkpoint state hash is recomputed as SHA-256 over the canonical
+complete policy state rather than trusted as an opaque string.
+
+Restart validates a V2 checkpoint against its referenced `PolicyCommitV2` hash
+and replays later commits strictly by commit sequence. For an observation
+commit, recovery re-evaluates the referenced immutable session-log observation;
+for a command commit, it re-evaluates the embedded canonical command. The
+reproduced result, decisions, audits, publication outcome, revision, and state
+hash must be byte-equivalent to the committed record or recovery fails closed.
+A missing/incompatible checkpoint performs the same replay from sequence one;
+it never silently resets policy state.
+
+V1 and V2 frames cannot be mixed in one policy-log lineage. Because no V1
+production session has been accepted, new production sessions start with V2.
+Encountering V1 during production recovery fails closed; an explicit offline
+rebuild may read authoritative session inputs and emit a fresh V2 lineage, but
+must never synthesize a missing command action or target. The migration gate
+requires V2 documentation, validators, canonical goldens/hashes, dependency
+checks, and recovery tests for accepted/rejected `disable_rule`/`enable_rule`,
+preview ordering/expiry, active-primary continuation, pins, duplicate commands,
+valid/missing/corrupt checkpoints, later-frame replay, mixed-version rejection,
+and state/hash mismatch before M2 resumes.
 
 ## Dependency Direction
 
@@ -524,7 +570,7 @@ Manual DotaTV -> GSI -> committed session log                   |
                        pure policy core <----- OperatorCommandV1
                               |                       ^
                               |                       |
-             uncommitted PolicyCommitV1 payload      |
+             uncommitted PolicyCommitV2 payload      |
                               |                       |
                               v                       |
                    synced policy-commit log          |
@@ -659,6 +705,9 @@ candidate insights and display decisions.
 
 Acceptance:
 
+- The independently reviewed recovery-contract migration above is accepted at
+  an exact immutable commit before rule implementation continues; the five
+  primary V1 contracts remain byte-compatible.
 - The five initial insight families run from immutable fixtures without network,
   database, filesystem, ambient clock, localization, rendering, or OBS
   dependencies. Policy time and every other clock are explicit inputs.
@@ -890,7 +939,7 @@ and excluded samples are reported, never silently removed.
 - Collect every accepted update across the three full-match rehearsals, with at
   least 5,000 total samples. `t0` is immediately after the complete GSI body is
   accepted for validation. Every accepted update must produce exactly one
-  committed `PolicyCommitV1` terminal outcome: `publish`, `unchanged`,
+  committed `PolicyCommitV2` terminal outcome: `publish`, `unchanged`,
   `suppressed`, or `hide`.
 - For the all-update denominator, `t1` is the synchronized policy-commit time.
   For `publish`/`hide` outcomes that require a new overlay revision, record a
