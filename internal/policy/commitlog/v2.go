@@ -290,6 +290,13 @@ func (s *StoreV2) Append(commit contracts.PolicyCommitV2) (CommittedV2, error) {
 	return cloneCommittedV2(committed), nil
 }
 
+// AppendPolicyCommit adapts StoreV2 to policy.CommitAppender while preserving
+// Append's synchronous frame-and-sync durability boundary.
+func (s *StoreV2) AppendPolicyCommit(commit contracts.PolicyCommitV2) error {
+	_, err := s.Append(commit)
+	return err
+}
+
 // LookupCommand resolves an admitted duplicate directly from its cache-only
 // locator and revalidates the complete frame against the semantic result hash.
 func (s *StoreV2) LookupCommand(commandID string) (contracts.OperatorCommandResultV1, bool, error) {

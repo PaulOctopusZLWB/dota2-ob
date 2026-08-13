@@ -123,6 +123,50 @@ func TestV2CheckpointValidatesLocatorsAndReplaysLaterFrames(t *testing.T) {
 	}
 }
 
+func TestV2CheckpointCommittedCallbackStopIsReturnedWithoutVisitingLaterFrames(t *testing.T) {
+	root := t.TempDir()
+	manifest := validManifestForStore()
+	store, _, err := verifiedOpenV2(root, "session", manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	commit, checkpoint := firstV2CommandAndCheckpoint(t, manifest)
+	first, err := store.Append(commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.CommandLocators = []contracts.PolicyCommandLocatorV2{first.Locator}
+	checkpoint.ReferencedCommitSHA256 = first.Hash
+	if err := store.WriteCheckpoint(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	second := validObservationCommitV2(t, manifest, 2, commit)
+	if _, err := store.Append(second); err != nil {
+		t.Fatal(err)
+	}
+	third := validObservationCommitV2(t, manifest, 3, second)
+	third.ObservationSequence = 2
+	third.ObservationEvidence.Sequence = 2
+	third.ResultingObservationSequence = 2
+	if _, err := store.Append(third); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := errors.New("committed callback stop")
+	visited := 0
+	loaded, err := store.LoadCheckpoint(func(committed commitlog.CommittedV2) error {
+		visited++
+		if committed.Commit.CommitSequence != 2 {
+			t.Fatalf("first continuation sequence = %d", committed.Commit.CommitSequence)
+		}
+		return stop
+	})
+	if loaded != nil || !errors.Is(err, stop) || visited != 1 {
+		t.Fatalf("loaded=%#v err=%v visited=%d", loaded, err, visited)
+	}
+}
+
 func TestV2MissingOrSyntacticallyCorruptCheckpointUsesStreamingOpenReplay(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
