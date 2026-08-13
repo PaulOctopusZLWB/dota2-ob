@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
@@ -59,8 +62,14 @@ type parseExecutionResult struct {
 type parseExecutionDependencies struct {
 	inspect        func(string) (replay.Source2DemoIdentity, error)
 	parse          func(string) (*replay.ParseResult, error)
+	releaseOwned   func(ownedReplayInput) error
 	parserVersion  string
 	adapterVersion string
+}
+
+type ownedReplayInput struct {
+	file *os.File
+	path string
 }
 
 type executionBindingArtifact struct {
@@ -81,6 +90,7 @@ type executionBindingArtifact struct {
 func executeParseExecution(root string, request parseExecutionRequest) (parseExecutionResult, error) {
 	return executeParseExecutionWith(root, request, parseExecutionDependencies{
 		inspect: replay.InspectSource2DemoFile, parse: replay.ParseFile,
+		releaseOwned:   releaseOwnedReplayInput,
 		parserVersion:  replay.ParserName + "/" + replay.ParserVersion,
 		adapterVersion: replay.AdapterName + "/" + replay.AdapterVersion,
 	})
@@ -90,11 +100,21 @@ func executeParseExecutionWith(root string, request parseExecutionRequest, deps 
 	if root == "" || request.ExecutionID == "" || request.ReplayPath == "" || request.ExpectedReplaySHA256 == "" || deps.inspect == nil || deps.parse == nil || deps.parserVersion == "" || deps.adapterVersion == "" {
 		return parseExecutionResult{}, errors.New("invalid parse execution request")
 	}
-	identity, err := deps.inspect(request.ReplayPath)
+	owned, err := acquireOwnedReplayInput(request.ReplayPath)
+	if err != nil {
+		return parseExecutionResult{}, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = owned.file.Close()
+		}
+	}()
+	identity, err := deps.inspect(owned.path)
 	if err != nil || identity.SHA256 != request.ExpectedReplaySHA256 {
 		return parseExecutionResult{}, errors.New("parse execution replay identity mismatch")
 	}
-	parsedResult, err := deps.parse(request.ReplayPath)
+	parsedResult, err := deps.parse(owned.path)
 	if err != nil || parsedResult == nil || parsedResult.Facts == nil {
 		return parseExecutionResult{}, errors.New("parse execution parser failed")
 	}
@@ -103,6 +123,14 @@ func executeParseExecutionWith(root string, request parseExecutionRequest, deps 
 	if err != nil || bytesSHA256(canonicalParsed) != parsedResult.Hash {
 		return parseExecutionResult{}, errors.New("parse execution parser result identity mismatch")
 	}
+	releaseOwned := deps.releaseOwned
+	if releaseOwned == nil {
+		releaseOwned = releaseOwnedReplayInput
+	}
+	if err := releaseOwned(owned); err != nil {
+		return parseExecutionResult{}, fmt.Errorf("parse execution release owned replay: %w", err)
+	}
+	closed = true
 	request.NormalizeMeta.ReplaySHA256 = identity.SHA256
 	normalized, err := replay.Normalize(&parsed, request.NormalizeMeta, request.ParticipantMapping)
 	if err != nil {
@@ -172,6 +200,55 @@ func executeParseExecutionWith(root string, request parseExecutionRequest, deps 
 		return parseExecutionResult{}, err
 	}
 	return parseExecutionResult{Evidence: draft, Parsed: parsed, Normalized: *normalized, Metrics: parsedResult.Metrics}, nil
+}
+
+func releaseOwnedReplayInput(owned ownedReplayInput) error {
+	return owned.file.Close()
+}
+
+func acquireOwnedReplayInput(sourcePath string) (ownedReplayInput, error) {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return ownedReplayInput{}, err
+	}
+	temporary, err := os.CreateTemp("", "dota2-ob-replay-execution-*.dem")
+	if err != nil {
+		_ = source.Close()
+		return ownedReplayInput{}, err
+	}
+	if err := os.Remove(temporary.Name()); err != nil {
+		_ = source.Close()
+		_ = temporary.Close()
+		return ownedReplayInput{}, err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = temporary.Close()
+		}
+	}()
+	if _, err := io.Copy(temporary, source); err != nil {
+		_ = source.Close()
+		return ownedReplayInput{}, err
+	}
+	if err := source.Close(); err != nil {
+		return ownedReplayInput{}, err
+	}
+	if err := temporary.Sync(); err != nil {
+		return ownedReplayInput{}, err
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		return ownedReplayInput{}, err
+	}
+	// The staging file was unlinked before bytes were copied. The inspector and
+	// parser can only reopen its exact inode through this held descriptor;
+	// caller-visible path replacement cannot change the bytes either consumes.
+	procPath := filepath.Join("/proc/self/fd", strconv.FormatUint(uint64(temporary.Fd()), 10))
+	if _, err := os.Stat(procPath); err != nil {
+		return ownedReplayInput{}, fmt.Errorf("parse execution owned replay descriptor: %w", err)
+	}
+	ok = true
+	return ownedReplayInput{file: temporary, path: procPath}, nil
 }
 
 func parseExecutionConfigSHA(meta replay.NormalizeMeta, mapping []replay.ParticipantMapping) (string, error) {

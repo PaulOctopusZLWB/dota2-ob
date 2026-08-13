@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,23 +115,164 @@ func TestParseExecutionDerivesNormalizationFromOwnedParserResult(t *testing.T) {
 	}
 }
 
+func TestParseExecutionOwnsReplayBytesBeforeCallerPathReplacement(t *testing.T) {
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "replay.dem")
+	replacementPath := filepath.Join(dir, "replacement.dem")
+	const original = "replay A"
+	const replacement = "replay B"
+	if err := os.WriteFile(replayPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacementPath, []byte(replacement), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var ownedPath, parsedBytes string
+	deps := parseExecutionDependencies{
+		inspect: func(path string) (replay.Source2DemoIdentity, error) {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return replay.Source2DemoIdentity{}, err
+			}
+			if err := os.Rename(replacementPath, replayPath); err != nil {
+				return replay.Source2DemoIdentity{}, err
+			}
+			return replay.Source2DemoIdentity{SHA256: bytesSHA256(b), Bytes: int64(len(b)), Magic: "test"}, nil
+		},
+		parse: func(path string) (*replay.ParseResult, error) {
+			ownedPath = path
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			parsedBytes = string(b)
+			facts := replay.BuildFacts(&replay.Collected{GameBuild: 6896, ServerName: parsedBytes, MessageCounts: map[string]uint64{"fixture": 1}})
+			hash, err := facts.Hash()
+			return &replay.ParseResult{Facts: facts, Hash: hash}, err
+		},
+		parserVersion:  replay.ParserName + "/" + replay.ParserVersion,
+		adapterVersion: replay.AdapterName + "/" + replay.AdapterVersion,
+	}
+	request := parseExecutionRequest{
+		ExecutionID: "owned-path-swap", ReplayPath: replayPath, ExpectedReplaySHA256: sha256Text(original),
+		NormalizeMeta: replay.NormalizeMeta{
+			MatchID: "8941092540", SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60", GameBuild: 6896,
+		},
+	}
+	result, err := executeParseExecutionWith(t.TempDir(), request, deps)
+	if ownedPath != "" {
+		if _, statErr := os.Stat(ownedPath); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("execution-owned replay descriptor was not released: %v", statErr)
+		}
+	}
+	if err != nil {
+		return // Failing closed before evidence is also acceptable.
+	}
+	if parsedBytes != original {
+		t.Fatalf("evidence bound to replay A sha after parser consumed %q", parsedBytes)
+	}
+	if result.Evidence.ReplaySHA256 != sha256Text(original) || result.Parsed.Meta.ServerName != original {
+		t.Fatal("owned replay identity and parsed payload diverged")
+	}
+}
+
+func TestParseExecutionReleasesOwnedReplayAfterParserErrorWithoutEvidence(t *testing.T) {
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "replay.dem")
+	if err := os.WriteFile(replayPath, []byte("replay A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var ownedPath string
+	deps := parseExecutionDependencies{
+		inspect: func(path string) (replay.Source2DemoIdentity, error) {
+			b, err := os.ReadFile(path)
+			return replay.Source2DemoIdentity{SHA256: bytesSHA256(b), Bytes: int64(len(b)), Magic: "test"}, err
+		},
+		parse: func(path string) (*replay.ParseResult, error) {
+			ownedPath = path
+			return nil, errors.New("injected parser failure")
+		},
+		parserVersion:  replay.ParserName + "/" + replay.ParserVersion,
+		adapterVersion: replay.AdapterName + "/" + replay.AdapterVersion,
+	}
+	executionRoot := t.TempDir()
+	_, err := executeParseExecutionWith(executionRoot, parseExecutionRequest{
+		ExecutionID: "owned-parser-error", ReplayPath: replayPath, ExpectedReplaySHA256: sha256Text("replay A"),
+		NormalizeMeta: replay.NormalizeMeta{MatchID: "8941092540", SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60"},
+	}, deps)
+	if err == nil {
+		t.Fatal("parser failure produced usable evidence")
+	}
+	if _, statErr := os.Stat(ownedPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("execution-owned replay descriptor survived parser failure: %v", statErr)
+	}
+	entries, readErr := os.ReadDir(executionRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("parser failure wrote durable evidence: %v", entries)
+	}
+}
+
+func TestParseExecutionCleanupFailureCannotPublishEvidence(t *testing.T) {
+	dir := t.TempDir()
+	replayPath := filepath.Join(dir, "replay.dem")
+	if err := os.WriteFile(replayPath, []byte("replay A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	facts := replay.BuildFacts(&replay.Collected{GameBuild: 6896, ServerName: "cleanup", MessageCounts: map[string]uint64{"fixture": 1}})
+	deps := testParseExecutionDependencies(t, replayPath, *facts)
+	deps.releaseOwned = func(owned ownedReplayInput) error {
+		if err := owned.file.Close(); err != nil {
+			return err
+		}
+		return errors.New("injected cleanup failure")
+	}
+	executionRoot := t.TempDir()
+	_, err := executeParseExecutionWith(executionRoot, parseExecutionRequest{
+		ExecutionID: "owned-cleanup-error", ReplayPath: replayPath, ExpectedReplaySHA256: sha256Text("replay A"),
+		NormalizeMeta: replay.NormalizeMeta{
+			MatchID: "8941092540", SourceEventTime: time.Date(2026, 8, 11, 20, 33, 21, 0, time.UTC), PatchID: "60", GameBuild: 6896,
+		},
+	}, deps)
+	if err == nil {
+		t.Fatal("cleanup failure published usable evidence")
+	}
+	entries, readErr := os.ReadDir(executionRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cleanup failure wrote durable evidence: %v", entries)
+	}
+}
+
 func testParseExecutionDependencies(t *testing.T, replayPath string, facts replay.ReplayFactsV1) parseExecutionDependencies {
 	t.Helper()
+	wantReplay, err := os.ReadFile(replayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	payload, err := facts.CanonicalJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return parseExecutionDependencies{
 		inspect: func(path string) (replay.Source2DemoIdentity, error) {
-			if path != replayPath {
-				t.Fatalf("inspected path %q, want %q", path, replayPath)
-			}
 			b, err := os.ReadFile(path)
+			if string(b) != string(wantReplay) {
+				t.Fatalf("inspected bytes %q, want owned source bytes %q", b, wantReplay)
+			}
 			return replay.Source2DemoIdentity{SHA256: bytesSHA256(b), Bytes: int64(len(b)), Magic: "test"}, err
 		},
 		parse: func(path string) (*replay.ParseResult, error) {
-			if path != replayPath {
-				t.Fatalf("parsed path %q, want %q", path, replayPath)
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			if string(b) != string(wantReplay) {
+				t.Fatalf("parsed bytes %q, want owned source bytes %q", b, wantReplay)
 			}
 			copyFacts := facts
 			return &replay.ParseResult{Facts: &copyFacts, Hash: bytesSHA256(payload)}, nil
