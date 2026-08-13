@@ -307,6 +307,29 @@ func TestCommandPortFailureAndUnsafeResponseAreBoundedDeterministic(t *testing.T
 	}
 }
 
+func TestCommandAdmissionErrorsRemainDeterministicClientRejections(t *testing.T) {
+	now := time.UnixMilli(1_000).UTC()
+	body, _ := json.Marshal(validCommand())
+	for _, tc := range []struct {
+		name, reason string
+		err          error
+		want         int
+	}{
+		{name: "session capacity", reason: "session_command_limit", err: contracts.ErrSessionCommandLimit, want: http.StatusConflict},
+		{name: "identifier bound", reason: "policy_identifier_limit", err: contracts.ErrPolicyIdentifierLimit, want: http.StatusBadRequest},
+		{name: "malformed v2 admission", reason: "invalid_command", err: contracts.ErrMalformedCommand, want: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			port := &commandPort{err: tc.err}
+			rec := doRequest(testGateway(t, port, &overlayPort{state: validOverlay(1_000)}, &now), http.MethodPost, "/v1/operator/commands", string(body), authHeaders())
+			var rejection delivery.Rejection
+			if err := json.Unmarshal(rec.Body.Bytes(), &rejection); err != nil || rec.Code != tc.want || rejection.Reason != tc.reason || port.calls != 1 {
+				t.Fatalf("status=%d rejection=%#v calls=%d decode=%v", rec.Code, rejection, port.calls, err)
+			}
+		})
+	}
+}
+
 func TestOverlayRouteIsReadOnlyUnauthenticatedAndFailsClosed(t *testing.T) {
 	now := time.UnixMilli(2_000).UTC()
 	commands := &commandPort{result: validResult()}

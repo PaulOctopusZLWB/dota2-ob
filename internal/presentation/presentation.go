@@ -18,6 +18,28 @@ type BuildInput struct {
 	StaleDeadlineMS   int64
 }
 
+// Preview localizes one available candidate for the read-only operator view.
+// It does not construct or imply a broadcast-policy decision.
+func Preview(locale string, candidate contracts.InsightCandidateV1) (contracts.OverlayClaimV1, error) {
+	if err := candidate.Validate(); err != nil || candidate.Availability != "available" {
+		return contracts.OverlayClaimV1{}, presentationError("invalid_preview_candidate")
+	}
+	claim, err := render(locale, candidate)
+	if err != nil {
+		return contracts.OverlayClaimV1{}, err
+	}
+	return claim, nil
+}
+
+// UnavailablePreview preserves operator control without turning malformed or
+// incomplete presentation parameters into an analytical claim.
+func UnavailablePreview(locale string) contracts.OverlayClaimV1 {
+	if locale == "zh-CN" {
+		return contracts.OverlayClaimV1{Title: "分析暂不可展示", Body: "展示参数未通过安全校验，可拒绝此条或使用紧急隐藏。"}
+	}
+	return contracts.OverlayClaimV1{Title: "Insight unavailable", Body: "Display parameters failed safety validation; reject this item or use emergency hide."}
+}
+
 // Build localizes one committed display decision. Any mismatch, unsafe text,
 // unknown terminology, expired candidate, or incompatible parameter set
 // returns no state so the caller can publish a claim-free Hidden value.

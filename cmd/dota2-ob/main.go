@@ -21,7 +21,6 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
-	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/delivery"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
@@ -38,7 +37,7 @@ const operatorTokenFilename = "operator.token"
 func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
 
 type runDependencies struct {
-	newStore     func(string) (*session.Store, error)
+	newStore     func(string, string) (*session.Store, error)
 	newTokenFile func(string) (string, string, func(), error)
 	listen       func(string, string) (net.Listener, error)
 	runLifecycle func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
@@ -47,7 +46,12 @@ type runDependencies struct {
 
 func defaultRunDependencies() runDependencies {
 	return runDependencies{
-		newStore:     func(root string) (*session.Store, error) { return session.NewStore(root) },
+		newStore: func(root, sessionID string) (*session.Store, error) {
+			if strings.TrimSpace(sessionID) == "" {
+				return session.NewStore(root)
+			}
+			return session.NewStore(root, session.WithSessionID(sessionID))
+		},
 		newTokenFile: createEphemeralTokenFile,
 		listen:       net.Listen,
 		runLifecycle: lifecycle.Run,
@@ -65,8 +69,10 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	addr := flags.String("addr", "127.0.0.1:43210", "HTTP listen address")
 	deliveryAddr := flags.String("delivery-addr", "127.0.0.1:43211", "operator/overlay loopback listen address")
 	dataDir := flags.String("data-dir", "./data/sessions", "directory for captured session data")
+	sessionID := flags.String("session-id", "", "explicit safe session identity for sealed policy lineage and restart")
 	diagnosticMode := flags.Bool("diagnostic-mode", false, "enable authenticated legacy capture diagnostics")
 	operatorTokenFile := flags.String("operator-token-file", "", "explicit external 0600 token handoff path for the operator process")
+	policyLineageFile := flags.String("policy-lineage-file", "", "sealed PolicyLineageManifestV2 for the broadcast policy plane")
 	analyzeSession := flags.String("analyze-session", "", "offline: analyze a session directory and exit")
 	doctorMode := flags.Bool("doctor", false, "run one-shot operator readiness checks and exit")
 	gsiConfig := flags.String("gsi-config", "", "explicit Dota 2 GSI config path for doctor mode")
@@ -113,7 +119,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		return 1
 	}
 
-	store, err := deps.newStore(*dataDir)
+	store, err := deps.newStore(*dataDir, *sessionID)
 	if err != nil {
 		logger.Printf("raw_store_create_failed")
 		return 1
@@ -136,11 +142,43 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		logger.Printf("delivery_listen_failed")
 		deliveryListener = nil
 	}
+	var broadcast *broadcastRuntime
+	if deliveryListener != nil {
+		lineage, lineageErr := loadPolicyLineage(*policyLineageFile, store.SessionID())
+		if lineageErr == nil {
+			broadcast, lineageErr = newBroadcastRuntime(broadcastConfig{
+				DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Lineage: lineage, Now: time.Now,
+			})
+		}
+		if lineageErr != nil {
+			_ = deliveryListener.Close()
+			deliveryListener = nil
+			logger.Printf("broadcast_policy_config_failed")
+		}
+	}
+	if broadcast != nil {
+		defer func() {
+			if err := broadcast.Close(); err != nil {
+				logger.Printf("broadcast_policy_close_failed")
+			}
+		}()
+	}
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, *staleThreshold, time.Now)
+	latest := state.NewLatest()
+	profilerInstance := profile.NewProfiler()
+	analyticsEngine := analytics.NewEngine()
 	captureOptions := []gsi.Option{
-		gsi.WithLatest(state.NewLatest()), gsi.WithProfiler(profile.NewProfiler()),
-		gsi.WithAnalytics(analytics.NewEngine()), gsi.WithTracker(tracker),
+		gsi.WithLatest(latest), gsi.WithProfiler(profilerInstance),
+		gsi.WithAnalytics(analyticsEngine), gsi.WithTracker(tracker),
+	}
+	if broadcast != nil {
+		captureOptions = append(captureOptions, gsi.WithLiveProjections(
+			newTrackedCaptureProjection(capture.NewLatestProjection(latest), tracker, operator.SubsystemLatest, "latest_failed"),
+			newTrackedCaptureProjection(capture.NewProfileProjection(profilerInstance, store.SessionDir()), tracker, operator.SubsystemProfile, "profile_failed"),
+			newTrackedCaptureProjection(capture.NewAnalyticsProjection(analyticsEngine, store.SessionDir(), store.SessionID()), tracker, operator.SubsystemAnalytics, "analytics_failed"),
+			newPolicyObservationProjection(broadcast, tracker),
+		))
 	}
 	if *diagnosticMode {
 		captureOptions = append(captureOptions,
@@ -154,7 +192,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	if deliveryListener != nil {
 		gateway, gatewayErr := delivery.NewGateway(delivery.Config{
 			BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
-			Commands: unavailableCommands{}, Operator: unavailableOperatorState{}, Overlay: unavailableOverlay{}, ReadAsset: webassets.ReadAsset, Now: time.Now,
+			Commands: broadcastCommandPort{broadcast}, Operator: broadcastOperatorPort{broadcast}, Overlay: broadcastOverlayPort{broadcast}, ReadAsset: webassets.ReadAsset, Now: time.Now,
 		})
 		if gatewayErr != nil {
 			_ = deliveryListener.Close()
@@ -226,24 +264,6 @@ func (s *pairedHTTPServer) reportDelivery(code string) {
 	if s.reportDeliveryFailure != nil {
 		s.reportDeliveryFailure(code)
 	}
-}
-
-type unavailableCommands struct{}
-
-func (unavailableCommands) Execute(context.Context, contracts.OperatorCommandV1) (contracts.OperatorCommandResultV1, error) {
-	return contracts.OperatorCommandResultV1{}, errors.New("policy command port unavailable")
-}
-
-type unavailableOverlay struct{}
-
-func (unavailableOverlay) Current(context.Context) (contracts.OverlayStateV1, error) {
-	return contracts.OverlayStateV1{}, errors.New("committed overlay state unavailable")
-}
-
-type unavailableOperatorState struct{}
-
-func (unavailableOperatorState) Current(context.Context) (delivery.OperatorState, error) {
-	return delivery.OperatorState{}, errors.New("committed operator state unavailable")
 }
 
 func newEphemeralToken() (string, error) {

@@ -138,6 +138,29 @@ func TestBuildLocalizesAllTemplatesWithoutLeakingSemanticKeys(t *testing.T) {
 	}
 }
 
+func TestPreviewLocalizesQueuedCandidateWithoutInventingDecision(t *testing.T) {
+	candidate := candidate(
+		"insight.objective_exchange",
+		parameter("team", "team", "radiant"),
+		parameter("objective", "objective", "roshan"),
+		parameter("net_worth_delta", "decimal", "2200"),
+	)
+	claim, err := presentation.Preview("zh-CN", candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Title != "天辉拿下肉山" || !strings.Contains(claim.Body, "2200") {
+		t.Fatalf("preview claim = %#v", claim)
+	}
+}
+
+func TestUnavailablePreviewIsLocalizedAndMakesNoAnalyticalClaim(t *testing.T) {
+	claim := presentation.UnavailablePreview("zh-CN")
+	if claim.Title != "分析暂不可展示" || claim.Body != "展示参数未通过安全校验，可拒绝此条或使用紧急隐藏。" || claim.AssetKey != "" {
+		t.Fatalf("fallback claim = %#v", claim)
+	}
+}
+
 func TestBuildFailsClosedForIncompatibleOrUnsafeCandidate(t *testing.T) {
 	valid := candidate("insight.draft_context", parameter("player", "player_handle", "Ame"), parameter("hero", "hero", "npc_dota_hero_axe"), parameter("role", "role", "carry"))
 	tests := []struct {

@@ -277,7 +277,16 @@ func (g *Gateway) handleCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := g.commands.Execute(r.Context(), command)
 	if err != nil {
-		writeRejection(w, http.StatusServiceUnavailable, "command_unavailable")
+		switch {
+		case errors.Is(err, contracts.ErrSessionCommandLimit):
+			writeRejection(w, http.StatusConflict, "session_command_limit")
+		case errors.Is(err, contracts.ErrPolicyIdentifierLimit):
+			writeRejection(w, http.StatusBadRequest, "policy_identifier_limit")
+		case errors.Is(err, contracts.ErrMalformedCommand):
+			writeRejection(w, http.StatusBadRequest, "invalid_command")
+		default:
+			writeRejection(w, http.StatusServiceUnavailable, "command_unavailable")
+		}
 		return
 	}
 	if err := result.Validate(); err != nil || result.CommandID != command.CommandID || result.SessionID != command.SessionID {

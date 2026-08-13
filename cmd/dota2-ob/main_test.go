@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/delivery"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/preflight"
@@ -158,7 +160,7 @@ func TestRunNormalRejectsAddressBeforeAnySideEffect(t *testing.T) {
 		t.Run(address, func(t *testing.T) {
 			deps := defaultRunDependencies()
 			storeCalls, listenCalls, lifecycleCalls := 0, 0, 0
-			deps.newStore = func(string) (*session.Store, error) { storeCalls++; return nil, errors.New("must not run") }
+			deps.newStore = func(string, string) (*session.Store, error) { storeCalls++; return nil, errors.New("must not run") }
 			deps.listen = func(string, string) (net.Listener, error) { listenCalls++; return nil, errors.New("must not run") }
 			deps.runLifecycle = func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error {
 				lifecycleCalls++
@@ -178,7 +180,7 @@ func TestRunNormalRejectsAddressBeforeAnySideEffect(t *testing.T) {
 func TestRunRejectsCollidingCaptureAndDeliveryAddressesBeforeDataSideEffects(t *testing.T) {
 	deps := defaultRunDependencies()
 	storeCalls, listenCalls := 0, 0
-	deps.newStore = func(string) (*session.Store, error) { storeCalls++; return nil, errors.New("must not run") }
+	deps.newStore = func(string, string) (*session.Store, error) { storeCalls++; return nil, errors.New("must not run") }
 	deps.listen = func(string, string) (net.Listener, error) { listenCalls++; return nil, errors.New("must not run") }
 	var output bytes.Buffer
 	code := runWithDependencies([]string{"--addr", "127.0.0.1:43210", "--delivery-addr", "localhost:43210"}, &output, deps)
@@ -227,6 +229,9 @@ func TestRunDeliveryBindFailureLeavesCapturePersistingGSI(t *testing.T) {
 
 func TestRunConfiguresCommittedOverlayPort(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
+	const sessionID = "configured-product"
+	lineagePath := filepath.Join(t.TempDir(), "lineage.v2.json")
+	writeTestLineage(t, lineagePath, testLineage(sessionID))
 	deps := defaultRunDependencies()
 	deps.newTokenFile = func(string) (string, string, func(), error) {
 		return "test-only-operator-token", "", func() {}, nil
@@ -244,12 +249,185 @@ func TestRunConfiguresCommittedOverlayPort(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("configured overlay status=%d body=%s", response.Code, response.Body.String())
 		}
+		operatorRequest := httptest.NewRequest(http.MethodGet, "/v1/operator/state", nil)
+		operatorRequest.Header.Set("Authorization", "Bearer test-only-operator-token")
+		operatorRequest.Header.Set("Origin", "http://127.0.0.1:43211")
+		operatorResponse := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(operatorResponse, operatorRequest)
+		if operatorResponse.Code != http.StatusOK {
+			t.Fatalf("configured operator status=%d body=%s", operatorResponse.Code, operatorResponse.Body.String())
+		}
+		command := contracts.OperatorCommandV1{
+			SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "product-hide", SessionID: sessionID,
+			Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: 0, PolicyTimeMS: time.Now().UTC().UnixMilli(),
+		}
+		commandBody, _ := json.Marshal(command)
+		commandRequest := httptest.NewRequest(http.MethodPost, "/v1/operator/commands", bytes.NewReader(commandBody))
+		commandRequest.Header.Set("Authorization", "Bearer test-only-operator-token")
+		commandRequest.Header.Set("Origin", "http://127.0.0.1:43211")
+		commandRequest.Header.Set("Content-Type", delivery.JSONContentType)
+		commandRequest.Header.Set(delivery.CSRFHeader, delivery.CSRFValue)
+		commandResponse := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(commandResponse, commandRequest)
+		if commandResponse.Code != http.StatusOK {
+			t.Fatalf("configured command status=%d body=%s", commandResponse.Code, commandResponse.Body.String())
+		}
+		return appender.Close()
+	}
+
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root, "--session-id", sessionID, "--policy-lineage-file", lineagePath}, &output, deps); code != 0 {
+		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+}
+
+func TestRunMissingLineageDisablesDeliveryWithoutBlockingRawCapture(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	deps := defaultRunDependencies()
+	deps.newTokenFile = func(string) (string, string, func(), error) {
+		return "test-only-operator-token", "", func() {}, nil
+	}
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		if product.delivery != nil || product.deliveryListener != nil {
+			t.Fatal("misconfigured product exposed delivery endpoints")
+		}
+		request := httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`))
+		response := httptest.NewRecorder()
+		product.capture.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("capture status=%d body=%s", response.Code, response.Body.String())
+		}
+		waiter.Wait()
 		return appender.Close()
 	}
 
 	var output bytes.Buffer
 	if code := runWithDependencies([]string{"--data-dir", root}, &output, deps); code != 0 {
 		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+	if !strings.Contains(output.String(), "broadcast_policy_config_failed") {
+		t.Fatalf("missing bounded configuration failure: %q", output.String())
+	}
+}
+
+func TestRunConfiguredProductProjectsCommittedRawIntoDurablePolicy(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	const sessionID = "configured-projection"
+	lineagePath := filepath.Join(t.TempDir(), "lineage.v2.json")
+	writeTestLineage(t, lineagePath, testLineage(sessionID))
+	deps := defaultRunDependencies()
+	deps.newStore = func(root, _ string) (*session.Store, error) {
+		return session.NewStore(root, session.WithSessionID(sessionID), session.WithClock(func() time.Time { return time.UnixMilli(10_000).UTC() }))
+	}
+	deps.newTokenFile = func(string) (string, string, func(), error) {
+		return "test-only-operator-token", "", func() {}, nil
+	}
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		response := httptest.NewRecorder()
+		product.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{}`)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("capture status=%d body=%s", response.Code, response.Body.String())
+		}
+		policyDir := filepath.Join(root, sessionID)
+		deadline := time.Now().Add(time.Second)
+		committed := false
+		for time.Now().Before(deadline) {
+			entries, _ := os.ReadDir(policyDir)
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".pcl2") {
+					committed = true
+					break
+				}
+			}
+			if committed {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if !committed {
+			t.Fatal("configured product did not durably commit the accepted observation")
+		}
+		overlay := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(overlay, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+		if overlay.Code != http.StatusOK || strings.Contains(overlay.Body.String(), "unavailable") {
+			t.Fatalf("overlay status=%d body=%s", overlay.Code, overlay.Body.String())
+		}
+		waiter.Wait()
+		return appender.Close()
+	}
+
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root, "--policy-lineage-file", lineagePath}, &output, deps); code != 0 {
+		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+}
+
+func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	const sessionID = "binary-restart"
+	lineagePath := filepath.Join(t.TempDir(), "lineage.v2.json")
+	writeTestLineage(t, lineagePath, testLineage(sessionID))
+	args := []string{"--data-dir", root, "--session-id", sessionID, "--policy-lineage-file", lineagePath}
+	newDeps := func() runDependencies {
+		deps := defaultRunDependencies()
+		deps.newTokenFile = func(string) (string, string, func(), error) {
+			return "test-only-operator-token", "", func() {}, nil
+		}
+		deps.listen = func(_ string, address string) (net.Listener, error) {
+			return commandListener{address: commandAddress(address)}, nil
+		}
+		return deps
+	}
+
+	first := newDeps()
+	first.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "restart-hide", SessionID: sessionID, Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: 0, PolicyTimeMS: 10_000}
+		body, _ := json.Marshal(command)
+		request := httptest.NewRequest(http.MethodPost, "/v1/operator/commands", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer test-only-operator-token")
+		request.Header.Set("Origin", "http://127.0.0.1:43211")
+		request.Header.Set("Content-Type", delivery.JSONContentType)
+		request.Header.Set(delivery.CSRFHeader, delivery.CSRFValue)
+		response := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("first command status=%d body=%s", response.Code, response.Body.String())
+		}
+		waiter.Wait()
+		return appender.Close()
+	}
+	var firstOutput bytes.Buffer
+	if code := runWithDependencies(args, &firstOutput, first); code != 0 {
+		t.Fatalf("first exit=%d output=%q", code, firstOutput.String())
+	}
+
+	second := newDeps()
+	second.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		request := httptest.NewRequest(http.MethodGet, "/v1/operator/state", nil)
+		request.Header.Set("Authorization", "Bearer test-only-operator-token")
+		request.Header.Set("Origin", "http://127.0.0.1:43211")
+		response := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(response, request)
+		var state delivery.OperatorState
+		if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil || response.Code != http.StatusOK || state.PolicyRevision != 1 || !state.EmergencyHidden {
+			t.Fatalf("recovered status=%d state=%#v decode=%v", response.Code, state, err)
+		}
+		waiter.Wait()
+		return appender.Close()
+	}
+	var secondOutput bytes.Buffer
+	if code := runWithDependencies(args, &secondOutput, second); code != 0 {
+		t.Fatalf("second exit=%d output=%q", code, secondOutput.String())
 	}
 }
 
