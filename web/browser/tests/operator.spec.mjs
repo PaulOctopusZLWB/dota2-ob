@@ -20,11 +20,41 @@ function operatorState(overrides = {}) {
   };
 }
 
+async function connect(page) {
+  await page.goto("/operator/");
+  await page.getByLabel("本次启动令牌").fill("local-test-token");
+  await page.getByRole("button", { name: "连接本地会话" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-connection", "online");
+}
+
+function acceptedResult(command, resultingRevision = command.expected_policy_revision + 1) {
+  return {
+    schema_version: "operator_command_result.v1",
+    command_id: command.command_id,
+    session_id: command.session_id,
+    status: "accepted",
+    previous_revision: command.expected_policy_revision,
+    resulting_revision: resultingRevision,
+    decision_ids: [`decision-${resultingRevision}`],
+    reason: "operator_accepted"
+  };
+}
+
+async function routeAcceptedCommands(page, requests) {
+  await page.route("**/v1/operator/commands", async (route) => {
+    const command = JSON.parse(route.request().postData());
+    requests.push(command);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(acceptedResult(command)) });
+  });
+}
+
 test("operator previews localized candidates and submits revision-checked commands", async ({ page }) => {
   const requests = [];
+  let stateReads = 0;
   await page.route("**/v1/operator/state", async (route) => {
     expect(route.request().headers().authorization).toBe("Bearer local-test-token");
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(operatorState()) });
+    const state = stateReads++ === 0 ? operatorState() : operatorState({ policy_revision: 8, previews: [] });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
   });
   await page.route("**/v1/operator/commands", async (route) => {
     requests.push(JSON.parse(route.request().postData()));
@@ -63,7 +93,172 @@ test("operator previews localized candidates and submits revision-checked comman
   expect(requests[0].command_id).toMatch(/^[0-9a-f-]{36}$/);
   expect(Number.isSafeInteger(requests[0].policy_time_ms)).toBe(true);
   await expect(page.locator("#policy-revision")).toHaveText("8");
+  await expect(page.locator("#candidate-count")).toHaveText("0");
+  expect(stateReads).toBe(2);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookie: document.cookie }))).toEqual({ local: 0, session: 0, cookie: "" });
+});
+
+test("accepted emergency hide and pin actions use refreshed authoritative inverse state", async ({ page }) => {
+  const requests = [];
+  const states = [
+    operatorState(),
+    operatorState({ policy_revision: 8, emergency_hidden: true }),
+    operatorState({ policy_revision: 9, emergency_hidden: false }),
+    operatorState({ policy_revision: 10, previews: [{ ...operatorState().previews[0], pinned: true }] })
+  ];
+  states.push(operatorState({ policy_revision: 11 }));
+  let stateReads = 0;
+  await page.route("**/v1/operator/state", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(states[stateReads++])
+  }));
+  await routeAcceptedCommands(page, requests);
+  await connect(page);
+
+  await page.getByRole("button", { name: "紧急隐藏全部分析" }).click();
+  await expect(page.getByRole("button", { name: "解除紧急隐藏" })).toBeEnabled();
+  await page.getByRole("button", { name: "解除紧急隐藏" }).click();
+  await expect(page.getByRole("button", { name: "紧急隐藏全部分析" })).toBeEnabled();
+  await page.getByRole("button", { name: "置顶" }).click();
+  await expect(page.getByRole("button", { name: "取消置顶" })).toBeEnabled();
+  await page.getByRole("button", { name: "取消置顶" }).click();
+  await expect(page.getByRole("button", { name: "置顶" })).toBeEnabled();
+
+  expect(requests.map(({ action, expected_policy_revision }) => ({ action, expected_policy_revision }))).toEqual([
+    { action: "emergency_hide", expected_policy_revision: 7 },
+    { action: "clear_emergency_hide", expected_policy_revision: 8 },
+    { action: "pin", expected_policy_revision: 9 },
+    { action: "unpin", expected_policy_revision: 10 }
+  ]);
+  expect(stateReads).toBe(5);
+});
+
+for (const action of ["approve", "reject"]) {
+  test(`accepted ${action} removes the candidate only after authoritative refresh`, async ({ page }) => {
+    const requests = [];
+    let stateReads = 0;
+    await page.route("**/v1/operator/state", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(stateReads++ === 0 ? operatorState() : operatorState({ policy_revision: 8, previews: [] }))
+    }));
+    await routeAcceptedCommands(page, requests);
+    await connect(page);
+
+    await page.getByRole("button", { name: action === "approve" ? "批准上屏" : "拒绝" }).click();
+    await expect(page.locator("#candidate-count")).toHaveText("0");
+    await expect(page.locator(".candidate-card")).toHaveCount(0);
+    expect(requests[0].action).toBe(action);
+    expect(stateReads).toBe(2);
+  });
+}
+
+test("revision conflicts preserve authoritative controls and duplicate replay refreshes state", async ({ page }) => {
+  const requests = [];
+  let stateReads = 0;
+  await page.route("**/v1/operator/state", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(stateReads++ === 0 ? operatorState() : operatorState({ policy_revision: 8, previews: [] }))
+  }));
+  await page.route("**/v1/operator/commands", async (route) => {
+    const command = JSON.parse(route.request().postData());
+    requests.push(command);
+    const result = requests.length === 1 ? {
+      ...acceptedResult(command, 7), status: "rejected", decision_ids: [], reason: "revision_conflict"
+    } : acceptedResult(command);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(result) });
+  });
+  await connect(page);
+
+  await page.getByRole("button", { name: "拒绝" }).click();
+  await expect(page.locator("#policy-revision")).toHaveText("7");
+  await expect(page.getByRole("button", { name: "拒绝" })).toBeEnabled();
+  expect(stateReads).toBe(1);
+  await page.getByRole("button", { name: "重试同一命令" }).click();
+  await expect(page.locator("#candidate-count")).toHaveText("0");
+  expect(requests[1]).toEqual(requests[0]);
+  expect(stateReads).toBe(2);
+});
+
+for (const failure of ["unavailable", "invalid", "wrong-session"]) {
+  test(`accepted-command ${failure} refresh disables every policy control and clears stale candidates`, async ({ page }) => {
+    let stateReads = 0;
+    await page.route("**/v1/operator/state", (route) => {
+      stateReads++;
+      if (stateReads === 1) {
+        return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(operatorState()) });
+      }
+      if (failure === "unavailable") {
+        return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ status: "rejected" }) });
+      }
+      const state = failure === "invalid" ? operatorState({ unknown: true }) : operatorState({ session_id: "other-session", policy_revision: 8 });
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
+    });
+    await routeAcceptedCommands(page, []);
+    await connect(page);
+
+    await page.getByRole("button", { name: "批准上屏" }).click();
+    await expect(page.locator("body")).toHaveAttribute("data-connection", "offline");
+    await expect(page.locator(".candidate-card")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "紧急隐藏全部分析" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "停用规则" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "启用规则" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "重试同一命令" })).toBeDisabled();
+  });
+}
+
+test("an accepted duplicate response refreshes state without synthesizing a second mutation", async ({ page }) => {
+  const requests = [];
+  let stateReads = 0;
+  await page.route("**/v1/operator/state", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(stateReads++ === 0 ? operatorState() : operatorState({ policy_revision: 8, emergency_hidden: true }))
+  }));
+  let committedResult;
+  await page.route("**/v1/operator/commands", async (route) => {
+    const command = JSON.parse(route.request().postData());
+    requests.push(command);
+    committedResult ||= acceptedResult(command);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(committedResult) });
+  });
+  await connect(page);
+
+  await page.getByRole("button", { name: "紧急隐藏全部分析" }).click();
+  await expect(page.getByRole("button", { name: "解除紧急隐藏" })).toBeEnabled();
+  await page.getByRole("button", { name: "重试同一命令" }).click();
+  await expect(page.getByRole("button", { name: "解除紧急隐藏" })).toBeEnabled();
+
+  expect(requests[1]).toEqual(requests[0]);
+  expect(stateReads).toBe(3);
+});
+
+test("an older delayed refresh cannot revive the console after a newer failed reconnect", async ({ page }) => {
+  let stateReads = 0;
+  let releaseDelayed;
+  const delayed = new Promise((resolve) => { releaseDelayed = resolve; });
+  await page.route("**/v1/operator/state", async (route) => {
+    stateReads++;
+    if (stateReads === 1) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(operatorState()) });
+    if (stateReads === 2) {
+      await delayed;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(operatorState({ policy_revision: 8, previews: [] })) });
+    }
+    return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ status: "rejected", reason: "operator_state_unavailable" }) });
+  });
+  await routeAcceptedCommands(page, []);
+  await connect(page);
+  await page.getByRole("button", { name: "批准上屏" }).click();
+  await expect.poll(() => stateReads).toBe(2);
+
+  await page.getByRole("button", { name: "连接本地会话" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-connection", "offline");
+  releaseDelayed();
+  await page.waitForTimeout(100);
+  await expect(page.locator("body")).toHaveAttribute("data-connection", "offline");
+  await expect(page.locator(".candidate-card")).toHaveCount(0);
 });
 
 test("operator exposes every accepted action and replays the exact prior command id", async ({ page }) => {

@@ -8,19 +8,18 @@ import json
 from pathlib import Path
 
 
-WIDTH, HEIGHT = 2560, 1440
 URL = "http://127.0.0.1:18838/overlay/"
 
 
-def profile(name: str, recording_dir: Path) -> str:
+def profile(name: str, recording_dir: Path, width: int, height: int) -> str:
     return f"""[General]
 Name={name}
 
 [Video]
-BaseCX={WIDTH}
-BaseCY={HEIGHT}
-OutputCX={WIDTH}
-OutputCY={HEIGHT}
+BaseCX={width}
+BaseCY={height}
+OutputCX={width}
+OutputCY={height}
 FPSType=0
 FPSCommon=60
 ScaleType=bicubic
@@ -60,22 +59,22 @@ def source(name: str, uuid: str, source_id: str, settings: dict) -> dict:
     }
 
 
-def collection(name: str, browser: bool) -> dict:
+def collection(name: str, browser: bool, width: int, height: int) -> dict:
     suffix = "0001" if browser else "0000"
     scene_uuid = f"10000000-0000-4000-8000-00000000{suffix}"
     color_uuid = f"10000000-0000-4000-8001-00000000{suffix}"
     browser_uuid = f"10000000-0000-4000-8002-00000000{suffix}"
-    sources = [source("Known Color", color_uuid, "color_source_v3", {"color": 4282668390, "width": WIDTH, "height": HEIGHT})]
+    sources = [source("Known Color", color_uuid, "color_source_v3", {"color": 4282668390, "width": width, "height": height})]
     items = [{
         "name": "Known Color", "source_uuid": color_uuid, "visible": True, "locked": True,
         "rot": 0.0, "pos": {"x": 0.0, "y": 0.0}, "scale": {"x": 1.0, "y": 1.0},
         "align": 5, "bounds_type": 2, "bounds_align": 0,
-        "bounds": {"x": float(WIDTH), "y": float(HEIGHT)},
+        "bounds": {"x": float(width), "y": float(height)},
         "crop_left": 0, "crop_top": 0, "crop_right": 0, "crop_bottom": 0, "id": 1,
     }]
     if browser:
         sources.append(source("Analytics Sidebar", browser_uuid, "browser_source", {
-            "url": URL, "width": WIDTH, "height": HEIGHT, "fps": 30, "shutdown": False,
+            "url": URL, "width": width, "height": height, "fps": 30, "shutdown": False,
             "restart_when_active": False, "reroute_audio": False,
         }))
         items.append({
@@ -104,15 +103,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--recording-dir", required=True, type=Path)
+    parser.add_argument("--width", required=True, type=int, choices=(1920, 2560))
+    parser.add_argument("--height", required=True, type=int, choices=(1080, 1440))
     args = parser.parse_args()
+    if (args.width, args.height) not in {(1920, 1080), (2560, 1440)}:
+        parser.error("resolution must be 1920x1080 or 2560x1440")
     root, recording = args.root.resolve(), args.recording_dir.resolve()
     recording.mkdir(parents=True, exist_ok=True, mode=0o700)
     obs = root / "config/obs-studio"
     write(obs / "global.ini", "[General]\nMaxLogs=10\nInfoIncrement=-1\nProcessPriority=Normal\nEnableAutoUpdates=false\nBrowserHWAccel=false\nLastVersion=537001985\n\n[Video]\nRenderer=OpenGL\n")
     write(obs / "user.ini", "[General]\nFirstRun=false\nConfirmOnExit=false\n\n[BasicWindow]\nPreviewEnabled=true\nShowStatusBar=true\nDocksLocked=true\n")
     for name, browser in (("DOT24-P3-Empty", False), ("DOT24-P3-Overlay", True)):
-        write(obs / "basic/profiles" / name / "basic.ini", profile(name, recording))
-        write(obs / "basic/scenes" / f"{name}.json", json.dumps(collection(name, browser), ensure_ascii=False, indent=2) + "\n")
+        write(obs / "basic/profiles" / name / "basic.ini", profile(name, recording, args.width, args.height))
+        write(obs / "basic/scenes" / f"{name}.json", json.dumps(collection(name, browser, args.width, args.height), ensure_ascii=False, indent=2) + "\n")
     (root / "data").mkdir(parents=True, exist_ok=True, mode=0o700)
     (root / "cache").mkdir(parents=True, exist_ok=True, mode=0o700)
 

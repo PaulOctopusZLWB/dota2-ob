@@ -17,8 +17,10 @@
   const stateKeys = ["schema_version", "session_id", "policy_revision", "emergency_hidden", "previews"];
   const previewKeys = ["candidate_id", "rule_id", "rule_version", "confidence", "sample_size", "expires_at_ms", "pinned", "claim"];
   const claimKeys = ["title", "body", "asset_key"];
+  const resultKeys = ["schema_version", "command_id", "session_id", "status", "previous_revision", "resulting_revision", "decision_ids", "reason"];
   let currentState = null;
   let lastCommand = null;
+  let operationEpoch = 0;
 
   function onlyKeys(value, allowed) {
     return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => allowed.includes(key));
@@ -47,6 +49,8 @@
   function setControls(enabled) {
     emergency.disabled = !enabled;
     ruleButtons.forEach((button) => { button.disabled = !enabled; });
+    list.querySelectorAll("button[data-action]").forEach((button) => { button.disabled = !enabled; });
+    retry.disabled = !enabled || !lastCommand;
   }
 
   function showResult(value, state) {
@@ -91,21 +95,75 @@
     setControls(true);
   }
 
+  function clearState() {
+    currentState = null;
+    document.body.dataset.connection = "offline";
+    document.body.dataset.emergency = "false";
+    sessionID.textContent = "状态不可用";
+    revision.textContent = "—";
+    count.textContent = "0";
+    emergency.textContent = "紧急隐藏全部分析";
+    list.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    const mark = document.createElement("span");
+    mark.textContent = "关闭";
+    const copy = document.createElement("p");
+    copy.textContent = "权威状态不可用；所有策略操作已禁用。";
+    empty.append(mark, copy);
+    list.append(empty);
+    setControls(false);
+  }
+
+  function validCommandResult(value, command) {
+    return onlyKeys(value, resultKeys) && resultKeys.every((key) => Object.hasOwn(value, key)) &&
+      value.schema_version === "operator_command_result.v1" && value.command_id === command.command_id &&
+      value.session_id === command.session_id && ["accepted", "rejected"].includes(value.status) &&
+      value.previous_revision === command.expected_policy_revision && Number.isSafeInteger(value.resulting_revision) &&
+      value.resulting_revision >= value.previous_revision && (value.status !== "accepted" || value.resulting_revision > value.previous_revision) &&
+      Array.isArray(value.decision_ids) && value.decision_ids.length <= 64 && value.decision_ids.every((id) => plainText(id, 128)) &&
+      value.decision_ids.every((id, index) => index === 0 || id > value.decision_ids[index - 1]) &&
+      plainText(value.reason, 128);
+  }
+
   async function readJSON(response) {
     const text = await response.text();
     if (text.length > 64 * 1024) throw new Error("oversized response");
     return JSON.parse(text);
   }
 
-  async function connect() {
-    const response = await fetch("/v1/operator/state", {
-      method: "GET",
-      cache: "no-store",
-      credentials: "omit",
-      headers: { "Authorization": `Bearer ${token.value}` }
-    });
+  async function loadState(epoch, minimumRevision = 0, expectedSession = "") {
+    let response;
+    try {
+      response = await fetch("/v1/operator/state", {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        headers: { "Authorization": `Bearer ${token.value}` }
+      });
+    } catch (error) {
+      if (epoch !== operationEpoch) return false;
+      throw error;
+    }
+    if (epoch !== operationEpoch) return false;
     if (!response.ok) throw new Error("operator state unavailable");
-    renderState(await readJSON(response));
+    let state;
+    try {
+      state = await readJSON(response);
+    } catch (error) {
+      if (epoch !== operationEpoch) return false;
+      throw error;
+    }
+    if (epoch !== operationEpoch) return false;
+    if (!validState(state) || state.policy_revision < minimumRevision || (expectedSession && state.session_id !== expectedSession)) {
+      throw new Error("invalid operator state");
+    }
+    renderState(state);
+    return true;
+  }
+
+  async function connect(epoch) {
+    if (!await loadState(epoch)) return;
     showResult("本地策略会话已连接。", "accepted");
   }
 
@@ -125,41 +183,62 @@
   }
 
   async function submitCommand(command, remember = true) {
+    const epoch = ++operationEpoch;
+    setControls(false);
     showResult("正在提交并等待持久化审计结果…", "pending");
-    const response = await fetch("/v1/operator/commands", {
-      method: "POST",
-      cache: "no-store",
-      credentials: "omit",
-      headers: {
-        "Authorization": `Bearer ${token.value}`,
-        "Content-Type": "application/json",
-        "X-Dota2-OB-CSRF": "operator-command"
-      },
-      body: JSON.stringify(command)
-    });
-    const body = await readJSON(response);
+    let response;
+    try {
+      response = await fetch("/v1/operator/commands", {
+        method: "POST",
+        cache: "no-store",
+        credentials: "omit",
+        headers: {
+          "Authorization": `Bearer ${token.value}`,
+          "Content-Type": "application/json",
+          "X-Dota2-OB-CSRF": "operator-command"
+        },
+        body: JSON.stringify(command)
+      });
+    } catch (error) {
+      if (epoch !== operationEpoch) return;
+      throw error;
+    }
+    if (epoch !== operationEpoch) return;
+    let body;
+    try {
+      body = await readJSON(response);
+    } catch (error) {
+      if (epoch !== operationEpoch) return;
+      throw error;
+    }
+    if (epoch !== operationEpoch) return;
+    if (!validCommandResult(body, command)) throw new Error("invalid command result");
     if (remember) {
       lastCommand = command;
-      retry.disabled = false;
     }
     showResult(body, response.ok && body.status === "accepted" ? "accepted" : "rejected");
-    if (response.ok && body.status === "accepted" && Number.isSafeInteger(body.resulting_revision)) {
-      currentState.policy_revision = body.resulting_revision;
-      revision.textContent = String(body.resulting_revision);
+    if (response.ok && body.status === "accepted") {
+      clearState();
+      if (!await loadState(epoch, body.resulting_revision, command.session_id)) return;
+      showResult(body, "accepted");
+      return;
     }
+    setControls(Boolean(currentState));
   }
 
   connectForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    setControls(false);
+    const epoch = ++operationEpoch;
+    lastCommand = null;
+    clearState();
     try {
-      await connect();
+      await connect(epoch);
     } catch {
-      currentState = null;
-      document.body.dataset.connection = "offline";
-      sessionID.textContent = "连接失败";
-      revision.textContent = "—";
-      showResult("认证失败、状态不可用或响应不安全。", "rejected");
+      if (epoch === operationEpoch) {
+        clearState();
+        sessionID.textContent = "连接失败";
+        showResult("认证失败、状态不可用或响应不安全。", "rejected");
+      }
     }
   });
 
@@ -170,7 +249,8 @@
     try {
       await submitCommand(buildCommand(button.dataset.action, card.dataset.candidateId));
     } catch {
-      showResult("命令未获得可验证结果；输出保持关闭。", "rejected");
+      clearState();
+      showResult("命令或后续状态未获得可验证结果；输出保持关闭。", "rejected");
     }
   });
 
@@ -180,6 +260,7 @@
     try {
       await submitCommand(buildCommand(action));
     } catch {
+      clearState();
       showResult("紧急命令未获得可验证结果；请保持输出关闭。", "rejected");
     }
   });
@@ -192,6 +273,7 @@
     try {
       await submitCommand(buildCommand(button.dataset.ruleAction, "", ruleID.value));
     } catch {
+      clearState();
       showResult("规则命令未获得可验证结果。", "rejected");
     }
   });
@@ -201,6 +283,7 @@
     try {
       await submitCommand(lastCommand, false);
     } catch {
+      clearState();
       showResult("重复命令未获得可验证结果。", "rejected");
     }
   });

@@ -21,13 +21,42 @@ import numpy as np
 
 
 REPO = Path(__file__).resolve().parents[2]
-RUN = REPO / ".dot24-p3-run"
 EVIDENCE = REPO / "docs/evidence/m3"
 BASELINE_SECONDS = int(os.environ.get("DOTA2_OB_P3_BASELINE_SECONDS", "600"))
 WARMUP_SECONDS = int(os.environ.get("DOTA2_OB_P3_WARMUP_SECONDS", "600"))
 RECORD_SECONDS = int(os.environ.get("DOTA2_OB_P3_RECORD_SECONDS", "3600"))
 SAMPLE_SECONDS = int(os.environ.get("DOTA2_OB_P3_SAMPLE_SECONDS", "5"))
 PASSWORD_RE = re.compile(r"(?i)(password|token|authorization)[^\s,;]*")
+
+
+def resolution(label: str) -> dict:
+    values = {"1080p": (1920, 1080), "1440p": (2560, 1440)}
+    if label not in values:
+        raise ValueError("P3 resolution must be 1080p or 1440p")
+    width, height = values[label]
+    return {"label": label, "width": width, "height": height}
+
+
+def visibility_crop(config: dict) -> dict:
+    return {
+        "x": config["width"] - 790,
+        "y": round(config["height"] * 80 / 1440),
+        "width": 750,
+        "height": 450,
+    }
+
+
+def evidence_stem(kind: str, resolution_label: str) -> str:
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", kind):
+        raise ValueError("invalid P3 evidence kind")
+    resolution(resolution_label)
+    return f"p3-{kind}-{resolution_label}"
+
+
+RESOLUTION = resolution(os.environ.get("DOTA2_OB_P3_RESOLUTION", "1440p"))
+RUN_KIND = os.environ.get("DOTA2_OB_P3_RUN_KIND", "measurement")
+EVIDENCE_STEM = evidence_stem(RUN_KIND, RESOLUTION["label"])
+RUN = REPO / f".dot24-p3-run-{RESOLUTION['label']}"
 
 
 def run(command: list[str], *, check: bool = True, text: bool = True, **kwargs):
@@ -279,11 +308,11 @@ def probe_duration(video: Path) -> float:
     return float(result)
 
 
-def crop_scores(video: Path) -> list[float]:
-    width, height = 750, 450
+def crop_scores(video: Path, crop: dict) -> list[float]:
+    width, height = crop["width"], crop["height"]
     command = [
         "flatpak", "run", "--user", "--command=ffmpeg", "com.obsproject.Studio", "-hide_banner", "-loglevel", "error",
-        "-i", str(video), "-vf", f"fps=1/{SAMPLE_SECONDS},crop={width}:{height}:1770:80",
+        "-i", str(video), "-vf", f"fps=1/{SAMPLE_SECONDS},crop={width}:{height}:{crop['x']}:{crop['y']}",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE)
@@ -349,7 +378,9 @@ def stack_info(log: Path) -> dict:
 
 
 def source_identity() -> dict:
-    diff = subprocess.check_output(["git", "diff", "--binary", "HEAD"], cwd=REPO)
+    diff = subprocess.check_output([
+        "git", "diff", "--binary", "HEAD", "--", ".", ":(exclude)docs/evidence/m3",
+    ], cwd=REPO)
     return {"baseCommit": output(["git", "-C", str(REPO), "rev-parse", "HEAD"]), "sourceDiffSHA256": hashlib.sha256(diff).hexdigest()}
 
 
@@ -364,6 +395,27 @@ def process_count() -> int:
     return sum(path.name.isdigit() for path in Path("/proc").iterdir())
 
 
+def summarize_pss(baseline_samples: list[dict], overlay_samples: list[dict]) -> dict:
+    result = {}
+    x = np.array([sample["elapsedSeconds"] / 60 for sample in overlay_samples], dtype=float)
+    for kind in ("total", "obs", "browser"):
+        if kind == "total":
+            baseline = [sample["pssKiB"] for sample in baseline_samples]
+            overlay = [sample["pssKiB"] for sample in overlay_samples]
+        else:
+            baseline = [sample["pssKiBByKind"][kind] for sample in baseline_samples]
+            overlay = [sample["pssKiBByKind"][kind] for sample in overlay_samples]
+        slope = float(np.polyfit(x, np.array(overlay, dtype=float), 1)[0]) if len(x) > 1 else 0.0
+        result[kind] = {
+            "baselineMedianKiB": round(statistics.median(baseline), 1),
+            "overlayMedianKiB": round(statistics.median(overlay), 1),
+            "incrementalMedianKiB": round(statistics.median(overlay) - statistics.median(baseline), 1),
+            "growthKiBPerMinute": round(slope, 3),
+            "totalRangeKiB": max(overlay) - min(overlay),
+        }
+    return result
+
+
 def main() -> int:
     if RUN.exists():
         raise RuntimeError(f"refusing existing run root: {RUN}")
@@ -375,7 +427,11 @@ def main() -> int:
     baseline_obs = overlay_obs = None
     baseline_stream = overlay_stream = None
     try:
-        run([sys.executable, str(REPO / "web/browser/prepare-p3-obs.py"), "--root", str(RUN), "--recording-dir", str(RUN / "recordings")])
+        run([
+            sys.executable, str(REPO / "web/browser/prepare-p3-obs.py"),
+            "--root", str(RUN), "--recording-dir", str(RUN / "recordings"),
+            "--width", str(RESOLUTION["width"]), "--height", str(RESOLUTION["height"]),
+        ])
         env = os.environ.copy()
         env["DOTA2_OB_P3_LOG"] = str(RUN / "server.jsonl")
         server_stream = (RUN / "server.out").open("w", encoding="utf-8")
@@ -411,8 +467,9 @@ def main() -> int:
         overlay_counters = recording_metrics(overlay_log)
         baseline_duration = probe_duration(baseline_video)
         overlay_duration = probe_duration(overlay_video)
-        baseline_scores = crop_scores(baseline_video)
-        overlay_scores = crop_scores(overlay_video)
+        crop = visibility_crop(RESOLUTION)
+        baseline_scores = crop_scores(baseline_video, crop)
+        overlay_scores = crop_scores(overlay_video, crop)
         visibility_threshold = max(baseline_scores) + 3.0
         events = parse_events(RUN / "server.jsonl")
         unsafe = {"stale", "malformed", "missing-asset", "emergency-hide", "disconnect"}
@@ -441,30 +498,24 @@ def main() -> int:
         hidden_violations = sum(item["visible"] for item in hidden_checks)
         recovery_violations = sum(not item["visible"] for item in visible_checks)
 
-        baseline_pss = [sample["pssKiB"] for sample in baseline_samples]
-        recording_pss = [sample["pssKiB"] for sample in recording_samples]
+        pss = summarize_pss(baseline_samples, recording_samples)
         cpu = [sample["cpuPercentOfOneCore"] for sample in recording_samples if sample["cpuPercentOfOneCore"] is not None]
         browser_cpu = [sample["cpuPercentOfOneCoreByKind"]["browser"] for sample in recording_samples if sample["cpuPercentOfOneCoreByKind"]["browser"] is not None]
-        x = np.array([sample["elapsedSeconds"] / 60 for sample in recording_samples], dtype=float)
-        y = np.array(recording_pss, dtype=float)
-        growth_slope = float(np.polyfit(x, y, 1)[0]) if len(x) > 1 else 0.0
         remote = sorted({peer for sample in baseline_samples + warmup_samples + recording_samples for peer in sample["remoteSocketPeers"]})
         lag_delta = overlay_counters["renderLagPercent"] - baseline_counters["renderLagPercent"]
 
-        visible_path = EVIDENCE / "p3-overlay-visible.png"
-        hidden_path = EVIDENCE / "p3-overlay-hidden.png"
+        visible_path = EVIDENCE / f"{EVIDENCE_STEM}-visible.png"
+        hidden_path = EVIDENCE / f"{EVIDENCE_STEM}-hidden.png"
         if visible_second is not None:
             extract_frame(overlay_video, visible_second, visible_path)
         if hidden_second is not None:
             extract_frame(overlay_video, hidden_second, hidden_path)
 
-        pss_increment = statistics.median(recording_pss) - statistics.median(baseline_pss)
-        total_growth = max(recording_pss) - min(recording_pss)
         passed = all([
             overlay_duration >= WARMUP_SECONDS + RECORD_SECONDS - 2,
-            pss_increment <= 256 * 1024,
-            growth_slope <= 1024,
-            total_growth <= 64 * 1024,
+            pss["total"]["incrementalMedianKiB"] <= 256 * 1024,
+            pss["total"]["growthKiBPerMinute"] <= 1024,
+            pss["total"]["totalRangeKiB"] <= 64 * 1024,
             statistics.median(browser_cpu) <= 5,
             lag_delta <= 1.0,
             hidden_violations == 0,
@@ -474,7 +525,11 @@ def main() -> int:
         ])
         summary = {
             "protocol": "P3", "measuredAt": datetime.now(timezone.utc).isoformat(), **source_identity(),
-            "configured": {"emptyBaselineSeconds": BASELINE_SECONDS, "overlayWarmupSeconds": WARMUP_SECONDS, "recordingSeconds": RECORD_SECONDS, "sampleSeconds": SAMPLE_SECONDS},
+            "configured": {
+                "runKind": RUN_KIND, "resolution": RESOLUTION["label"],
+                "emptyBaselineSeconds": BASELINE_SECONDS, "overlayWarmupSeconds": WARMUP_SECONDS,
+                "recordingSeconds": RECORD_SECONDS, "sampleSeconds": SAMPLE_SECONDS,
+            },
             "host": {
                 "os": output(["bash", "-lc", ". /etc/os-release; echo \"$PRETTY_NAME\""]),
                 "kernel": output(["uname", "-srmo"]),
@@ -487,25 +542,26 @@ def main() -> int:
             },
             "stack": {
                 **stack_info(overlay_log),
-                "canvas": "2560x1440@60",
-                "browserSourceViewport": "2560x1440@30",
+                "canvas": f"{RESOLUTION['width']}x{RESOLUTION['height']}@60",
+                "browserSourceViewport": f"{RESOLUTION['width']}x{RESOLUTION['height']}@30",
                 "browserHardwareAcceleration": False,
                 "composition": "OBS OpenGL; CEF software-composited",
                 "encoder": "NVENC H.264",
             },
-            "baseline": {"durationSeconds": round(baseline_duration, 3), "samples": len(baseline_samples), "medianPssKiB": round(statistics.median(baseline_pss), 1), "counters": baseline_counters},
+            "baseline": {"durationSeconds": round(baseline_duration, 3), "samples": len(baseline_samples), "medianPssKiB": pss["total"]["baselineMedianKiB"], "counters": baseline_counters},
             "overlay": {
                 "videoDurationSeconds": round(overlay_duration, 3), "measuredDurationSeconds": RECORD_SECONDS,
                 "warmupSamples": len(warmup_samples), "recordingSamples": len(recording_samples),
-                "medianPssKiB": round(statistics.median(recording_pss), 1), "incrementalPssKiB": round(pss_increment, 1),
-                "pssGrowthKiBPerMinute": round(growth_slope, 3), "pssTotalGrowthKiB": total_growth,
+                "medianPssKiB": pss["total"]["overlayMedianKiB"], "incrementalPssKiB": pss["total"]["incrementalMedianKiB"],
+                "pssGrowthKiBPerMinute": pss["total"]["growthKiBPerMinute"], "pssTotalGrowthKiB": pss["total"]["totalRangeKiB"],
+                "pssByComponent": pss,
                 "medianOverlayCpuPercentOfOneCore": round(statistics.median(browser_cpu), 3),
                 "medianCombinedObsAndBrowserCpuPercentOfOneCore": round(statistics.median(cpu), 3),
                 "maxGpuFramebufferMiB": max(sample["gpuFramebufferMiB"] for sample in recording_samples),
                 "counters": overlay_counters, "renderLagDeltaPercentagePoints": round(lag_delta, 3),
             },
             "visibility": {
-                "crop": {"x": 1770, "y": 80, "width": 750, "height": 450}, "sampleSeconds": SAMPLE_SECONDS,
+                "crop": crop, "sampleSeconds": SAMPLE_SECONDS,
                 "threshold": round(visibility_threshold, 3), "hiddenChecks": len(hidden_checks), "hiddenViolations": hidden_violations,
                 "recoveryChecks": len(visible_checks), "recoveryViolations": recovery_violations,
                 "hiddenSamples": hidden_checks, "recoverySamples": visible_checks,
@@ -519,7 +575,7 @@ def main() -> int:
             ],
             "passed": passed,
         }
-        target = EVIDENCE / "p3-obs-measurement.json"
+        target = EVIDENCE / f"{EVIDENCE_STEM}.json"
         target.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.chmod(target, 0o600)
         print(json.dumps(summary, ensure_ascii=False, indent=2))

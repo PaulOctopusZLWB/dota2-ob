@@ -21,23 +21,26 @@ later revival.
 
 ## P3 OBS resource and render run
 
-The runner creates a private `.dot24-p3-run` root, two audio-free OBS profiles
-and collections, and a loopback-only network namespace. It refuses to start if
-OBS is already running or the private root already exists. It removes the raw
-OBS logs, profile, cache, and MKV after extracting sanitized metrics and frames.
-It never reads or writes the user's existing OBS configuration.
+For each target resolution, the runner creates a private
+`.dot24-p3-run-{resolution}` root, two audio-free OBS profiles and collections,
+and a loopback-only network namespace. It refuses to start if OBS is already
+running or the private root already exists. It removes the raw OBS logs,
+profile, cache, and MKV after extracting sanitized metrics and frames. It never
+reads or writes the user's existing OBS configuration.
 
 Run on PaulPC4090 from the repository root:
 
 ```sh
-unshare -Urn --map-root-user bash -lc \
-  'ip link set lo up; python3 web/browser/run-p3.py >/dev/null'
+for resolution in 1080p 1440p; do
+  unshare -Urn --map-root-user bash -lc \
+    "ip link set lo up; DOTA2_OB_P3_RESOLUTION=$resolution \
+      python3 web/browser/run-p3.py >/dev/null"
+done
 ```
 
-The generated scene uses a 2560x1440 canvas and matching 30 FPS Browser Source,
-the worst-case supported output size. The Playwright and P2 suites separately
-exercise fixed 1920x1080 and 2560x1440 viewports. P3 records a ten-minute empty
-scene baseline, starts a matching overlay scene, warms it for ten minutes, then
+The generated scenes use native 1920x1080 and 2560x1440 canvases with matching
+30 FPS Browser Sources. P3 records a ten-minute empty-scene baseline at each
+resolution, starts a matching overlay scene, warms it for ten minutes, then
 measures it for 60 minutes while cycling six localized template families,
 maximum-length Chinese copy, stale state, malformed state, missing assets,
 emergency hide, disconnect, and recovery at the production 750 ms polling
@@ -62,9 +65,10 @@ The P3 gate requires:
 - zero visible analytical frames in stable fail-closed windows and zero blank
   frames in stable recovery windows.
 
-`p3-obs-measurement.json` records the immutable source commit, dirty-diff hash,
-software stack, host and power context, raw five-second samples, state
-transitions, derived metrics, checksums, and the overall result. The two PNGs
+`p3-measurement-1080p.json` and `p3-measurement-1440p.json` record the immutable
+source commit, source-diff hash, software stack, host and power context, raw
+five-second samples, total/OBS/browser component PSS, state transitions,
+derived metrics, checksums, and the overall result. Resolution-specific PNGs
 are sanitized full-canvas examples of a visible claim and a correctly hidden
 claim.
 
@@ -86,5 +90,25 @@ hidden/recovery frame violations, but the conservative OBS+CEF process-tree PSS
 delta remained 276,994 KiB and its short-window slope was 1,635 KiB/minute. A 10 FPS
 Browser Source reduced the three-minute sample only to 269,569 KiB, while the
 official obs-browser `--enable-gpu` path increased it to 452,377 KiB. Both
-experiments were reverted. This is a reproducible P3 blocker on the pinned CEF
-127 software-composited 2560x1440 stack, not a passing claim.
+experiments were reverted. This is a reproducible P3 blocker on the pinned OBS
+32.2.1 / Browser Source 2.26.9 / CEF 127.0.6533.120 software-composited
+2560x1440 stack, not a passing claim.
+
+The DOT-49 successor adds component-level PSS accounting and native evidence at
+both protocol resolutions. Bounded preflights retained the ten-minute warmup
+and measured three post-warmup minutes. At 1920x1080 the total incremental PSS
+was 254,420 KiB, but growth was 1,950.517 KiB/minute; the browser component held
+301,489 KiB median and accounted for 1,946.737 KiB/minute of that growth. At
+2560x1440 the total incremental PSS was 276,381 KiB and growth was 1,130.584
+KiB/minute; the browser component held 302,834 KiB median and accounted for
+1,085.050 KiB/minute. Both runs completed 780-second recordings with no crash,
+remote peer, hidden-frame violation, recovery violation, CPU failure, or lag
+failure. Because 1440p exceeds the instantaneous 256 MiB gate after the full
+warmup—and reproduces the prior 276,994 KiB result—a 60-minute continuation
+cannot pass the unchanged gate. The runner therefore records both preflights as
+`passed: false`; no threshold or duration is represented as accepted.
+
+The narrow spec question is whether P3 should compare only the Browser Source
+component to a browser-bearing empty-scene baseline, or retain the current
+whole-process-tree delta while revising its fixed ceiling for CEF 127. No change
+to that definition or threshold is made here.
