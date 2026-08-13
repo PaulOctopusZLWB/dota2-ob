@@ -119,8 +119,9 @@
     return onlyKeys(value, resultKeys) && resultKeys.every((key) => Object.hasOwn(value, key)) &&
       value.schema_version === "operator_command_result.v1" && value.command_id === command.command_id &&
       value.session_id === command.session_id && ["accepted", "rejected"].includes(value.status) &&
-      value.previous_revision === command.expected_policy_revision && Number.isSafeInteger(value.resulting_revision) &&
-      value.resulting_revision >= value.previous_revision && (value.status !== "accepted" || value.resulting_revision > value.previous_revision) &&
+      Number.isSafeInteger(value.previous_revision) && value.previous_revision >= 0 &&
+      Number.isSafeInteger(value.resulting_revision) && value.resulting_revision >= value.previous_revision &&
+      (value.status === "accepted" ? value.resulting_revision === value.previous_revision + 1 : value.resulting_revision === value.previous_revision) &&
       Array.isArray(value.decision_ids) && value.decision_ids.length <= 64 && value.decision_ids.every((id) => plainText(id, 128)) &&
       value.decision_ids.every((id, index) => index === 0 || id > value.decision_ids[index - 1]) &&
       plainText(value.reason, 128);
@@ -221,6 +222,12 @@
       clearState();
       if (!await loadState(epoch, body.resulting_revision, command.session_id)) return;
       showResult(body, "accepted");
+      return;
+    }
+    if (body.status === "rejected" && body.reason === "revision_conflict") {
+      clearState();
+      if (!await loadState(epoch, body.resulting_revision, command.session_id)) return;
+      showResult(body, "rejected");
       return;
     }
     setControls(Boolean(currentState));

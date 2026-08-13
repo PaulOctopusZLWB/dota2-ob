@@ -77,6 +77,15 @@ def wait_until(predicate, timeout: float, message: str, interval: float = 0.1):
     raise RuntimeError(message)
 
 
+def report_progress(name: str, elapsed: float, duration: int, *, stream=sys.stderr) -> None:
+    completed = min(max(0, int(elapsed)), duration)
+    print(
+        f"P3 progress: {RESOLUTION['label']} {name} {completed}/{duration} seconds",
+        file=stream,
+        flush=True,
+    )
+
+
 def obs_pids() -> list[int]:
     result = []
     for item in Path("/proc").iterdir():
@@ -231,6 +240,7 @@ def collect_phase(name: str, duration: int, recording: Path | None = None) -> li
     previous_at = None
     start = time.monotonic()
     next_sample = start
+    next_progress = start
     while True:
         now = time.monotonic()
         if now < next_sample:
@@ -280,8 +290,12 @@ def collect_phase(name: str, duration: int, recording: Path | None = None) -> li
             "socketPeers": peers,
             "remoteSocketPeers": [peer for peer in peers if remote_peer(peer)],
         })
+        if now >= next_progress:
+            report_progress(name, elapsed, duration)
+            next_progress = now + 60
         previous_ticks, previous_ticks_by_kind, previous_at = tick_total, ticks_by_kind, now
         next_sample += SAMPLE_SECONDS
+    report_progress(name, duration, duration)
     return samples
 
 

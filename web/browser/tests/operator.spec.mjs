@@ -154,31 +154,91 @@ for (const action of ["approve", "reject"]) {
   });
 }
 
-test("revision conflicts preserve authoritative controls and duplicate replay refreshes state", async ({ page }) => {
+test("revision conflicts refresh authoritative state and replay the identical rejected result", async ({ page }) => {
   const requests = [];
+  const responses = [];
+  const committedResults = new Map();
   let stateReads = 0;
+  const states = [
+    operatorState(),
+    operatorState({ policy_revision: 8 }),
+    operatorState({ policy_revision: 8 }),
+    operatorState({ policy_revision: 9, emergency_hidden: true })
+  ];
   await page.route("**/v1/operator/state", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
-    body: JSON.stringify(stateReads++ === 0 ? operatorState() : operatorState({ policy_revision: 8, previews: [] }))
+    body: JSON.stringify(states[stateReads++])
   }));
   await page.route("**/v1/operator/commands", async (route) => {
     const command = JSON.parse(route.request().postData());
     requests.push(command);
-    const result = requests.length === 1 ? {
-      ...acceptedResult(command, 7), status: "rejected", decision_ids: [], reason: "revision_conflict"
-    } : acceptedResult(command);
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(result) });
+    if (!committedResults.has(command.command_id)) {
+      committedResults.set(command.command_id, command.expected_policy_revision === 7 ? {
+        schema_version: "operator_command_result.v1",
+        command_id: command.command_id,
+        session_id: command.session_id,
+        status: "rejected",
+        previous_revision: 8,
+        resulting_revision: 8,
+        decision_ids: [],
+        reason: "revision_conflict"
+      } : acceptedResult(command));
+    }
+    const result = committedResults.get(command.command_id);
+    responses.push(structuredClone(result));
+    await route.fulfill({
+      status: result.status === "accepted" ? 200 : 409,
+      contentType: "application/json",
+      body: JSON.stringify(result)
+    });
   });
   await connect(page);
 
   await page.getByRole("button", { name: "拒绝" }).click();
-  await expect(page.locator("#policy-revision")).toHaveText("7");
+  await expect(page.locator("#policy-revision")).toHaveText("8");
   await expect(page.getByRole("button", { name: "拒绝" })).toBeEnabled();
-  expect(stateReads).toBe(1);
+  expect(stateReads).toBe(2);
   await page.getByRole("button", { name: "重试同一命令" }).click();
-  await expect(page.locator("#candidate-count")).toHaveText("0");
+  await expect.poll(() => stateReads).toBe(3);
   expect(requests[1]).toEqual(requests[0]);
+  expect(responses[1]).toEqual(responses[0]);
+
+  await page.getByRole("button", { name: "紧急隐藏全部分析" }).click();
+  await expect(page.getByRole("button", { name: "解除紧急隐藏" })).toBeEnabled();
+  expect(requests[2].command_id).not.toBe(requests[0].command_id);
+  expect(requests[2]).toMatchObject({ action: "emergency_hide", expected_policy_revision: 8 });
+  expect(stateReads).toBe(4);
+});
+
+test("revision-conflict refresh failure clears stale state and leaves controls fail closed", async ({ page }) => {
+  let stateReads = 0;
+  await page.route("**/v1/operator/state", (route) => {
+    stateReads++;
+    return stateReads === 1
+      ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(operatorState()) })
+      : route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ reason: "state_unavailable" }) });
+  });
+  await page.route("**/v1/operator/commands", async (route) => {
+    const command = JSON.parse(route.request().postData());
+    await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({
+      schema_version: "operator_command_result.v1",
+      command_id: command.command_id,
+      session_id: command.session_id,
+      status: "rejected",
+      previous_revision: 8,
+      resulting_revision: 8,
+      decision_ids: [],
+      reason: "revision_conflict"
+    }) });
+  });
+  await connect(page);
+
+  await page.getByRole("button", { name: "拒绝" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-connection", "offline");
+  await expect(page.locator(".candidate-card")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "紧急隐藏全部分析" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重试同一命令" })).toBeDisabled();
   expect(stateReads).toBe(2);
 });
 

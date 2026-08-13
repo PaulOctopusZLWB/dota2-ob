@@ -94,19 +94,31 @@ experiments were reverted. This is a reproducible P3 blocker on the pinned OBS
 32.2.1 / Browser Source 2.26.9 / CEF 127.0.6533.120 software-composited
 2560x1440 stack, not a passing claim.
 
-The DOT-49 successor adds component-level PSS accounting and native evidence at
-both protocol resolutions. Bounded preflights retained the ten-minute warmup
+The DOT-49 predecessor added component-level PSS accounting and native bounded
+preflights at both protocol resolutions. They retained the ten-minute warmup
 and measured three post-warmup minutes. At 1920x1080 the total incremental PSS
-was 254,420 KiB, but growth was 1,950.517 KiB/minute; the browser component held
-301,489 KiB median and accounted for 1,946.737 KiB/minute of that growth. At
-2560x1440 the total incremental PSS was 276,381 KiB and growth was 1,130.584
-KiB/minute; the browser component held 302,834 KiB median and accounted for
-1,085.050 KiB/minute. Both runs completed 780-second recordings with no crash,
-remote peer, hidden-frame violation, recovery violation, CPU failure, or lag
-failure. Because 1440p exceeds the instantaneous 256 MiB gate after the full
-warmup—and reproduces the prior 276,994 KiB result—a 60-minute continuation
-cannot pass the unchanged gate. The runner therefore records both preflights as
-`passed: false`; no threshold or duration is represented as accepted.
+was 254,420 KiB and growth was 1,950.517 KiB/minute. At 2560x1440 the total
+incremental PSS was 276,381 KiB and growth was 1,130.584 KiB/minute. Those
+bounded windows reproduce resource-gate failures on the pinned stack, but they
+do not establish whether either complete 60-minute measurement can pass.
+
+The successor therefore ran the unchanged protocol to completion at both
+resolutions: 600 seconds empty baseline, 600 seconds overlay warmup, and 3,600
+seconds measurement with 120/120/720 five-second samples. Both complete runs
+failed only the unchanged 256 MiB whole-process-tree incremental-PSS gate:
+
+- 1920x1080: 266,647 KiB incremental PSS, 320.997 KiB/minute growth, and
+  24,309 KiB range;
+- 2560x1440: 289,851 KiB incremental PSS, 359.992 KiB/minute growth, and
+  26,748 KiB range.
+
+Both complete runs passed the remaining unchanged gates: browser median CPU
+was 0.6% of one logical core, render-lag delta was -0.1 percentage point, no
+crash or remote peer occurred, and all 480 hidden checks plus 359 recovery
+checks had zero violations. Their overlay videos were 4,200.277 and 4,200.256
+seconds. `p3-measurement-1080p.json` and `p3-measurement-1440p.json` therefore
+correctly record `passed: false`; no threshold, baseline, or duration was
+changed or represented as accepted.
 
 The narrow spec question is whether P3 should compare only the Browser Source
 component to a browser-bearing empty-scene baseline, or retain the current

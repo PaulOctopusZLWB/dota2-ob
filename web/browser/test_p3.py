@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -65,6 +66,14 @@ class RunP3Tests(unittest.TestCase):
         self.assertEqual(runner.evidence_stem("preflight", "1080p"), "p3-preflight-1080p")
         with self.assertRaises(ValueError):
             runner.evidence_stem("../escape", "1440p")
+
+    def test_progress_is_written_to_stderr_and_flushed(self):
+        stream = io.StringIO()
+        runner.report_progress("overlay-recording", 125.4, 3600, stream=stream)
+        self.assertEqual(
+            stream.getvalue(),
+            f"P3 progress: {runner.RESOLUTION['label']} overlay-recording 125/3600 seconds\n",
+        )
 
 
 if __name__ == "__main__":
