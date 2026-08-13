@@ -215,7 +215,10 @@ def collect_phase(name: str, duration: int, recording: Path | None = None) -> li
                 recording_age = time.time() - recording.stat().st_mtime
             except FileNotFoundError as error:
                 raise RuntimeError(f"{name} recording disappeared") from error
-            if recording_age > max(30, SAMPLE_SECONDS * 4):
+            # Matroska writes may remain buffered for more than 30 seconds on
+            # this stack. Two minutes still detects a stopped recording early
+            # without treating normal muxer flush cadence as failure.
+            if recording_age > max(120, SAMPLE_SECONDS * 4):
                 raise RuntimeError(f"{name} recording stopped updating {recording_age:.1f}s ago")
         pids = obs_pids()
         ticks_by_kind = {
