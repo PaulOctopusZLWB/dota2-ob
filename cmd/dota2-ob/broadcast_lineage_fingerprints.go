@@ -14,7 +14,7 @@ const (
 	presentationCatalogSHA256     = "643bbab16fe6576f5be16ee0e71127a58c799730e6754b5ef99178fd91693183"
 	productMainSourceSHA256       = "4f27a6161aef72021063846b6039fc36e99276b995f5490530f4c0b953d9b572"
 	productPortsSourceSHA256      = "fcb2526226036afd32051f6ee9f61437fb08911b457580fa9cea874dbf0a5e6f"
-	productRecoverySourceSHA256   = "407aa8714c3d7d3772605fa4f6f23e70b3d6249e9870b54fa9d05e5915337501"
+	productRecoverySourceSHA256   = "6e16e0cec899df533133bfe3e8b2f3880896b8caf58e7410a3954debe1092776"
 	productRuntimeSourceSHA256    = "7100d574f644e537f52be8e6d62f0e3dcbf9842bc1523f63ab178f112c578248"
 	productLineageSourceSHA256    = "779dd1a40fed27e012d2df278da6a0865d14b02bfa60e395304837a8db35192e"
 	insightEngineSourceSHA256     = "ed03607f7d06de0b5ec3c888d16c143762d0c64a39f5611ba5fcc28cef3fdc52"

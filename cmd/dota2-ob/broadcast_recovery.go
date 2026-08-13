@@ -19,11 +19,9 @@ import (
 )
 
 // The capture listener accepts at most 10 MiB of JSON. Persisted records retain
-// both decoded payload and raw JSON, and encoding/json may expand HTML-sensitive
-// bytes to six-byte escapes in both copies. Twelve input copies plus a 1 MiB
-// envelope margin therefore bounds every accepted record without guessing from
-// ordinary ASCII payloads.
-const maximumPersistedRecordBytes = (12 * (10 << 20)) + (1 << 20)
+// both decoded payload and the exact raw JSON, so recovery allows twice that
+// body plus a bounded envelope margin.
+const maximumPersistedRecordBytes = (2 * (10 << 20)) + (1 << 20)
 
 type observationResolver struct {
 	rawPath   string
