@@ -1,10 +1,7 @@
-// Package main is the M1 history composition root. It wires concrete
-// adapters (deterministic in-process fixture corpus, local atomic state) to
-// the pure domain seams in internal/history and internal/contracts. It
-// performs no live network, no replay download, and no GC/credential work;
-// the representative corpus is reproducible from fixed inputs so CI can prove
-// deterministic hashes, idempotent resume/dedupe, identity quarantine, and
-// resource measurements without any external dependency.
+// Package main is the M1 history composition root. It keeps the deterministic
+// JSON fixture corpus explicitly separate from the production-shaped offline
+// PBDEMS2 path, which invokes internal/replay and pinned manta. Neither path
+// performs GC/account automation or enters the live-output plane.
 package main
 
 import (
@@ -23,6 +20,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/history"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay"
 )
 
 // errorsAs is a thin wrapper around errors.As so callers stay readable.
@@ -45,6 +43,8 @@ func run(args []string) error {
 		return runCorpus(args[1:])
 	case "report":
 		return runReport(args[1:])
+	case "real-replay":
+		return runRealReplay(args[1:])
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return nil
@@ -55,9 +55,53 @@ func run(args []string) error {
 }
 
 func printUsage(w *os.File) {
-	fmt.Fprintln(w, "usage: history <corpus|report> [flags]")
+	fmt.Fprintln(w, "usage: history <corpus|report|real-replay> [flags]")
 	fmt.Fprintln(w, "  corpus  run the deterministic representative corpus twice and print hashes, ids, and resource measurements")
 	fmt.Fprintln(w, "  report  emit the M1 readiness/no-go evidence report for the representative corpus")
+	fmt.Fprintln(w, "  real-replay  run one genuine PBDEMS2 replay twice through internal/replay+manta into independent durable artifacts")
+}
+
+func runRealReplay(args []string) error {
+	fs := flag.NewFlagSet("real-replay", flag.ContinueOnError)
+	dem := fs.String("dem", "", "decompressed PBDEMS2 .dem source")
+	dataDir := fs.String("data-dir", "data/history/real-replay", "clean artifact root")
+	matchID := fs.String("match-id", "8941092540", "public match id")
+	replayURL := fs.String("replay-url", "http://replay273.valve.net/570/8941092540_1595018738.dem.bz2", "recorded public Valve replay URL")
+	sourceTimeText := fs.String("source-event-time", "2026-08-11T20:33:21Z", "recorded public match time (RFC3339)")
+	patchID := fs.String("patch-id", "60", "OpenDota gameplay patch id")
+	gameBuild := fs.Uint("game-build", 6896, "parsed/public correlated game build")
+	radiant := fs.String("radiant-team", "zero-tenacity", "public radiant team identity")
+	dire := fs.String("dire-team", "rune-eaters", "public dire team identity")
+	duration := fs.Int64("duration-seconds", 3297, "public match duration")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dem == "" {
+		return errors.New("real-replay requires --dem")
+	}
+	sourceTime, err := time.Parse(time.RFC3339, *sourceTimeText)
+	if err != nil {
+		return fmt.Errorf("source-event-time: %w", err)
+	}
+	res, err := runRealReplayComposition(realReplayConfig{SourcePath: *dem, Root: *dataDir, MatchID: *matchID, ReplayURL: *replayURL, SourceEventTime: sourceTime, PatchID: *patchID, GameBuild: uint32(*gameBuild), RadiantTeamID: *radiant, DireTeamID: *dire, DurationSeconds: *duration})
+	if err != nil {
+		return err
+	}
+	entry := res.Batch.Entries[*matchID]
+	fmt.Println("=== M1 real-replay production-shaped evidence (offline; NOT tournament readiness) ===")
+	fmt.Printf("match_id=%s source=%s\n", *matchID, *replayURL)
+	fmt.Printf("replay_sha256=%s bytes=%d magic=%s\n", res.ReplayIdentity.SHA256, res.ReplayIdentity.Bytes, res.ReplayIdentity.Magic)
+	fmt.Printf("parser=%s/%s adapter=%s/%s\n", replay.ParserName, replay.ParserVersion, replay.AdapterName, replay.AdapterVersion)
+	fmt.Printf("manifest_sha256=%s parsed_index_sha256=%s facts_sha256=%s aggregate_sha256=%s\n", res.ManifestSHA256, entry.ArtifactSHA256[history.StageParse], res.Facts.ContentSHA256, res.AggregateSHA)
+	for i, pass := range res.Processed.Passes {
+		fmt.Printf("execution_%d id=%s parsed=%s normalized=%s run=%s checkpoint=%s\n", i+1, pass.ExecutionID, pass.ParsedArtifactSHA256, pass.NormalizedArtifactSHA256, pass.RunArtifactSHA256, pass.CheckpointSHA256)
+	}
+	fmt.Printf("deterministic=%t identity_status=%s stage_calls=%v\n", len(res.Processed.Passes) == 2 && res.Processed.Passes[0].FactsSHA256 == res.Processed.Passes[1].FactsSHA256, res.Facts.IdentityStatus, res.StageCalls)
+	for i, m := range res.ParseMetrics {
+		fmt.Printf("parse_%d elapsed=%.3fs user_cpu=%.3fs system_cpu=%.3fs peak_heap=%dMiB raw_bytes=%d\n", i+1, m.ElapsedSec, m.UserCPUSec, m.SystemCPUSec, m.PeakHeapMiB, m.RawDecompressed)
+	}
+	fmt.Printf("artifact_tree_sha256=%s storage_bytes=%d files=%d\n", res.ArtifactTree, res.StorageBytes, res.ArtifactFiles)
+	return nil
 }
 
 // runCorpus builds the deterministic representative corpus, runs the full M1
@@ -93,6 +137,8 @@ type corpusResult struct {
 	roster            history.RosterManifestV1
 	facts             []history.NormalizedMatchFacts
 	processed         []history.ProcessedReplayEvidence
+	executionRoot     string
+	batch             history.StageBatch
 	windows           history.CutoffWindow
 	patch             history.PatchWindow
 	snapshotID        string
@@ -295,10 +341,11 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 	}
 	mu := newLocalReplayStageComposition(facts, dataDir+"/history/artifacts", aggregateArtifact)
 	pipeline := &history.StagePipeline{
-		Stages:     mu.stages,
-		Reconcile:  mu.reconcile,
-		StageOrder: mu.order,
-		MaxRetries: 3,
+		Stages:            mu.stages,
+		Reconcile:         mu.reconcile,
+		StageOrder:        mu.order,
+		MaxRetries:        3,
+		ValidateCompleted: mu.validate,
 		Save: func(b history.StageBatch) error {
 			return saveBatch(statePath, b)
 		},
@@ -310,18 +357,19 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 			expectedTerminal[m.MatchID] = true
 		}
 	}
-	if _, err := pipeline.Run(dm, history.NewStageBatch(dm)); err != nil {
+	completedBatch, runErr := pipeline.Run(dm, history.NewStageBatch(dm))
+	if runErr != nil {
 		// Quarantined matches legitimately reach terminal dead-letter in the
 		// stage pipeline (identity not correlated). That is an expected, not a
 		// fatal, outcome: the snapshot excludes them. Any OTHER terminal entry
 		// is a real failure and must abort.
 		var tf *history.TerminalFailures
-		if !errorsAs(err, &tf) {
-			return nil, fmt.Errorf("batch pass 1: %w", err)
+		if !errorsAs(runErr, &tf) {
+			return nil, fmt.Errorf("batch pass 1: %w", runErr)
 		}
 		for _, id := range tf.IDs {
 			if !expectedTerminal[id] {
-				return nil, fmt.Errorf("batch pass 1 unexpected terminal %s: %w", id, err)
+				return nil, fmt.Errorf("batch pass 1 unexpected terminal %s: %w", id, runErr)
 			}
 		}
 	}
@@ -387,6 +435,8 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		roster:            roster,
 		facts:             facts,
 		processed:         sortedProcessedEvidence(mu.processed),
+		executionRoot:     dataDir + "/history/artifacts/executions",
+		batch:             completedBatch,
 		windows:           windows,
 		patch:             history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
 		snapshotID:        snap.Snapshot.ContentSHA256,
@@ -449,7 +499,9 @@ func runReport(args []string) error {
 	if err != nil {
 		return err
 	}
-	evidence := history.ReadinessGate(history.ReadinessInput{Scope: scope, Roster: res.roster, Manifest: res.discovery, Facts: res.facts, Processed: res.processed, Windows: res.windows, Patch: res.patch, GeneratedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)})
+	evidence := history.ReadinessGate(history.ReadinessInput{Scope: scope, Roster: res.roster, Manifest: res.discovery, Facts: res.facts, Processed: res.processed, ValidateExecution: func(pass history.ParseExecutionEvidence) error {
+		return validateParseExecutionArtifacts(res.executionRoot, pass)
+	}, Batch: res.batch, Windows: res.windows, Patch: res.patch, GeneratedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)})
 
 	var b strings.Builder
 	fmt.Fprintln(&b, "=== M1 deterministic fixture-corpus gate (NOT real tournament readiness evidence) ===")

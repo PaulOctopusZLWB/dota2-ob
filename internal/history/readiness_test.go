@@ -1,6 +1,7 @@
 package history
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -13,6 +14,7 @@ func buildReadinessInput(t *testing.T, pairs [][2]string, parsePasses uint32) Re
 	var matches []DiscoveryMatch
 	var facts []NormalizedMatchFacts
 	var processed []ProcessedReplayEvidence
+	validatedReceipts := map[string]bool{}
 	for i, p := range pairs {
 		mid := "m" + string(rune('a'+i/26)) + string(rune('a'+i%26))
 		f := buildFacts(t, mid, base.Add(time.Duration(i)*time.Hour), p[0], p[1], i%2 == 0, roster)
@@ -23,16 +25,36 @@ func buildReadinessInput(t *testing.T, pairs [][2]string, parsePasses uint32) Re
 		matches = append(matches, m)
 		proof := ProcessedReplayEvidence{MatchID: mid}
 		for pass := uint32(0); pass < parsePasses; pass++ {
-			receipt := ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: mid + "-pass-" + string(rune('a'+pass)), MatchID: mid, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, ParserVersion: "manta/v1.5.0", AdapterVersion: AdapterName + "/" + AdapterVersion, ConfigSHA256: testSHA("config"), Deterministic: true}
-			if err := SealParseExecutionEvidence(&receipt); err != nil {
+			executionID := mid + "-pass-" + string(rune('a'+pass))
+			receipt := ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: executionID, MatchID: mid, ReplaySHA256: f.ReplaySHA256, FactsSHA256: f.ContentSHA256, ParserVersion: "manta/v1.5.0", AdapterVersion: AdapterName + "/" + AdapterVersion, ConfigSHA256: testSHA("config"), ParsedArtifactSHA256: testSHA(executionID + ":parsed"), NormalizedArtifactSHA256: testSHA(executionID + ":normalized"), RunArtifactSHA256: testSHA(executionID + ":run"), CheckpointSHA256: testSHA(executionID + ":checkpoint"), Deterministic: true}
+			if err := sealParseExecutionEvidence(&receipt); err != nil {
 				t.Fatal(err)
 			}
+			validatedReceipts[receipt.ContentSHA256] = true
 			proof.Passes = append(proof.Passes, receipt)
 		}
 		processed = append(processed, proof)
 	}
 	dm := buildDiscovery(t, scope, roster, matches)
-	return ReadinessInput{Scope: scope, Roster: roster, Manifest: dm, Facts: facts, Processed: processed, Windows: NewCutoffWindow(scope.HistoryCutoff, PatchWindow{PatchID: "60"}, mustParseTime(t, "2026-03-24T00:00:00Z")), Patch: PatchWindow{PatchID: "60"}, GeneratedAt: scope.HistoryCutoff.Add(-time.Hour)}
+	batch := NewStageBatch(dm)
+	for i, m := range dm.Matches {
+		entrySHA, err := DiscoveryEntrySHA256(dm, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := facts[i]
+		parseSHA := processed[i].Passes[0].RunArtifactSHA256
+		batch.Entries[m.MatchID] = StageEntry{MatchID: m.MatchID, Status: StageSucceeded, ReachedStage: StageAggregate, ReplaySHA256: m.ReplaySHA256, FactsSHA256: f.ContentSHA256,
+			ArtifactInputSHA256: map[string]string{StageAcquisition: entrySHA, StageVerification: m.ReplaySHA256, StageParse: m.ReplaySHA256, StageNormalize: parseSHA, StageAggregate: f.ContentSHA256},
+			ArtifactSHA256:      map[string]string{StageAcquisition: m.ReplaySHA256, StageVerification: m.ReplaySHA256, StageParse: parseSHA, StageNormalize: f.ContentSHA256, StageAggregate: testSHA(m.MatchID + ":aggregate")}}
+	}
+	validate := func(pass ParseExecutionEvidence) error {
+		if !validatedReceipts[pass.ContentSHA256] {
+			return errors.New("execution receipt was not derived from validated durable artifacts")
+		}
+		return nil
+	}
+	return ReadinessInput{Scope: scope, Roster: roster, Manifest: dm, Facts: facts, Processed: processed, ValidateExecution: validate, Batch: batch, Windows: NewCutoffWindow(scope.HistoryCutoff, PatchWindow{PatchID: "60"}, mustParseTime(t, "2026-03-24T00:00:00Z")), Patch: PatchWindow{PatchID: "60"}, GeneratedAt: scope.HistoryCutoff.Add(-time.Hour)}
 }
 
 func fullPairs(scopeTeamIDs []string) [][2]string {
@@ -115,5 +137,68 @@ func TestReadinessRejectsCopiedParseReceipt(t *testing.T) {
 	}
 	if got := ReadinessGate(in); got.Outcome == ReadinessFullHistoryGo {
 		t.Fatalf("copied receipt passed readiness: %#v", got)
+	}
+}
+
+func TestReadinessRejectsCopiedAndResealedParseReceipt(t *testing.T) {
+	scope := buildScope(t)
+	ids := make([]string, len(scope.Teams))
+	for i := range scope.Teams {
+		ids[i] = scope.Teams[i].TeamID
+	}
+	in := buildReadinessInput(t, fullPairs(ids), 1)
+	for i := range in.Processed {
+		copied := in.Processed[i].Passes[0]
+		copied.ExecutionID += "-copied-label"
+		if err := sealParseExecutionEvidence(&copied); err != nil {
+			t.Fatalf("reseal copied receipt: %v", err)
+		}
+		in.Processed[i].Passes = append(in.Processed[i].Passes, copied)
+	}
+	if got := ReadinessGate(in); got.Outcome == ReadinessFullHistoryGo {
+		t.Fatalf("copied and trivially resealed receipt passed readiness: %#v", got)
+	}
+}
+
+func TestReadinessRejectsMissingDurableRunArtifact(t *testing.T) {
+	scope := buildScope(t)
+	ids := make([]string, len(scope.Teams))
+	for i := range scope.Teams {
+		ids[i] = scope.Teams[i].TeamID
+	}
+	in := buildReadinessInput(t, fullPairs(ids), 2)
+	missing := map[string]bool{}
+	for i := 0; i < 13; i++ {
+		missing[in.Processed[i].Passes[1].ContentSHA256] = true
+	}
+	validated := in.ValidateExecution
+	in.ValidateExecution = func(pass ParseExecutionEvidence) error {
+		if missing[pass.ContentSHA256] {
+			return errors.New("durable run artifact missing")
+		}
+		return validated(pass)
+	}
+	if got := ReadinessGate(in); got.Outcome == ReadinessFullHistoryGo {
+		t.Fatalf("missing durable execution artifact passed readiness: %#v", got)
+	}
+}
+
+func TestReadinessRejectsReceiptVersionThatDoesNotMatchDurableRun(t *testing.T) {
+	scope := buildScope(t)
+	ids := make([]string, len(scope.Teams))
+	for i := range scope.Teams {
+		ids[i] = scope.Teams[i].TeamID
+	}
+	in := buildReadinessInput(t, fullPairs(ids), 2)
+	for i := 0; i < 13; i++ {
+		for j := range in.Processed[i].Passes {
+			in.Processed[i].Passes[j].ParserVersion = "caller-relabelled-parser/v999"
+			if err := sealParseExecutionEvidence(&in.Processed[i].Passes[j]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got := ReadinessGate(in); got.Outcome == ReadinessFullHistoryGo {
+		t.Fatalf("receipt version unrelated to durable execution passed readiness: %#v", got)
 	}
 }

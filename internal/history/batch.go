@@ -80,8 +80,20 @@ type StageReconcileFunc func(entry StageEntry, ctx MatchContext) (StageEntry, bo
 // (discovery manifest entry, local replay path, parsed facts, etc.).
 type MatchContext struct {
 	Discovery       DiscoveryMatch
+	ManifestID      string
+	EntrySHA256     string
 	ReplayPath      string
 	NormalizedFacts *NormalizedMatchFacts
+}
+
+// DiscoveryEntrySHA256 binds acquisition to both the sealed discovery
+// manifest and the exact entry being acquired. It is an input identity, not an
+// authenticity claim about public replay transport.
+func DiscoveryEntrySHA256(manifest DiscoveryManifestV1, match DiscoveryMatch) (string, error) {
+	return contentSHA256("history.discovery-entry.v1", struct {
+		ManifestID string         `json:"manifest_id"`
+		Match      DiscoveryMatch `json:"match"`
+	}{ManifestID: manifest.ContentSHA256, Match: match})
 }
 
 // StageFailure is a typed stage failure. Terminal marks a dead-letter entry
@@ -102,11 +114,12 @@ type StageFailure struct {
 // The pipeline is pure domain logic: no filesystem or network access happens
 // here. Adapters supply StageFunc implementations and the persistence seam.
 type StagePipeline struct {
-	Stages     map[string]StageFunc
-	Reconcile  map[string]StageReconcileFunc
-	StageOrder []string
-	MaxRetries int
-	Save       func(StageBatch) error
+	Stages            map[string]StageFunc
+	Reconcile         map[string]StageReconcileFunc
+	ValidateCompleted func(StageEntry, MatchContext) error
+	StageOrder        []string
+	MaxRetries        int
+	Save              func(StageBatch) error
 }
 
 // Run processes the discovery manifest matches in sorted match-id order.
@@ -145,12 +158,23 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 	var terminal []string
 	var retryable []string
 	for _, m := range manifest.Matches {
+		entrySHA, err := DiscoveryEntrySHA256(manifest, m)
+		if err != nil {
+			return prior, err
+		}
+		ctx := MatchContext{Discovery: m, ManifestID: manifest.ContentSHA256, EntrySHA256: entrySHA}
 		entry, exists := prior.Entries[m.MatchID]
 		if !exists {
 			entry = StageEntry{MatchID: m.MatchID, Status: StageQueued, ReachedStage: StageDiscovery}
 			prior.Entries[m.MatchID] = entry
 		}
 		if entry.Status == StageSucceeded {
+			if p.ValidateCompleted == nil {
+				return prior, errors.New("batch: succeeded entry has no durable artifact validator")
+			}
+			if err := p.ValidateCompleted(entry, ctx); err != nil {
+				return prior, err
+			}
 			continue
 		}
 		if entry.Status == StageFailedTerminal {
@@ -163,7 +187,6 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		if idx := stageIndex(entry.ReachedStage); idx >= 0 {
 			startAt = idx + 1
 		}
-		ctx := MatchContext{Discovery: m}
 		entry.Status = StageRunning
 		prior.Entries[m.MatchID] = entry
 		if err := checkpoint(prior); err != nil {
@@ -249,6 +272,15 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		if !failed {
 			entry.Status = StageSucceeded
 			prior.Entries[m.MatchID] = entry
+			if err := p.validateCheckpoint(manifest, prior); err != nil {
+				return prior, err
+			}
+			if p.ValidateCompleted == nil {
+				return prior, errors.New("batch: succeeded entry has no durable artifact validator")
+			}
+			if err := p.ValidateCompleted(entry, ctx); err != nil {
+				return prior, err
+			}
 			if err := checkpoint(prior); err != nil {
 				return prior, err
 			}
@@ -274,24 +306,26 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 }
 
 func (p *StagePipeline) validateCheckpoint(manifest DiscoveryManifestV1, b StageBatch) error {
-	if len(p.StageOrder) == 0 {
-		return errors.New("batch: empty stage order")
+	wantOrder := []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate}
+	if len(p.StageOrder) != len(wantOrder) {
+		return errors.New("batch: incomplete stage order")
 	}
 	order := map[string]int{StageDiscovery: -1}
 	seen := map[string]bool{StageDiscovery: true}
 	for i, stage := range p.StageOrder {
-		if stage == "" || seen[stage] {
+		if stage != wantOrder[i] || seen[stage] {
 			return errors.New("batch: invalid stage order")
 		}
 		seen[stage] = true
 		order[stage] = i
 	}
-	manifestIDs := map[string]bool{}
+	manifestEntries := map[string]DiscoveryMatch{}
 	for _, m := range manifest.Matches {
-		manifestIDs[m.MatchID] = true
+		manifestEntries[m.MatchID] = m
 	}
 	for key, e := range b.Entries {
-		if !manifestIDs[key] || e.MatchID != key {
+		m, exists := manifestEntries[key]
+		if !exists || e.MatchID != key {
 			return errors.New("batch: checkpoint entry identity mismatch")
 		}
 		reached, ok := order[e.ReachedStage]
@@ -318,10 +352,33 @@ func (p *StagePipeline) validateCheckpoint(manifest DiscoveryManifestV1, b Stage
 				return errors.New("batch: contradictory stage identity chain")
 			}
 		}
+		entrySHA, err := DiscoveryEntrySHA256(manifest, m)
+		if err != nil {
+			return err
+		}
+		if reached >= 0 && (e.ArtifactInputSHA256[StageAcquisition] != entrySHA || e.ArtifactSHA256[StageAcquisition] != m.ReplaySHA256 || e.ReplaySHA256 != m.ReplaySHA256) {
+			return errors.New("batch: acquisition identity is not bound to discovery manifest replay")
+		}
+		verify := order[StageVerification]
+		if reached >= verify && (e.ArtifactInputSHA256[StageVerification] != m.ReplaySHA256 || e.ArtifactSHA256[StageVerification] != m.ReplaySHA256) {
+			return errors.New("batch: verification identity is not bound to manifest replay")
+		}
+		parse := order[StageParse]
+		if reached >= parse && e.ArtifactInputSHA256[StageParse] != m.ReplaySHA256 {
+			return errors.New("batch: parse input is not the verified replay")
+		}
+		normalize := order[StageNormalize]
+		if reached >= normalize && e.ArtifactSHA256[StageNormalize] != e.FactsSHA256 {
+			return errors.New("batch: normalize output is not normalized facts")
+		}
+		aggregate := order[StageAggregate]
+		if reached >= aggregate && e.ArtifactInputSHA256[StageAggregate] != e.FactsSHA256 {
+			return errors.New("batch: aggregate input is not normalized facts")
+		}
 		if reached >= 0 && !isSHA(e.ReplaySHA256) {
 			return errors.New("batch: missing acquisition replay identity")
 		}
-		if normalize, exists := order[StageNormalize]; exists && reached >= normalize && !isSHA(e.FactsSHA256) {
+		if reached >= normalize && !isSHA(e.FactsSHA256) {
 			return errors.New("batch: missing normalized facts identity")
 		}
 		if e.Status == StageSucceeded && (reached != len(p.StageOrder)-1 || e.InFlightStage != "") {
@@ -332,6 +389,17 @@ func (p *StagePipeline) validateCheckpoint(manifest DiscoveryManifestV1, b Stage
 		}
 	}
 	return nil
+}
+
+// ValidateStageBatch validates the complete canonical M1 checkpoint chain
+// without executing or skipping work. Readiness uses this to consume durable
+// stage state rather than caller-provided counters or labels.
+func ValidateStageBatch(manifest DiscoveryManifestV1, batch StageBatch) error {
+	p := StagePipeline{StageOrder: []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate}}
+	if batch.SchemaVersion != StageSchema || batch.ManifestID != manifest.ContentSHA256 || batch.Entries == nil {
+		return ErrBatchManifestMismatch
+	}
+	return p.validateCheckpoint(manifest, batch)
 }
 
 // TerminalFailures signals the final state still holds terminal entries so an

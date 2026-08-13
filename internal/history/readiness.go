@@ -9,19 +9,23 @@ import (
 )
 
 type ParseExecutionEvidence struct {
-	SchemaVersion  string `json:"schema_version"`
-	ContentSHA256  string `json:"content_sha256"`
-	ExecutionID    string `json:"execution_id"`
-	MatchID        string `json:"match_id"`
-	ReplaySHA256   string `json:"replay_sha256"`
-	FactsSHA256    string `json:"facts_sha256"`
-	ParserVersion  string `json:"parser_version"`
-	AdapterVersion string `json:"adapter_version"`
-	ConfigSHA256   string `json:"config_sha256"`
-	Deterministic  bool   `json:"deterministic"`
+	SchemaVersion            string `json:"schema_version"`
+	ContentSHA256            string `json:"content_sha256"`
+	ExecutionID              string `json:"execution_id"`
+	MatchID                  string `json:"match_id"`
+	ReplaySHA256             string `json:"replay_sha256"`
+	FactsSHA256              string `json:"facts_sha256"`
+	ParserVersion            string `json:"parser_version"`
+	AdapterVersion           string `json:"adapter_version"`
+	ConfigSHA256             string `json:"config_sha256"`
+	ParsedArtifactSHA256     string `json:"parsed_artifact_sha256"`
+	NormalizedArtifactSHA256 string `json:"normalized_artifact_sha256"`
+	RunArtifactSHA256        string `json:"run_artifact_sha256"`
+	CheckpointSHA256         string `json:"checkpoint_sha256"`
+	Deterministic            bool   `json:"deterministic"`
 }
 
-func SealParseExecutionEvidence(p *ParseExecutionEvidence) error {
+func sealParseExecutionEvidence(p *ParseExecutionEvidence) error {
 	if p == nil {
 		return errors.New("nil parse execution evidence")
 	}
@@ -35,7 +39,7 @@ func SealParseExecutionEvidence(p *ParseExecutionEvidence) error {
 }
 
 func (p ParseExecutionEvidence) Validate() error {
-	if p.SchemaVersion != "history.parse-execution.v1" || p.ExecutionID == "" || p.MatchID == "" || !isSHA(p.ReplaySHA256) || !isSHA(p.FactsSHA256) || p.ParserVersion == "" || p.AdapterVersion == "" || !isSHA(p.ConfigSHA256) || !p.Deterministic || !isSHA(p.ContentSHA256) {
+	if p.SchemaVersion != "history.parse-execution.v1" || p.ExecutionID == "" || p.MatchID == "" || !isSHA(p.ReplaySHA256) || !isSHA(p.FactsSHA256) || p.ParserVersion == "" || p.AdapterVersion == "" || !isSHA(p.ConfigSHA256) || !isSHA(p.ParsedArtifactSHA256) || !isSHA(p.NormalizedArtifactSHA256) || !isSHA(p.RunArtifactSHA256) || !isSHA(p.CheckpointSHA256) || !p.Deterministic || !isSHA(p.ContentSHA256) {
 		return errors.New("invalid parse execution evidence")
 	}
 	got := p.ContentSHA256
@@ -53,14 +57,16 @@ type ProcessedReplayEvidence struct {
 }
 
 type ReadinessInput struct {
-	Scope       contracts.TournamentScopeV1
-	Roster      RosterManifestV1
-	Manifest    DiscoveryManifestV1
-	Facts       []NormalizedMatchFacts
-	Processed   []ProcessedReplayEvidence
-	Windows     CutoffWindow
-	Patch       PatchWindow
-	GeneratedAt time.Time
+	Scope             contracts.TournamentScopeV1
+	Roster            RosterManifestV1
+	Manifest          DiscoveryManifestV1
+	Facts             []NormalizedMatchFacts
+	Processed         []ProcessedReplayEvidence
+	ValidateExecution func(ParseExecutionEvidence) error
+	Batch             StageBatch
+	Windows           CutoffWindow
+	Patch             PatchWindow
+	GeneratedAt       time.Time
 }
 
 type ReadinessEvidence struct {
@@ -97,6 +103,9 @@ func ReadinessGate(in ReadinessInput) ReadinessEvidence {
 	if err := in.Manifest.ValidateAgainstScope(in.Scope, in.Roster); err != nil {
 		return fail("manifest_invalid:" + err.Error())
 	}
+	if err := ValidateStageBatch(in.Manifest, in.Batch); err != nil {
+		return fail("batch_invalid:" + err.Error())
+	}
 
 	manifestByID := map[string]DiscoveryMatch{}
 	for _, m := range in.Manifest.Matches {
@@ -127,7 +136,8 @@ func ReadinessGate(in ReadinessInput) ReadinessEvidence {
 		processedSeen[p.MatchID] = true
 		m, mok := manifestByID[p.MatchID]
 		f, fok := factsByID[p.MatchID]
-		if !mok || !fok || m.State != MatchReplayAccessible || !consistentParsePasses(p, m, f) || correlateMatch(m, f) != "" {
+		stage, sok := in.Batch.Entries[p.MatchID]
+		if !mok || !fok || !sok || stage.Status != StageSucceeded || stage.ReplaySHA256 != m.ReplaySHA256 || stage.FactsSHA256 != f.ContentSHA256 || m.State != MatchReplayAccessible || !consistentParsePasses(in.ValidateExecution, p, m, f) || correlateMatch(m, f) != "" {
 			continue
 		}
 		eligible = append(eligible, f)
@@ -197,16 +207,31 @@ func ReadinessGate(in ReadinessInput) ReadinessEvidence {
 	return e
 }
 
-func consistentParsePasses(p ProcessedReplayEvidence, m DiscoveryMatch, f NormalizedMatchFacts) bool {
+func consistentParsePasses(validate func(ParseExecutionEvidence) error, p ProcessedReplayEvidence, m DiscoveryMatch, f NormalizedMatchFacts) bool {
 	if len(p.Passes) < 2 {
 		return false
 	}
+	if validate == nil {
+		return false
+	}
 	ids, receipts := map[string]bool{}, map[string]bool{}
+	parsedArtifacts, normalizedArtifacts := map[string]bool{}, map[string]bool{}
+	runArtifacts, checkpoints := map[string]bool{}, map[string]bool{}
+	parserVersion, adapterVersion, configSHA := "", "", ""
 	for _, pass := range p.Passes {
-		if pass.Validate() != nil || pass.MatchID != p.MatchID || pass.MatchID != f.MatchID || pass.ReplaySHA256 != m.ReplaySHA256 || pass.ReplaySHA256 != f.ReplaySHA256 || pass.FactsSHA256 != f.ContentSHA256 || ids[pass.ExecutionID] || receipts[pass.ContentSHA256] {
+		if validate(pass) != nil || pass.MatchID != p.MatchID || pass.MatchID != f.MatchID || pass.ReplaySHA256 != m.ReplaySHA256 || pass.ReplaySHA256 != f.ReplaySHA256 || pass.FactsSHA256 != f.ContentSHA256 || ids[pass.ExecutionID] || receipts[pass.ContentSHA256] || parsedArtifacts[pass.ParsedArtifactSHA256] || normalizedArtifacts[pass.NormalizedArtifactSHA256] || runArtifacts[pass.RunArtifactSHA256] || checkpoints[pass.CheckpointSHA256] {
+			return false
+		}
+		if parserVersion == "" {
+			parserVersion, adapterVersion, configSHA = pass.ParserVersion, pass.AdapterVersion, pass.ConfigSHA256
+		} else if pass.ParserVersion != parserVersion || pass.AdapterVersion != adapterVersion || pass.ConfigSHA256 != configSHA {
 			return false
 		}
 		ids[pass.ExecutionID], receipts[pass.ContentSHA256] = true, true
+		parsedArtifacts[pass.ParsedArtifactSHA256] = true
+		normalizedArtifacts[pass.NormalizedArtifactSHA256] = true
+		runArtifacts[pass.RunArtifactSHA256] = true
+		checkpoints[pass.CheckpointSHA256] = true
 	}
 	return true
 }

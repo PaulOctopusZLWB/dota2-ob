@@ -19,6 +19,7 @@ type stageComposition struct {
 	order     []string
 	calls     map[string]int
 	processed map[string]history.ProcessedReplayEvidence
+	validate  func(history.StageEntry, history.MatchContext) error
 }
 
 type fixtureArtifact struct {
@@ -73,6 +74,17 @@ func newLocalReplayStageComposition(facts []history.NormalizedMatchFacts, root s
 		stages:    map[string]history.StageFunc{history.StageAcquisition: acquire.Execute, history.StageVerification: verify.Execute, history.StageParse: parse.Execute, history.StageNormalize: normalize.Execute, history.StageAggregate: aggregatePort.Execute},
 		reconcile: map[string]history.StageReconcileFunc{history.StageAcquisition: acquire.Reconcile, history.StageVerification: verify.Reconcile, history.StageParse: parse.Reconcile, history.StageNormalize: normalize.Reconcile, history.StageAggregate: aggregatePort.Reconcile},
 		order:     order, calls: calls, processed: processed,
+		validate: func(e history.StageEntry, ctx history.MatchContext) error {
+			for _, port := range []*fileArtifactPort{acquire, verify, parse, normalize, aggregatePort} {
+				if _, done, failure := port.Reconcile(e, ctx); failure != nil || !done {
+					if failure != nil {
+						return fmt.Errorf("%s: %s", failure.Stage, failure.Reason)
+					}
+					return fmt.Errorf("%s artifact missing", port.stage)
+				}
+			}
+			return nil
+		},
 	}
 }
 
@@ -107,8 +119,13 @@ func (p *fileArtifactPort) Execute(e history.StageEntry, ctx history.MatchContex
 			if err := history.SealNormalizedMatchFacts(&raw.Facts); err != nil || raw.Facts.ContentSHA256 != p.facts[e.MatchID].ContentSHA256 {
 				return e, &history.StageFailure{Stage: p.stage, Reason: "nondeterministic_normalize", Terminal: true}
 			}
-			pass := history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: id, MatchID: e.MatchID, ReplaySHA256: raw.Facts.ReplaySHA256, FactsSHA256: raw.Facts.ContentSHA256, ParserVersion: "local-replay-fixture/v1", AdapterVersion: history.AdapterName + "/" + history.AdapterVersion, ConfigSHA256: sha256Text("local-replay-config-v1"), Deterministic: true}
-			if err := history.SealParseExecutionEvidence(&pass); err != nil {
+			pass := history.ParseExecutionEvidence{SchemaVersion: "history.parse-execution.v1", ExecutionID: id, MatchID: e.MatchID, ReplaySHA256: raw.Facts.ReplaySHA256, FactsSHA256: raw.Facts.ContentSHA256, ParserVersion: "local-replay-fixture/v1", AdapterVersion: history.AdapterName + "/" + history.AdapterVersion, ConfigSHA256: sha256Text("local-replay-config-v1"), ParsedArtifactSHA256: sha256Text(id + ":parsed:" + raw.Facts.ContentSHA256), NormalizedArtifactSHA256: sha256Text(id + ":normalized:" + raw.Facts.ContentSHA256), RunArtifactSHA256: sha256Text(id + ":run:" + raw.Facts.ContentSHA256), CheckpointSHA256: sha256Text(id + ":checkpoint:" + raw.Facts.ContentSHA256), Deterministic: true}
+			normalizedJSON, err := contracts.MarshalCanonical(raw.Facts)
+			if err != nil {
+				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
+			}
+			pass, err = materializeParseExecution(filepath.Join(p.root, "executions"), pass, payload, normalizedJSON)
+			if err != nil {
 				return e, &history.StageFailure{Stage: p.stage, Reason: err.Error(), Terminal: true}
 			}
 			proof.Passes = append(proof.Passes, pass)
@@ -167,7 +184,7 @@ func (p *fileArtifactPort) Reconcile(e history.StageEntry, ctx history.MatchCont
 		}
 		seen := map[string]bool{}
 		for _, pass := range proof.Passes {
-			if pass.Validate() != nil || pass.MatchID != e.MatchID || pass.ReplaySHA256 != ctx.Discovery.ReplaySHA256 || pass.FactsSHA256 != p.facts[e.MatchID].ContentSHA256 || seen[pass.ContentSHA256] {
+			if validateParseExecutionArtifacts(filepath.Join(p.root, "executions"), pass) != nil || pass.MatchID != e.MatchID || pass.ReplaySHA256 != ctx.Discovery.ReplaySHA256 || pass.FactsSHA256 != p.facts[e.MatchID].ContentSHA256 || seen[pass.ContentSHA256] {
 				return e, false, &history.StageFailure{Stage: p.stage, Reason: "parse_evidence_mismatch", Terminal: true}
 			}
 			seen[pass.ContentSHA256] = true
@@ -178,7 +195,10 @@ func (p *fileArtifactPort) Reconcile(e history.StageEntry, ctx history.MatchCont
 }
 
 func (p *fileArtifactPort) replayPath(matchID string) string {
-	return filepath.Join(p.root, "replays", sha256Text(matchID)+".dem")
+	// This path is exclusively a deterministic unit/integration fixture input.
+	// It is deliberately labeled JSON and can never be mistaken for real Dota
+	// replay evidence; real PBDEMS2 inputs use real_replay.go.
+	return filepath.Join(p.root, "fixture-inputs", sha256Text(matchID)+".fixture.json")
 }
 
 func (p *fileArtifactPort) parseProofPath(matchID string) string {
@@ -242,7 +262,7 @@ func (p *fileArtifactPort) expected(e history.StageEntry, ctx history.MatchConte
 	if !ok {
 		return fixtureArtifact{}, false
 	}
-	input := sha256Text("discovery:" + e.MatchID + ":" + ctx.Discovery.ReplaySHA256)
+	input := ctx.EntrySHA256
 	order := []string{history.StageAcquisition, history.StageVerification, history.StageParse, history.StageNormalize, history.StageAggregate}
 	for i, stage := range order {
 		if stage == p.stage && i > 0 {
@@ -252,6 +272,8 @@ func (p *fileArtifactPort) expected(e history.StageEntry, ctx history.MatchConte
 	output := sha256Text(p.stage + ":" + e.MatchID + ":" + input + ":" + f.ContentSHA256)
 	switch p.stage {
 	case history.StageAcquisition:
+		output = f.ReplaySHA256
+	case history.StageVerification:
 		output = f.ReplaySHA256
 	case history.StageNormalize:
 		output = f.ContentSHA256
@@ -359,7 +381,7 @@ func verifyInterruptionRecovery(manifest history.DiscoveryManifestV1, facts []hi
 		first := newLocalReplayStageComposition([]history.NormalizedMatchFacts{fact}, caseRoot, aggregate)
 		var durable []byte
 		saves := 0
-		p := &history.StagePipeline{Stages: first.stages, Reconcile: first.reconcile, StageOrder: first.order, MaxRetries: 1, Save: func(b history.StageBatch) error {
+		p := &history.StagePipeline{Stages: first.stages, Reconcile: first.reconcile, ValidateCompleted: first.validate, StageOrder: first.order, MaxRetries: 1, Save: func(b history.StageBatch) error {
 			saves++
 			if saves == failAt {
 				return fmt.Errorf("injected checkpoint boundary %d", failAt)
@@ -381,7 +403,7 @@ func verifyInterruptionRecovery(manifest history.DiscoveryManifestV1, facts []hi
 			}
 		}
 		second := newLocalReplayStageComposition([]history.NormalizedMatchFacts{fact}, caseRoot, aggregate)
-		p = &history.StagePipeline{Stages: second.stages, Reconcile: second.reconcile, StageOrder: second.order, MaxRetries: 1, Save: func(b history.StageBatch) error { return nil }}
+		p = &history.StagePipeline{Stages: second.stages, Reconcile: second.reconcile, ValidateCompleted: second.validate, StageOrder: second.order, MaxRetries: 1, Save: func(b history.StageBatch) error { return nil }}
 		if _, err := p.Run(one, prior); err != nil {
 			return nil, fmt.Errorf("boundary %d resume: %w", failAt, err)
 		}

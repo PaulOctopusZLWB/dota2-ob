@@ -1,6 +1,9 @@
 package replay
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +15,43 @@ import (
 	"github.com/dotabuff/manta"
 	"github.com/dotabuff/manta/dota"
 )
+
+var source2DemoMagic = []byte{'P', 'B', 'D', 'E', 'M', 'S', '2', 0}
+
+// Source2DemoIdentity is the bounded source-specific identity checked before
+// manta sees a replay. SHA-256 identifies bytes; it does not authenticate the
+// public transport they came from.
+type Source2DemoIdentity struct {
+	SHA256 string
+	Bytes  int64
+	Magic  string
+}
+
+// InspectSource2DemoFile proves the input is a binary Source 2 demo beginning
+// with PBDEMS2, rather than JSON or another payload renamed with .dem.
+func InspectSource2DemoFile(path string) (Source2DemoIdentity, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Source2DemoIdentity{}, err
+	}
+	defer f.Close()
+	header := make([]byte, len(source2DemoMagic))
+	if _, err := io.ReadFull(f, header); err != nil {
+		return Source2DemoIdentity{}, fmt.Errorf("replay: source2 header: %w", err)
+	}
+	if !bytes.Equal(header, source2DemoMagic) {
+		return Source2DemoIdentity{}, fmt.Errorf("replay: source2 magic mismatch")
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Source2DemoIdentity{}, err
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return Source2DemoIdentity{}, err
+	}
+	return Source2DemoIdentity{SHA256: hex.EncodeToString(h.Sum(nil)), Bytes: n, Magic: "PBDEMS2\\x00"}, nil
+}
 
 // Metrics are the measured parse costs reported alongside the facts.
 // UserCPUSec/SystemCPUSec are process CPU seconds from getrusage(RUSAGE_SELF),
@@ -70,7 +110,10 @@ func ParseStream(reader io.Reader, rawDecompressedBytes int64) (*ParseResult, er
 		return nil
 	})
 	p.Callbacks.OnCSVCMsg_PacketEntities(func(m *dota.CSVCMsg_PacketEntities) error { c.MessageCounts["CSVCMsg_PacketEntities"]++; return nil })
-	p.Callbacks.OnCMsgSource1LegacyGameEvent(func(m *dota.CMsgSource1LegacyGameEvent) error { c.MessageCounts["Source1LegacyGameEvent"]++; return nil })
+	p.Callbacks.OnCMsgSource1LegacyGameEvent(func(m *dota.CMsgSource1LegacyGameEvent) error {
+		c.MessageCounts["Source1LegacyGameEvent"]++
+		return nil
+	})
 
 	p.Callbacks.OnCMsgDOTACombatLogEntry(func(m *dota.CMsgDOTACombatLogEntry) error {
 		ts := float64(m.GetTimestamp())

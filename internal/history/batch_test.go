@@ -17,7 +17,7 @@ type stageCounts struct {
 	calls       map[string]int
 }
 
-func stampStage(e StageEntry, stage string) StageEntry {
+func stampStage(e StageEntry, stage string, ctx MatchContext) StageEntry {
 	if e.ArtifactSHA256 == nil {
 		e.ArtifactSHA256 = map[string]string{}
 	}
@@ -25,7 +25,7 @@ func stampStage(e StageEntry, stage string) StageEntry {
 		e.ArtifactInputSHA256 = map[string]string{}
 	}
 	order := []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate}
-	input := testSHA("discovery:" + e.MatchID)
+	input := ctx.EntrySHA256
 	for i, s := range order {
 		if s == stage && i > 0 {
 			input = e.ArtifactSHA256[order[i-1]]
@@ -33,6 +33,9 @@ func stampStage(e StageEntry, stage string) StageEntry {
 	}
 	e.ArtifactInputSHA256[stage] = input
 	e.ArtifactSHA256[stage] = testSHA(stage + ":" + e.MatchID)
+	if stage == StageAcquisition || stage == StageVerification {
+		e.ArtifactSHA256[stage] = ctx.Discovery.ReplaySHA256
+	}
 	return e
 }
 
@@ -47,27 +50,29 @@ func (sc *stageCounts) buildPipeline(maxRetries int, save func(StageBatch) error
 			return e, &StageFailure{Stage: StageAcquisition, Reason: "checksum_mismatch", Terminal: true}
 		}
 		e.ReplaySHA256 = testSHA(e.MatchID)
-		return stampStage(e, StageAcquisition), nil
+		return stampStage(e, StageAcquisition, ctx), nil
 	}
 	verify := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["verify:"+e.MatchID]++
-		return stampStage(e, StageVerification), nil
+		return stampStage(e, StageVerification, ctx), nil
 	}
 	parse := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["parse:"+e.MatchID]++
 		if sc.parseFail[e.MatchID] {
 			return e, &StageFailure{Stage: StageParse, Reason: "parse_error", Terminal: false}
 		}
-		return stampStage(e, StageParse), nil
+		return stampStage(e, StageParse, ctx), nil
 	}
 	normalize := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["normalize:"+e.MatchID]++
 		e.FactsSHA256 = testSHA(e.MatchID + "_facts")
-		return stampStage(e, StageNormalize), nil
+		e = stampStage(e, StageNormalize, ctx)
+		e.ArtifactSHA256[StageNormalize] = e.FactsSHA256
+		return e, nil
 	}
 	aggregate := func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
 		sc.calls["aggregate:"+e.MatchID]++
-		return stampStage(e, StageAggregate), nil
+		return stampStage(e, StageAggregate, ctx), nil
 	}
 	return &StagePipeline{
 		Stages: map[string]StageFunc{
@@ -81,9 +86,10 @@ func (sc *stageCounts) buildPipeline(maxRetries int, save func(StageBatch) error
 			StageNormalize:    func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
 			StageAggregate:    func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) { return e, false, nil },
 		},
-		StageOrder: []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate},
-		MaxRetries: maxRetries,
-		Save:       save,
+		StageOrder:        []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate},
+		MaxRetries:        maxRetries,
+		Save:              save,
+		ValidateCompleted: func(StageEntry, MatchContext) error { return nil },
 	}
 }
 
@@ -126,6 +132,36 @@ func TestBatchResumeSkipsSucceeded(t *testing.T) {
 		}
 	}
 	_ = saves
+}
+
+func TestBatchRejectsSucceededCheckpointUnrelatedToManifestReplayAndFacts(t *testing.T) {
+	manifest := buildBatchManifest(t, "m1")
+	stages := []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate}
+	entry := StageEntry{
+		MatchID:             "m1",
+		Status:              StageSucceeded,
+		ReachedStage:        StageAggregate,
+		ReplaySHA256:        testSHA("unrelated-replay"),
+		FactsSHA256:         testSHA("unrelated-facts"),
+		ArtifactSHA256:      map[string]string{},
+		ArtifactInputSHA256: map[string]string{},
+	}
+	input := testSHA("arbitrary-chain-root")
+	for _, stage := range stages {
+		entry.ArtifactInputSHA256[stage] = input
+		entry.ArtifactSHA256[stage] = testSHA("arbitrary-" + stage)
+		input = entry.ArtifactSHA256[stage]
+	}
+
+	sc := newStageCounts()
+	p := sc.buildPipeline(1, nil)
+	_, err := p.Run(manifest, StageBatch{SchemaVersion: StageSchema, ManifestID: manifest.ContentSHA256, Entries: map[string]StageEntry{"m1": entry}})
+	if err == nil {
+		t.Fatal("fully linked but externally unrelated succeeded checkpoint was accepted")
+	}
+	if len(sc.calls) != 0 {
+		t.Fatalf("invalid succeeded checkpoint executed stage functions: %#v", sc.calls)
+	}
 }
 
 func TestBatchTerminalDeadLetterSkippedOnResume(t *testing.T) {
@@ -223,7 +259,11 @@ func TestBatchResumesMidStage(t *testing.T) {
 	p := sc.buildPipeline(1, func(b StageBatch) error { saved = b; return nil })
 	// Start from an identity-bound state where m1 reached acquire but not succeeded.
 	prior := NewStageBatch(manifest)
-	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageQueued, ReachedStage: StageAcquisition, ReplaySHA256: testSHA("m1"), ArtifactSHA256: map[string]string{StageAcquisition: testSHA("acquisition:m1")}, ArtifactInputSHA256: map[string]string{StageAcquisition: testSHA("discovery:m1")}}
+	entrySHA, err := DiscoveryEntrySHA256(manifest, manifest.Matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageQueued, ReachedStage: StageAcquisition, ReplaySHA256: manifest.Matches[0].ReplaySHA256, ArtifactSHA256: map[string]string{StageAcquisition: manifest.Matches[0].ReplaySHA256}, ArtifactInputSHA256: map[string]string{StageAcquisition: entrySHA}}
 	if _, err := p.Run(manifest, prior); err != nil {
 		t.Fatalf("resume mid-stage: %v", err)
 	}
@@ -276,18 +316,34 @@ func TestBatchReconcilesCompletedEffectAfterCursorCheckpointFailure(t *testing.T
 	artifacts := map[string]StageEntry{}
 	saves := 0
 	var durable StageBatch
-	p := &StagePipeline{
-		StageOrder: []string{StageAcquisition}, MaxRetries: 1,
-		Stages: map[string]StageFunc{StageAcquisition: func(e StageEntry, _ MatchContext) (StageEntry, *StageFailure) {
-			effects++
-			e.ReplaySHA256 = testSHA("artifact")
-			artifacts[e.MatchID] = e
+	order := []string{StageAcquisition, StageVerification, StageParse, StageNormalize, StageAggregate}
+	stages := map[string]StageFunc{}
+	reconcilers := map[string]StageReconcileFunc{}
+	for _, stage := range order {
+		stage := stage
+		stages[stage] = func(e StageEntry, ctx MatchContext) (StageEntry, *StageFailure) {
+			if stage == StageAcquisition {
+				effects++
+			}
+			e = stampStage(e, stage, ctx)
+			if stage == StageAcquisition {
+				e.ReplaySHA256 = ctx.Discovery.ReplaySHA256
+			}
+			if stage == StageNormalize {
+				e.FactsSHA256 = testSHA("m1_facts")
+				e.ArtifactSHA256[stage] = e.FactsSHA256
+			}
+			artifacts[stage+":"+e.MatchID] = e
 			return e, nil
-		}},
-		Reconcile: map[string]StageReconcileFunc{StageAcquisition: func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) {
-			a, ok := artifacts[e.MatchID]
+		}
+		reconcilers[stage] = func(e StageEntry, _ MatchContext) (StageEntry, bool, *StageFailure) {
+			a, ok := artifacts[stage+":"+e.MatchID]
 			return a, ok, nil
-		}},
+		}
+	}
+	p := &StagePipeline{
+		StageOrder: order, MaxRetries: 1, Stages: stages, Reconcile: reconcilers,
+		ValidateCompleted: func(StageEntry, MatchContext) error { return nil },
 		Save: func(b StageBatch) error {
 			saves++
 			if saves == 3 {
@@ -327,6 +383,24 @@ func TestBatchRejectsSucceededCursorWithoutArtifactIdentity(t *testing.T) {
 	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageSucceeded, ReachedStage: StageAggregate}
 	if _, err := newStageCounts().buildPipeline(1, nil).Run(manifest, prior); err == nil {
 		t.Fatal("identity-free succeeded cursor was trusted")
+	}
+}
+
+func TestBatchRejectsSucceededCheckpointWhenDurableArtifactIsMissing(t *testing.T) {
+	manifest := buildBatchManifest(t, "m1")
+	sc := newStageCounts()
+	var saved StageBatch
+	p := sc.buildPipeline(1, func(b StageBatch) error { saved = b; return nil })
+	if _, err := p.Run(manifest, NewStageBatch(manifest)); err != nil {
+		t.Fatalf("initial run: %v", err)
+	}
+	before := len(sc.calls)
+	p.ValidateCompleted = func(StageEntry, MatchContext) error { return errors.New("aggregate artifact missing") }
+	if _, err := p.Run(manifest, saved); err == nil {
+		t.Fatal("missing durable product artifact was treated as succeeded")
+	}
+	if len(sc.calls) != before {
+		t.Fatalf("invalid succeeded checkpoint executed stages: before=%d after=%d", before, len(sc.calls))
 	}
 }
 
