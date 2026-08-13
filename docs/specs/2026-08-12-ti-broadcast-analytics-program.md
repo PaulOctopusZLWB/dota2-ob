@@ -551,9 +551,11 @@ Canonical persisted/golden output uses UTF-8 RFC 8785 JSON. Domain quantities
 are integers in documented units or fixed-scale decimal strings; floats,
 `NaN`, infinity, unordered maps, locale-dependent formatting, and unspecified
 time zones are forbidden. Arrays are explicitly ordered. Candidate ties sort by
-priority descending, confidence descending, evidence time ascending, rule ID
-ascending, then candidate ID ascending. Every other set has a documented total
-order.
+priority descending, confidence descending, evidence time ascending,
+`InsightCandidateV1.rule_version` ascending, then candidate ID ascending. For
+this order, `rule_version` is the stable, language-neutral versioned rule
+identity; V1 has no separate rule-ID field. Every other set has a documented
+total order.
 
 `PolicyCheckpointV2` has an explicit cache anchor: lineage manifest ID/hash,
 session ID, checkpointed commit sequence, referenced commit SHA-256, last
