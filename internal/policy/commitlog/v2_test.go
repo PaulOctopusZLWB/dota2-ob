@@ -119,7 +119,7 @@ func TestV2CheckpointValidatesLocatorsAndReplaysLaterFrames(t *testing.T) {
 	}
 }
 
-func TestV2MissingOrSyntacticallyCorruptCheckpointFallsBackToFullReplay(t *testing.T) {
+func TestV2MissingOrSyntacticallyCorruptCheckpointUsesStreamingOpenReplay(t *testing.T) {
 	root := t.TempDir()
 	manifest := validManifestForStore()
 	store, _, _ := verifiedOpenV2(root, "session", manifest)
@@ -140,7 +140,7 @@ func TestV2MissingOrSyntacticallyCorruptCheckpointFallsBackToFullReplay(t *testi
 			t.Fatal(err)
 		}
 		loaded, replay, err := store.LoadCheckpoint()
-		if err != nil || loaded != nil || len(replay) != 1 {
+		if err != nil || loaded != nil || len(replay) != 0 {
 			t.Fatalf("loaded=%#v replay=%d err=%v", loaded, len(replay), err)
 		}
 	}
@@ -396,6 +396,41 @@ func TestV2OpenRequiresReplayVerifierBeforeReturningTrustedState(t *testing.T) {
 			_ = store.Close()
 		}
 		t.Fatalf("unverified open returned store=%v state=%#v err=%v", store != nil, state, err)
+	}
+}
+
+func TestV2RecoveryStreamsFramesWithoutRetainingCanonicalPayloads(t *testing.T) {
+	root := t.TempDir()
+	manifest := validManifestForStore()
+	store, _, err := verifiedOpenV2(root, "session", manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := firstV2CommandAndCheckpoint(t, manifest)
+	if _, err := store.Append(first); err != nil {
+		t.Fatal(err)
+	}
+	second := validObservationCommitV2(t, manifest, 2, first)
+	if _, err := store.Append(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	verified := 0
+	verifier := trustedVerifierV2()
+	verifier.Reevaluate = func(contracts.PolicyCommitV2) error { verified++; return nil }
+	reopened, recovered, err := commitlog.OpenV2(root, "session", manifest, commitlog.WithV2ReplayVerifier(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if verified != 2 {
+		t.Fatalf("streamed verifier calls = %d, want 2", verified)
+	}
+	if len(recovered.Commits) != 0 {
+		t.Fatalf("recovery retained %d complete payloads/decoded commits", len(recovered.Commits))
 	}
 }
 

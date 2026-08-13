@@ -71,7 +71,9 @@ type StateV2 struct {
 	LastPolicyTimeMS        int64
 	CommandResults          map[string]string
 	CommandLocators         map[string]contracts.PolicyCommandLocatorV2
-	Commits                 []CommittedV2
+	// Commits is retained for source compatibility and is always empty.
+	// Recovery verifies frames as a stream instead of retaining payloads.
+	Commits []CommittedV2
 }
 
 type StoreV2 struct {
@@ -130,17 +132,10 @@ func OpenV2(root, sessionID string, manifest contracts.PolicyLineageManifestV2, 
 	if err != nil {
 		return nil, StateV2{}, err
 	}
-	commits := make([]contracts.PolicyCommitV2, len(state.Commits))
-	for i, committed := range state.Commits {
-		commits[i] = committed.Commit
-	}
-	if err := VerifyReplayV2(commits, *s.verifier); err != nil {
-		return nil, StateV2{}, fmt.Errorf("%w: recovery activation: %v", ErrCorrupt, err)
-	}
 	// A prior process may have renamed a segment and then lost the directory
 	// sync result. Re-syncing the parent after structural and semantic recovery
 	// proves every recovered segment entry durable before one is reopened.
-	if len(state.Commits) > 0 || s.segmentCount > 0 {
+	if s.segmentCount > 0 {
 		if err := s.hooks.SyncDir(s.dir); err != nil {
 			return nil, StateV2{}, fmt.Errorf("%w: recovered segment directory sync: %v", ErrSealed, err)
 		}
@@ -418,7 +413,10 @@ func (s *StoreV2) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV2) error
 	if s.closed {
 		return ErrSealed
 	}
-	commit, ok := s.commitAt(checkpoint.CommitSequence)
+	commit, ok, scanErr := s.commitAt(checkpoint.CommitSequence)
+	if scanErr != nil {
+		return scanErr
+	}
 	if !ok || checkpoint.ValidateAgainstCommit(commit.Commit, commit.Hash) != nil || s.validateCheckpointLocators(checkpoint) != nil {
 		return ErrInvalidCheckpoint
 	}
@@ -467,37 +465,37 @@ func (s *StoreV2) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV2) error
 func (s *StoreV2) LoadCheckpoint() (*contracts.PolicyCheckpointV2, []CommittedV2, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	all := cloneStateV2(s.state).Commits
 	payload, err := os.ReadFile(filepath.Join(s.dir, "checkpoint.v2.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, all, nil
+		return nil, nil, nil
 	}
 	if err != nil {
 		return nil, nil, err
 	}
 	var checkpoint contracts.PolicyCheckpointV2
 	if contracts.DecodeStrict(payload, &checkpoint) != nil {
-		return nil, all, nil
+		return nil, nil, nil
 	}
 	canonical, err := contracts.MarshalCanonical(checkpoint)
 	if err != nil || !bytes.Equal(canonical, payload) {
-		return nil, all, nil
+		return nil, nil, nil
 	}
 	if !locatorShapeMatches(checkpoint) {
 		return nil, nil, ErrInvalidCheckpoint
 	}
-	commit, ok := s.commitAt(checkpoint.CommitSequence)
+	commit, ok, scanErr := s.commitAt(checkpoint.CommitSequence)
+	if scanErr != nil {
+		return nil, nil, scanErr
+	}
 	if !ok || checkpoint.ValidateAgainstCommit(commit.Commit, commit.Hash) != nil {
-		return nil, all, nil
+		return nil, nil, nil
 	}
 	if err := s.validateCheckpointLocators(checkpoint); err != nil {
 		return nil, nil, ErrInvalidCheckpoint
 	}
-	later := make([]CommittedV2, 0, len(s.state.Commits))
-	for _, item := range s.state.Commits {
-		if item.Commit.CommitSequence > checkpoint.CommitSequence {
-			later = append(later, cloneCommittedV2(item))
-		}
+	later, err := s.collectCommitsAfter(checkpoint.CommitSequence)
+	if err != nil {
+		return nil, nil, err
 	}
 	copyCheckpoint := cloneCheckpointV2(checkpoint)
 	return &copyCheckpoint, later, nil
@@ -522,9 +520,9 @@ func (s *StoreV2) validateCheckpointLocators(checkpoint contracts.PolicyCheckpoi
 		return ErrInvalidCheckpoint
 	}
 	expected := make([]contracts.PolicyCommandResultRefV2, 0, len(checkpoint.CommandResults))
-	for _, committed := range s.state.Commits {
+	err := s.scanFrames(func(committed CommittedV2) error {
 		if committed.Commit.CommitSequence > checkpoint.CommitSequence {
-			break
+			return io.EOF
 		}
 		if committed.Commit.CommandResult != nil {
 			hash, err := contracts.CanonicalSHA256(*committed.Commit.CommandResult)
@@ -533,6 +531,10 @@ func (s *StoreV2) validateCheckpointLocators(checkpoint contracts.PolicyCheckpoi
 			}
 			expected = append(expected, contracts.PolicyCommandResultRefV2{CommandID: committed.Commit.CommandID, ResultSHA256: hash})
 		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
 	}
 	sort.Slice(expected, func(i, j int) bool { return expected[i].CommandID < expected[j].CommandID })
 	if len(expected) != len(checkpoint.CommandResults) {
@@ -579,13 +581,19 @@ func (s *StoreV2) readLocator(locator contracts.PolicyCommandLocatorV2, resultHa
 	return committed, nil
 }
 
-func (s *StoreV2) commitAt(sequence uint64) (CommittedV2, bool) {
-	for _, commit := range s.state.Commits {
+func (s *StoreV2) commitAt(sequence uint64) (CommittedV2, bool, error) {
+	var found CommittedV2
+	err := s.scanFrames(func(commit CommittedV2) error {
 		if commit.Commit.CommitSequence == sequence {
-			return commit, true
+			found = commit
+			return io.EOF
 		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, io.EOF) {
+		return CommittedV2{}, false, err
 	}
-	return CommittedV2{}, false
+	return found, found.Commit.CommitSequence != 0, nil
 }
 
 func (s *StoreV2) recover() (StateV2, error) {
@@ -631,28 +639,32 @@ func (s *StoreV2) recoverSegment(path string, last bool, state *StateV2) error {
 		return err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(f)
+	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
-	if int64(len(data)) > s.segmentLimit {
+	if info.Size() > s.segmentLimit {
 		return fmt.Errorf("%w: segment bound exceeded", ErrCorrupt)
 	}
 	offset := int64(0)
-	for offset < int64(len(data)) {
-		remaining := data[offset:]
-		if len(remaining) < lengthBytes {
+	for offset < info.Size() {
+		remaining := info.Size() - offset
+		if remaining < lengthBytes {
 			return s.recoverTail(f, last, offset)
 		}
-		n := int(binary.BigEndian.Uint32(remaining[:lengthBytes]))
+		var length [lengthBytes]byte
+		if _, err := f.ReadAt(length[:], offset); err != nil {
+			return err
+		}
+		n := int(binary.BigEndian.Uint32(length[:]))
 		if n <= 0 || n > contracts.MaxPolicyCommitBytes {
 			return fmt.Errorf("%w: invalid v2 length", ErrCorrupt)
 		}
 		frameSize := int64(lengthBytes + n + hashBytes + markerBytes)
-		if int64(len(remaining)) < frameSize {
+		if remaining < frameSize {
 			return s.recoverTail(f, last, offset)
 		}
-		reader := bytes.NewReader(remaining[:frameSize])
+		reader := io.NewSectionReader(f, offset, frameSize)
 		committed, consumed, err := readFrameV2(reader, filepath.Base(path), offset)
 		if err != nil || consumed != frameSize {
 			return fmt.Errorf("%w: invalid terminated v2 frame", ErrCorrupt)
@@ -671,6 +683,9 @@ func (s *StoreV2) recoverSegment(path string, last bool, state *StateV2) error {
 				CommandID: committed.Commit.CommandID, SegmentID: filepath.Base(path), FrameOffset: offset,
 				CommitSequence: committed.Commit.CommitSequence, FrameSHA256: committed.Hash,
 			}
+		}
+		if err := verifyCommitV2(committed.Commit, *s.verifier); err != nil {
+			return fmt.Errorf("%w: recovery activation: %v", ErrCorrupt, err)
 		}
 		applyV2(state, committed)
 		offset += frameSize
@@ -806,7 +821,6 @@ func applyV2(state *StateV2, committed CommittedV2) {
 		state.CommandResults[committed.Commit.CommandID] = resultHash
 		state.CommandLocators[committed.Commit.CommandID] = committed.Locator
 	}
-	state.Commits = append(state.Commits, committed)
 }
 
 func cloneCommittedV2(committed CommittedV2) CommittedV2 {
@@ -828,11 +842,63 @@ func cloneStateV2(state StateV2) StateV2 {
 	for key, value := range state.CommandLocators {
 		copyState.CommandLocators[key] = value
 	}
-	copyState.Commits = make([]CommittedV2, len(state.Commits))
-	for i, committed := range state.Commits {
-		copyState.Commits[i] = cloneCommittedV2(committed)
-	}
+	copyState.Commits = nil
 	return copyState
+}
+
+func (s *StoreV2) scanFrames(visit func(CommittedV2) error) error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		f, err := os.Open(filepath.Join(s.dir, name))
+		if err != nil {
+			return err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		for offset := int64(0); offset < info.Size(); {
+			committed, consumed, err := readFrameV2(f, name, offset)
+			if err != nil {
+				_ = f.Close()
+				return err
+			}
+			if committed.Commit.CommandID != "" {
+				committed.Locator = contracts.PolicyCommandLocatorV2{CommandID: committed.Commit.CommandID, SegmentID: name, FrameOffset: offset, CommitSequence: committed.Commit.CommitSequence, FrameSHA256: committed.Hash}
+			}
+			if err := visit(committed); err != nil {
+				_ = f.Close()
+				return err
+			}
+			offset += consumed
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *StoreV2) collectCommitsAfter(sequence uint64) ([]CommittedV2, error) {
+	var commits []CommittedV2
+	err := s.scanFrames(func(committed CommittedV2) error {
+		if committed.Commit.CommitSequence > sequence {
+			commits = append(commits, committed)
+		}
+		return nil
+	})
+	return commits, err
 }
 
 func cloneCheckpointV2(checkpoint contracts.PolicyCheckpointV2) contracts.PolicyCheckpointV2 {
@@ -858,30 +924,37 @@ type ReplayVerifierV2 struct {
 // callbacks; the durable adapter never imports capture or policy evaluation.
 func VerifyReplayV2(commits []contracts.PolicyCommitV2, verifier ReplayVerifierV2) error {
 	for _, commit := range commits {
-		if err := commit.Validate(); err != nil {
-			return fmt.Errorf("%w: %v", ErrCorrupt, err)
+		if err := verifyCommitV2(commit, verifier); err != nil {
+			return err
 		}
-		if commit.ObservationSequence != 0 {
-			if verifier.VerifyObservation == nil {
-				return errors.New("v2 replay observation verifier required")
-			}
-			if err := verifier.VerifyObservation(commit); err != nil {
-				return fmt.Errorf("observation source verification: %w", err)
-			}
-		} else {
-			if verifier.VerifyCommand == nil {
-				return errors.New("v2 replay command verifier required")
-			}
-			if err := verifier.VerifyCommand(commit); err != nil {
-				return fmt.Errorf("command source verification: %w", err)
-			}
+	}
+	return nil
+}
+
+func verifyCommitV2(commit contracts.PolicyCommitV2, verifier ReplayVerifierV2) error {
+	if err := commit.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrCorrupt, err)
+	}
+	if commit.ObservationSequence != 0 {
+		if verifier.VerifyObservation == nil {
+			return errors.New("v2 replay observation verifier required")
 		}
-		if verifier.Reevaluate == nil {
-			return errors.New("v2 replay evaluator required")
+		if err := verifier.VerifyObservation(commit); err != nil {
+			return fmt.Errorf("observation source verification: %w", err)
 		}
-		if err := verifier.Reevaluate(commit); err != nil {
-			return fmt.Errorf("v2 replay mismatch: %w", err)
+	} else {
+		if verifier.VerifyCommand == nil {
+			return errors.New("v2 replay command verifier required")
 		}
+		if err := verifier.VerifyCommand(commit); err != nil {
+			return fmt.Errorf("command source verification: %w", err)
+		}
+	}
+	if verifier.Reevaluate == nil {
+		return errors.New("v2 replay evaluator required")
+	}
+	if err := verifier.Reevaluate(commit); err != nil {
+		return fmt.Errorf("v2 replay mismatch: %w", err)
 	}
 	return nil
 }

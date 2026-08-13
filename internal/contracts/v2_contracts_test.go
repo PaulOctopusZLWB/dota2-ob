@@ -57,6 +57,38 @@ func TestPolicyCommitV2RequiresExactlyOneCompleteCausalInput(t *testing.T) {
 	}
 }
 
+func TestPolicyCommitV2AcceptsSuppressedWithoutBroadeningV1Publication(t *testing.T) {
+	command := validCommandV2("command-suppressed")
+	result := validCommandResultV2(command, contracts.CommandAccepted, 0, 1)
+	commit := validPolicyCommitV2(command, result)
+	for _, publication := range []string{contracts.PublicationPublish, contracts.PublicationUnchanged, contracts.PublicationSuppressedV2, contracts.PublicationHide} {
+		candidate := commit
+		candidate.Publication = publication
+		if publication == contracts.PublicationPublish {
+			candidate.Decisions = []contracts.BroadcastDecisionV1{{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: "decision-publication", SessionID: "session", PolicyRevision: 1, CommandID: command.CommandID, PriorState: contracts.DecisionQueued, ResultingState: contracts.DecisionShown, PolicyTimeMS: 10, Reason: "shown"}}
+		}
+		if err := candidate.Validate(); err != nil {
+			t.Fatalf("V2 publication %q: %v", publication, err)
+		}
+	}
+	invalid := commit
+	invalid.Publication = "deferred"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("V2 publication set accepted value outside exact four outcomes")
+	}
+
+	v1 := contracts.PolicyCommitV1{
+		SchemaVersion: contracts.PolicyCommitSchemaV1, SessionID: "session", CommitSequence: 1,
+		CommandID: command.CommandID, ResultingPolicyRevision: 1, ResultingStateHash: sha("2"),
+		Decisions: []contracts.BroadcastDecisionV1{}, CommandResult: &result,
+		AuditEvents: []contracts.AuditEventV1{{SchemaVersion: contracts.AuditEventSchemaV1, EventID: "audit-suppressed", SessionID: "session", EventType: "command", PolicyTimeMS: 10, CommandID: command.CommandID, Reason: "accepted"}},
+		Publication: "suppressed",
+	}
+	if err := v1.Validate(); err == nil {
+		t.Fatal("immutable V1 publication semantics accepted suppressed")
+	}
+}
+
 func TestPolicyLineageManifestV2IsContentAddressedAndBounded(t *testing.T) {
 	manifest := validLineageManifestV2()
 	if err := manifest.Validate(); err != nil {

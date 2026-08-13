@@ -7,6 +7,13 @@ import (
 	"unicode/utf8"
 )
 
+const PublicationSuppressedV2 = "suppressed"
+
+var publicationsV2 = map[string]bool{
+	PublicationPublish: true, PublicationUnchanged: true,
+	PublicationSuppressedV2: true, PublicationHide: true,
+}
+
 const (
 	PolicyCommitSchemaV2          = "policy_commit.v2"
 	PolicyCheckpointSchemaV2      = "policy_checkpoint.v2"
@@ -135,7 +142,7 @@ func (v PolicyCommitV2) Validate() error {
 	if v.SchemaVersion != PolicyCommitSchemaV2 {
 		return schemaError(PolicyCommitSchemaV2, v.SchemaVersion)
 	}
-	if !isSHA(v.LineageManifestID) || v.LineageManifestID != v.LineageManifestSHA256 || v.SessionID == "" || !validPolicyID(v.SessionID) || v.CommitSequence == 0 || !isSHA(v.ResultingStateHash) || !publications[v.Publication] || v.ResultingPolicyRevision < v.PriorPolicyRevision || v.ResultingPolicyTimeMS < 0 {
+	if !isSHA(v.LineageManifestID) || v.LineageManifestID != v.LineageManifestSHA256 || v.SessionID == "" || !validPolicyID(v.SessionID) || v.CommitSequence == 0 || !isSHA(v.ResultingStateHash) || !publicationsV2[v.Publication] || v.ResultingPolicyRevision < v.PriorPolicyRevision || v.ResultingPolicyTimeMS < 0 {
 		return errors.New("invalid policy commit v2")
 	}
 	if v.CommitSequence > 1 && !isSHA(v.PriorStateHash) {
