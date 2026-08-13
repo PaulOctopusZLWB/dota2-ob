@@ -79,10 +79,11 @@ used more than 256 MiB incremental PSS. The runner correctly reported
 this change.
 
 The hotkeys have been removed and the runner now aborts if an MKV stops growing
-for 120 seconds (the normal muxer can buffer for more than 30 seconds). A
-600-second warmup plus 120-second post-fix measurement then
-recorded the full 720.2 seconds with zero hidden/recovery frame violations, but
-the conservative OBS+CEF process-tree PSS delta remained 285,617 KiB. A 10 FPS
+for 120 seconds (the normal muxer can buffer for more than 30 seconds). The
+committed blocker rerun used a 60-second baseline followed by a 600-second
+warmup and 120-second measurement. It recorded the full 720.3 seconds with zero
+hidden/recovery frame violations, but the conservative OBS+CEF process-tree PSS
+delta remained 276,994 KiB and its short-window slope was 1,635 KiB/minute. A 10 FPS
 Browser Source reduced the three-minute sample only to 269,569 KiB, while the
 official obs-browser `--enable-gpu` path increased it to 452,377 KiB. Both
 experiments were reverted. This is a reproducible P3 blocker on the pinned CEF
