@@ -16,7 +16,7 @@ type productLineageArtifacts struct {
 func expectedProductLineageArtifacts() productLineageArtifacts {
 	return productLineageArtifacts{
 		rawRecordSchema:       sourceArtifact("session_record.v2", sessionStoreSourceSHA256),
-		rawRecordFraming:      sourceArtifact("jsonl.v1", sessionStoreSourceSHA256),
+		rawRecordFraming:      sourceArtifact("jsonl.v1", sessionStoreSourceSHA256, liveProjectorSourceSHA256),
 		rawPayloadSchema:      sourceArtifact("dota2_gsi.v1", gsiServerSourceSHA256),
 		liveObservationSchema: sourceArtifact(contracts.LiveObservationSchemaV1, contractsSourceSHA256),
 		projectionMapping:     sourceArtifact("gsi_normalized.v1", liveMappingSourceSHA256),

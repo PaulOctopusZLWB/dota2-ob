@@ -229,7 +229,7 @@ func (f *LiveFollower) readRange(from, through uint64) ([]*Record, error) {
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 11<<20)
+	scanner.Buffer(make([]byte, 64*1024), 21<<20)
 	want := uint64(1)
 	var records []*Record
 	for scanner.Scan() {
