@@ -225,6 +225,34 @@ func TestRunDeliveryBindFailureLeavesCapturePersistingGSI(t *testing.T) {
 	}
 }
 
+func TestRunConfiguresCommittedOverlayPort(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	deps := defaultRunDependencies()
+	deps.newTokenFile = func(string) (string, string, func(), error) {
+		return "test-only-operator-token", "", func() {}, nil
+	}
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, _ lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		if product.delivery == nil {
+			t.Fatal("configured product has no delivery server")
+		}
+		response := httptest.NewRecorder()
+		product.delivery.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("configured overlay status=%d body=%s", response.Code, response.Body.String())
+		}
+		return appender.Close()
+	}
+
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root}, &output, deps); code != 0 {
+		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+}
+
 func TestDeliveryServeFailureLeavesCapturePersistingGSI(t *testing.T) {
 	root := t.TempDir()
 	store, err := session.NewStore(root, session.WithSessionID("delivery-failure"))
