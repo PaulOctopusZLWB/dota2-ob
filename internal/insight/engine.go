@@ -4,6 +4,7 @@ package insight
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,51 @@ func DefaultConfig() Config {
 	return Config{Version: "config.v1", Patch: "7.41", DraftMinimum: 5, DistributionMinimum: 8, TeamMinimum: 10, ExpiryMS: 30_000, MaximumLiveAgeMS: 5_000, MaximumHistoryAgeMS: int64((180 * 24 * time.Hour) / time.Millisecond), KeyItems: []string{"item_blink"}}
 }
 
+func normalizeConfig(config Config) Config {
+	d := DefaultConfig()
+	if config.Version == "" {
+		config.Version = d.Version
+	}
+	if config.Patch == "" {
+		config.Patch = d.Patch
+	}
+	if config.DraftMinimum < 5 {
+		config.DraftMinimum = 5
+	}
+	if config.DistributionMinimum < 8 {
+		config.DistributionMinimum = 8
+	}
+	if config.TeamMinimum < 10 {
+		config.TeamMinimum = 10
+	}
+	if config.ExpiryMS <= 0 {
+		config.ExpiryMS = d.ExpiryMS
+	}
+	if config.MaximumLiveAgeMS <= 0 {
+		config.MaximumLiveAgeMS = d.MaximumLiveAgeMS
+	}
+	if config.MaximumHistoryAgeMS <= 0 {
+		config.MaximumHistoryAgeMS = d.MaximumHistoryAgeMS
+	}
+	if len(config.KeyItems) == 0 {
+		config.KeyItems = append([]string(nil), d.KeyItems...)
+	}
+	sort.Strings(config.KeyItems)
+	return config
+}
+
+func ConfigArtifact(config Config) contracts.PolicyArtifactIdentityV2 {
+	config = normalizeConfig(config)
+	hash, _ := contracts.CanonicalSHA256(config)
+	return contracts.PolicyArtifactIdentityV2{Version: config.Version, ContentSHA256: hash}
+}
+
+func RulesArtifact() contracts.PolicyArtifactIdentityV2 {
+	rules := []string{DraftRule, ItemRule, LaneRule, ObjectiveRule, ReadinessRule}
+	hash, _ := contracts.CanonicalSHA256(rules)
+	return contracts.PolicyArtifactIdentityV2{Version: "rules.v1", ContentSHA256: hash}
+}
+
 type Input struct {
 	Observation  contracts.LiveObservationV1
 	Previous     *contracts.LiveObservationV1
@@ -53,9 +99,7 @@ func Family(ruleVersion string) string {
 }
 
 func Evaluate(input Input, config Config) []contracts.InsightCandidateV1 {
-	if config.Version == "" {
-		config = DefaultConfig()
-	}
+	config = normalizeConfig(config)
 	o := input.Observation
 	if config.MaximumLiveAgeMS > 0 && input.PolicyTimeMS-o.Evidence.ReceiveTime.UnixMilli() > config.MaximumLiveAgeMS {
 		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", "stale_live_input")}
@@ -63,13 +107,27 @@ func Evaluate(input Input, config Config) []contracts.InsightCandidateV1 {
 	if reason := unsafeReason(o); reason != "" {
 		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", reason)}
 	}
+	if input.Lineage != nil && (input.Lineage.Config != ConfigArtifact(config) || input.Lineage.Rules != RulesArtifact()) {
+		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", "lineage_artifact_mismatch")}
+	}
 	results := make([]contracts.InsightCandidateV1, 0, 5)
 	results = append(results, historyCandidate(o, input.Manifest, input.Lineage, input.Baselines, config, input.PolicyTimeMS, DraftRule, "draft_hero_performance", config.DraftMinimum, 50))
-	minuteMetric := "lane_10_net_worth"
-	if present(o.Map.ClockTime) >= 900 {
+	minuteMetric := ""
+	if observed(o.Map.ClockTime) && *o.Map.ClockTime.Value == 600 {
+		minuteMetric = "lane_10_net_worth"
+	}
+	if observed(o.Map.ClockTime) && *o.Map.ClockTime.Value == 900 {
 		minuteMetric = "lane_15_net_worth"
 	}
-	results = append(results, historyCandidate(o, input.Manifest, input.Lineage, input.Baselines, config, input.PolicyTimeMS, LaneRule, minuteMetric, config.DistributionMinimum, 70))
+	if minuteMetric == "" {
+		c := base(o, config, input.PolicyTimeMS, LaneRule, 70)
+		c.LocalizationKey = "insight.lane"
+		c.Availability, c.Reason = "suppressed", "not_lane_checkpoint"
+		seal(&c)
+		results = append(results, c)
+	} else {
+		results = append(results, historyCandidate(o, input.Manifest, input.Lineage, input.Baselines, config, input.PolicyTimeMS, LaneRule, minuteMetric, config.DistributionMinimum, 70))
+	}
 	results = append(results, itemCandidate(o, input.Previous, input.Manifest, input.Lineage, input.Baselines, config, input.PolicyTimeMS))
 	results = append(results, objectiveCandidate(o, input.Previous, config, input.PolicyTimeMS))
 	results = append(results, readinessCandidate(o, input.Manifest, input.Lineage, input.Baselines, config, input.PolicyTimeMS))
@@ -300,24 +358,31 @@ func objectiveChanged(current contracts.LiveObservationV1, previous *contracts.L
 			return false, false
 		}
 	}
-	return *current.Map.RadiantScore.Value != *previous.Map.RadiantScore.Value || *current.Map.DireScore.Value != *previous.Map.DireScore.Value || buildingChanged(current.Buildings, previous.Buildings) || *current.Roshan.State.Value != *previous.Roshan.State.Value || *current.Tormentor.State.Value != *previous.Tormentor.State.Value, true
+	netWorthChanged := false
+	for i := range current.Participants {
+		if compareDecimal(*current.Participants[i].NetWorth.Value, *previous.Participants[i].NetWorth.Value) != 0 {
+			netWorthChanged = true
+			break
+		}
+	}
+	return *current.Map.RadiantScore.Value != *previous.Map.RadiantScore.Value || *current.Map.DireScore.Value != *previous.Map.DireScore.Value || buildingChanged(current.Buildings, previous.Buildings) || *current.Roshan.State.Value != *previous.Roshan.State.Value || *current.Tormentor.State.Value != *previous.Tormentor.State.Value || netWorthChanged, true
 }
 
 func objectiveMetrics(current, previous contracts.LiveObservationV1) []contracts.ObservedMetricV1 {
-	radiant, dire := 0.0, 0.0
+	radiant, dire := new(big.Rat), new(big.Rat)
 	for i := range current.Participants {
-		delta := decimalFloat(*current.Participants[i].NetWorth.Value) - decimalFloat(*previous.Participants[i].NetWorth.Value)
+		delta := new(big.Rat).Sub(decimalRat(*current.Participants[i].NetWorth.Value), decimalRat(*previous.Participants[i].NetWorth.Value))
 		if current.Participants[i].TeamKey == "radiant" {
-			radiant += delta
+			radiant.Add(radiant, delta)
 		} else if current.Participants[i].TeamKey == "dire" {
-			dire += delta
+			dire.Add(dire, delta)
 		}
 	}
 	return []contracts.ObservedMetricV1{
 		{Name: "radiant_kill_delta", Value: contracts.Decimal(strconv.FormatInt(*current.Map.RadiantScore.Value-*previous.Map.RadiantScore.Value, 10)), Unit: "kills"},
 		{Name: "dire_kill_delta", Value: contracts.Decimal(strconv.FormatInt(*current.Map.DireScore.Value-*previous.Map.DireScore.Value, 10)), Unit: "kills"},
-		{Name: "radiant_net_worth_delta", Value: decimal(radiant), Unit: "gold"},
-		{Name: "dire_net_worth_delta", Value: decimal(dire), Unit: "gold"},
+		{Name: "radiant_net_worth_delta", Value: ratDecimal(radiant), Unit: "gold"},
+		{Name: "dire_net_worth_delta", Value: ratDecimal(dire), Unit: "gold"},
 	}
 }
 
@@ -363,22 +428,23 @@ func familyObservation(rule string, o contracts.LiveObservationV1, baseline cont
 		if !readinessComplete(o.Participants) {
 			return nil, nil, false
 		}
-		dead, respawn, cooldown, health, mana := int64(0), 0.0, 0.0, 0.0, 0.0
+		dead := int64(0)
+		respawn, cooldown, health, mana := new(big.Rat), new(big.Rat), new(big.Rat), new(big.Rat)
 		for _, participant := range o.Participants {
-			health += decimalFloat(*participant.HealthPercent.Value)
-			mana += decimalFloat(*participant.ManaPercent.Value)
+			health.Add(health, decimalRat(*participant.HealthPercent.Value))
+			mana.Add(mana, decimalRat(*participant.ManaPercent.Value))
 			if !*participant.Alive.Value {
 				dead++
-				respawn += decimalFloat(*participant.RespawnSeconds.Value)
+				respawn.Add(respawn, decimalRat(*participant.RespawnSeconds.Value))
 			}
 			for _, ability := range participant.Abilities {
-				cooldown += decimalFloat(*ability.Cooldown.Value)
+				cooldown.Add(cooldown, decimalRat(*ability.Cooldown.Value))
 			}
 			for _, item := range participant.Items {
-				cooldown += decimalFloat(*item.Cooldown.Value)
+				cooldown.Add(cooldown, decimalRat(*item.Cooldown.Value))
 			}
 		}
-		return []contracts.ObservedMetricV1{{Name: "dead_players", Value: contracts.Decimal(strconv.FormatInt(dead, 10)), Unit: "players"}, {Name: "respawn_seconds", Value: decimal(respawn), Unit: "seconds"}, {Name: "cooldown_seconds", Value: decimal(cooldown), Unit: "seconds"}, {Name: "mean_health_percent", Value: decimal(health / 10), Unit: "percent"}, {Name: "mean_mana_percent", Value: decimal(mana / 10), Unit: "percent"}}, nil, true
+		return []contracts.ObservedMetricV1{{Name: "dead_players", Value: contracts.Decimal(strconv.FormatInt(dead, 10)), Unit: "players"}, {Name: "respawn_seconds", Value: ratDecimal(respawn), Unit: "seconds"}, {Name: "cooldown_seconds", Value: ratDecimal(cooldown), Unit: "seconds"}, {Name: "mean_health_percent", Value: ratDecimal(new(big.Rat).Quo(health, big.NewRat(10, 1))), Unit: "percent"}, {Name: "mean_mana_percent", Value: ratDecimal(new(big.Rat).Quo(mana, big.NewRat(10, 1))), Unit: "percent"}}, nil, true
 	}
 	return nil, nil, false
 }
@@ -423,9 +489,21 @@ func contains(values []string, value string) bool {
 	}
 	return false
 }
-func decimalFloat(v contracts.Decimal) float64 { n, _ := strconv.ParseFloat(string(v), 64); return n }
-func decimal(v float64) contracts.Decimal {
-	return contracts.Decimal(strconv.FormatFloat(v, 'f', -1, 64))
+func decimalRat(v contracts.Decimal) *big.Rat {
+	n, ok := new(big.Rat).SetString(string(v))
+	if !ok {
+		return new(big.Rat)
+	}
+	return n
+}
+func compareDecimal(a, b contracts.Decimal) int { return decimalRat(a).Cmp(decimalRat(b)) }
+func ratDecimal(v *big.Rat) contracts.Decimal {
+	s := v.FloatString(9)
+	s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	if s == "" || s == "-0" {
+		s = "0"
+	}
+	return contracts.Decimal(s)
 }
 func buildingChanged(current, previous []contracts.BuildingObservationV1) bool {
 	for i := range current {

@@ -28,7 +28,7 @@ var ownershipRules = map[string]importRule{
 	},
 	"liveprojection": {standard: stringSet(), internal: []string{"internal/contracts", "internal/session"}},
 	"history":        {standard: stringSet(), internal: []string{"internal/contracts"}},
-	"insight":        {standard: stringSet("crypto/sha256", "encoding/hex", "sort", "strconv", "strings", "time"), internal: []string{"internal/contracts"}},
+	"insight":        {standard: stringSet("crypto/sha256", "encoding/hex", "math/big", "sort", "strconv", "strings", "time"), internal: []string{"internal/contracts"}},
 	"policy":         {standard: stringSet("crypto/sha256", "encoding/hex", "errors", "sort", "strconv", "strings", "time"), internal: []string{"internal/contracts"}},
 	"delivery": {
 		standard: stringSet("context", "crypto/subtle", "encoding/json", "errors", "io", "mime", "net", "net/http", "net/url", "path", "strconv", "strings", "sync", "time"),

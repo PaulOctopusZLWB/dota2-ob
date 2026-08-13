@@ -11,7 +11,7 @@ type CandidateResolver func(contracts.PolicyCommitV2) ([]contracts.InsightCandid
 
 // Recover streams checkpoint continuation (or the full log when the cache is
 // missing/corrupt) through exact pure-engine re-evaluation.
-func Recover(store *commitlog.StoreV2, sessionID string, config policy.Config, resolve CandidateResolver) (*policy.Application, error) {
+func Recover(store *commitlog.StoreV2, sessionID string, lineage contracts.PolicyLineageManifestV2, config policy.Config, resolve CandidateResolver) (*policy.Application, error) {
 	checkpoint, err := store.LoadCheckpoint(func(commitlog.CommittedV2) error { return nil })
 	if err != nil {
 		return nil, err
@@ -47,5 +47,5 @@ func Recover(store *commitlog.StoreV2, sessionID string, config policy.Config, r
 	if err != nil {
 		return nil, err
 	}
-	return policy.NewApplication(engine, store), nil
+	return policy.NewBoundApplication(engine, store, lineage)
 }

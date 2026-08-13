@@ -28,6 +28,12 @@ type Application struct {
 func NewApplication(engine *Engine, log CommitAppender) *Application {
 	return &Application{engine: engine, log: log}
 }
+func NewBoundApplication(engine *Engine, log CommitAppender, lineage contracts.PolicyLineageManifestV2) (*Application, error) {
+	if err := lineage.Validate(); err != nil || lineage.MustContentID() != engine.config.LineageID || lineage.Config != engine.config.CandidateConfigArtifact || lineage.Rules != engine.config.CandidateRulesArtifact {
+		return nil, ErrCommitFailedHidden
+	}
+	return NewApplication(engine, log), nil
+}
 func (a *Application) State() contracts.PolicyStateV2 { return a.engine.State() }
 func (a *Application) StateHash() string              { return a.engine.StateHash() }
 

@@ -74,7 +74,7 @@ func TestApplicationAcceptsStateOnlyAfterCommit(t *testing.T) {
 func TestApplicationPersistsCompleteNormalTransitionSequence(t *testing.T) {
 	log := &recordingLog{}
 	app := policy.NewApplication(policy.New("session", policy.DefaultConfig()), log)
-	queued, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 20), candidate("b", "lane.v1", "high", 2, 10)}, 1)
+	queued, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 20), candidate("b", "lane.v1", "high", 1, 10)}, 1)
 	if err != nil || len(queued.Decisions) != 2 {
 		t.Fatalf("queue transitions incomplete: decisions=%d err=%v", len(queued.Decisions), err)
 	}
@@ -102,5 +102,27 @@ func TestApplicationPersistsCompleteNormalTransitionSequence(t *testing.T) {
 		if err := commit.Validate(); err != nil {
 			t.Fatalf("persisted invalid commit: %v", err)
 		}
+	}
+}
+
+func TestApplicationRejectsMismatchedObservationAndArtifacts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*contracts.InsightCandidateV1)
+	}{
+		{"observation", func(c *contracts.InsightCandidateV1) { c.Evidence[0] = evidence(99) }},
+		{"rule", func(c *contracts.InsightCandidateV1) { c.RuleVersion = "draft.v999" }},
+		{"config", func(c *contracts.InsightCandidateV1) { c.ConfigVersion = "config.v999" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &recordingLog{}
+			app := policy.NewApplication(policy.New("session", policy.DefaultConfig()), log)
+			c := candidate("bad", "draft.v1", "high", 1, 10)
+			tc.mutate(&c)
+			commit, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
+			if err != nil || len(app.State().Preview) != 0 || len(commit.AuditEvents) == 0 || commit.AuditEvents[0].EventType != "candidate_suppressed" {
+				t.Fatalf("bad candidate admitted: %#v %v", commit, err)
+			}
+		})
 	}
 }

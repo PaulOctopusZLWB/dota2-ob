@@ -25,7 +25,7 @@ func TestCandidateOrderUsesRuleVersionThenCandidateID(t *testing.T) {
 
 func TestApprovalRequiredCommandsRevisionIdempotencyAndSafety(t *testing.T) {
 	engine := policy.New("session", policy.DefaultConfig())
-	commit := engine.EvaluateObservation(1, hash('c'), hash('d'), contracts.EvidenceRefV1{RecordSchemaVersion: 1, SessionID: "session", Sequence: 1, ReceiveTime: mustTime(), Source: "gsi", RawPayloadSHA256: hash('e')}, []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 10)
+	commit := engine.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 10)
 	if commit.Publication != contracts.PublicationSuppressedV2 || len(engine.State().Preview) != 1 || engine.State().ActivePrimary != nil {
 		t.Fatal("startup did not remain approval_required and hidden")
 	}
@@ -117,6 +117,72 @@ func TestRestoreCheckpointContinuesIdentically(t *testing.T) {
 	b, _ := contracts.MarshalCanonical(nextB)
 	if !bytes.Equal(a, b) || uninterrupted.StateHash() != recovered.StateHash() {
 		t.Fatal("checkpoint continuation diverged")
+	}
+}
+
+func TestActiveAndPinnedPreviewExpiryIsComplete(t *testing.T) {
+	e := policy.New("session", policy.DefaultConfig())
+	c := candidate("a", "draft.v1", "high", 1, 10)
+	c.ExpiryTimeMS = 5
+	queued := e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
+	show := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "show", SessionID: "session", Action: contracts.ActionShow, TargetCandidateID: "a", ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
+	e.ApplyCommand(show)
+	expired := e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), nil, 10)
+	if expired.Publication != contracts.PublicationHide || e.State().ActivePrimary != nil || len(expired.Decisions) != 1 || expired.Decisions[0].ResultingState != contracts.DecisionExpired {
+		t.Fatalf("active expiry incomplete: %#v", expired)
+	}
+	assertCheckpointStateValid(t, e, expired)
+
+	e = policy.New("session", policy.DefaultConfig())
+	c = candidate("p", "draft.v1", "high", 1, 10)
+	c.ExpiryTimeMS = 5
+	queued = e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
+	pin := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "pin", SessionID: "session", Action: contracts.ActionPin, TargetCandidateID: "p", ExpectedPolicyRevision: queued.ResultingPolicyRevision, PolicyTimeMS: 2}
+	e.ApplyCommand(pin)
+	e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), nil, 10)
+	if len(e.State().Pins) != 0 {
+		t.Fatal("expired preview retained pin")
+	}
+	assertCheckpointStateValid(t, e, e.EvaluateObservation(3, hash('c'), hash('d'), evidence(3), nil, 11))
+}
+
+func TestOutOfOrderObservationReplayPreservesCausalAuditTime(t *testing.T) {
+	config := policy.DefaultConfig()
+	live := policy.New("session", config)
+	first := live.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), nil, 10)
+	second := live.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), nil, 20)
+	replay := policy.New("session", config)
+	if err := replay.ReplayCommit(first, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := replay.ReplayCommit(second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if replay.StateHash() != live.StateHash() {
+		t.Fatal("out-of-order replay state diverged")
+	}
+}
+
+func TestRepeatedSemanticCandidateRemainsSparse(t *testing.T) {
+	e := policy.New("session", policy.DefaultConfig())
+	e.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{candidate("a", "draft.v1", "high", 1, 10)}, 1)
+	e.EvaluateObservation(2, hash('c'), hash('d'), evidence(2), []contracts.InsightCandidateV1{candidate("b", "draft.v1", "high", 2, 10)}, 2)
+	if len(e.State().Preview) != 1 {
+		t.Fatalf("repeated claim grew queue: %d", len(e.State().Preview))
+	}
+}
+
+func assertCheckpointStateValid(t *testing.T, e *policy.Engine, commit contracts.PolicyCommitV2) {
+	t.Helper()
+	s := e.State()
+	locators := make([]contracts.PolicyCommandLocatorV2, len(s.CommandResults))
+	for i, result := range s.CommandResults {
+		locators[i] = contracts.PolicyCommandLocatorV2{CommandID: result.CommandID, SegmentID: "segment-1", FrameOffset: int64(i), CommitSequence: 1, FrameSHA256: hash('f')}
+	}
+	cp := contracts.PolicyCheckpointV2{SchemaVersion: contracts.PolicyCheckpointSchemaV2, LineageManifestID: policy.DefaultConfig().LineageID, LineageManifestSHA256: policy.DefaultConfig().LineageID, SessionID: "session", CommitSequence: commit.CommitSequence, ReferencedCommitSHA256: hash('f'), LastObservationSequence: s.LastObservationSequence, PolicyRevision: s.PolicyRevision, LastPolicyTimeMS: s.LastPolicyTimeMS, CreatedTimeMS: s.LastPolicyTimeMS, Preview: s.Preview, DisabledRuleIDs: s.DisabledRuleIDs, Cooldowns: s.Cooldowns, Pins: s.Pins, EmergencyHide: s.EmergencyHide, ActivePrimary: s.ActivePrimary, CommandResults: s.CommandResults, CommandLocators: locators, CandidateTombstones: s.CandidateTombstones}
+	cp.StateHash, _ = cp.ComputeStateHash()
+	if err := cp.Validate(); err != nil {
+		t.Fatalf("invalid checkpoint state: %v", err)
 	}
 }
 

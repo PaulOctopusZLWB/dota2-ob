@@ -21,17 +21,17 @@ import (
 const warmups, measured = 10_000, 100_000
 
 type report struct {
-	Warmups, Evaluations                                                                          int
-	P50NS, P95NS, P99NS, MaxNS                                                                    int64
-	AllocationsPerEvaluation                                                                      float64
-	AllocatedBytesPerEvaluation                                                                   float64
-	BaselineRSSBytes, PeakRSSBytes, PostWarmupRSSBytes, FinalRSSBytes, PostWarmupGrowthBytes      uint64
-	FixtureID, ConfigVersion, RuleVersions, LineageID, CandidateSHA256, StateSHA256               string
-	Runtime, GOOS, GOARCH, Compiler                                                               string
-	CPUs                                                                                          int
-	Exclusions                                                                                    []string
-	Failures, ExcludedSamples                                                                     int
-	RawSamples, SummarizationCommand, Hostname, Kernel, CPUModel, GPUContext, PowerMode, HostLoad string
+	Warmups, Evaluations                                                                            int
+	P50NS, P95NS, P99NS, MaxNS                                                                      int64
+	AllocationsPerEvaluation                                                                        float64
+	AllocatedBytesPerEvaluation                                                                     float64
+	BaselineRSSBytes, PeakRSSBytes, PostWarmupRSSBytes, FinalRSSBytes, PostWarmupGrowthBytes        uint64
+	FixtureID, ConfigVersion, RuleVersions, LineageID, CandidateSHA256, DecisionSHA256, StateSHA256 string
+	Runtime, GOOS, GOARCH, Compiler                                                                 string
+	CPUs                                                                                            int
+	Exclusions                                                                                      []string
+	Failures, ExcludedSamples                                                                       int
+	RawSamples, SummarizationCommand, Hostname, Kernel, CPUModel, GPUContext, PowerMode, HostLoad   string
 }
 
 func main() {
@@ -43,11 +43,9 @@ func main() {
 		return
 	}
 	input, config := fixture()
-	engine := policy.New("p1-session", policy.DefaultConfig())
-	liveHash, _ := contracts.CanonicalSHA256(input.Observation)
 	baselineRSS := rss()
 	for i := 1; i <= warmups; i++ {
-		evaluate(engine, input, config, liveHash, uint64(i))
+		evaluate(input, config, uint64(i))
 	}
 	runtime.GC()
 	postWarmup := rss()
@@ -55,11 +53,11 @@ func main() {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	durations := make([]int64, measured)
-	var finalCandidates []contracts.InsightCandidateV1
+	var final evaluation
 	for i := 0; i < measured; i++ {
 		sequence := uint64(warmups + i + 1)
 		start := time.Now()
-		finalCandidates = evaluate(engine, input, config, liveHash, sequence)
+		final = evaluate(input, config, sequence)
 		durations[i] = time.Since(start).Nanoseconds()
 		if i%1000 == 0 {
 			if current := rss(); current > peak {
@@ -71,9 +69,10 @@ func main() {
 	finalRSS := rss()
 	writeSamples(*samplesPath, durations)
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
-	candidateHash, _ := contracts.CanonicalSHA256(finalCandidates)
+	candidateHash, _ := contracts.CanonicalSHA256(final.candidates)
+	decisionHash, _ := contracts.CanonicalSHA256(final.commit.Decisions)
 	host, _ := os.Hostname()
-	output := report{Warmups: warmups, Evaluations: measured, P50NS: nearest(durations, 50), P95NS: nearest(durations, 95), P99NS: nearest(durations, 99), MaxNS: durations[len(durations)-1], AllocationsPerEvaluation: float64(after.Mallocs-before.Mallocs) / measured, AllocatedBytesPerEvaluation: float64(after.TotalAlloc-before.TotalAlloc) / measured, BaselineRSSBytes: baselineRSS, PeakRSSBytes: peak, PostWarmupRSSBytes: postWarmup, FinalRSSBytes: finalRSS, FixtureID: "m2-complete-ten-player.v2", ConfigVersion: config.Version, RuleVersions: "draft.v1,item.v1,lane.v1,objective.v1,readiness.v1", LineageID: input.Lineage.MustContentID(), CandidateSHA256: candidateHash, StateSHA256: engine.StateHash(), Runtime: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Compiler: runtime.Compiler, CPUs: runtime.NumCPU(), Exclusions: []string{"GSI capture and DotaTV delay", "filesystem commit log and sync", "network, localization, rendering, delivery HTTP, OBS"}, RawSamples: *samplesPath, SummarizationCommand: "m2-p1 --summarize " + *samplesPath, Hostname: host, Kernel: readFirst("/proc/sys/kernel/osrelease"), CPUModel: cpuModel(), GPUContext: readFirst("/proc/driver/nvidia/version"), PowerMode: readFirst("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"), HostLoad: readFirst("/proc/loadavg")}
+	output := report{Warmups: warmups, Evaluations: measured, P50NS: nearest(durations, 50), P95NS: nearest(durations, 95), P99NS: nearest(durations, 99), MaxNS: durations[len(durations)-1], AllocationsPerEvaluation: float64(after.Mallocs-before.Mallocs) / measured, AllocatedBytesPerEvaluation: float64(after.TotalAlloc-before.TotalAlloc) / measured, BaselineRSSBytes: baselineRSS, PeakRSSBytes: peak, PostWarmupRSSBytes: postWarmup, FinalRSSBytes: finalRSS, FixtureID: "m2-complete-ten-player.v3-fixed-state", ConfigVersion: config.Version, RuleVersions: "draft.v1,item.v1,lane.v1,objective.v1,readiness.v1", LineageID: input.Lineage.MustContentID(), CandidateSHA256: candidateHash, DecisionSHA256: decisionHash, StateSHA256: final.stateHash, Runtime: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Compiler: runtime.Compiler, CPUs: runtime.NumCPU(), Exclusions: []string{"GSI capture and DotaTV delay", "filesystem commit log and sync", "network, localization, rendering, delivery HTTP, OBS"}, RawSamples: *samplesPath, SummarizationCommand: "m2-p1 --summarize " + *samplesPath, Hostname: host, Kernel: readFirst("/proc/sys/kernel/osrelease"), CPUModel: cpuModel(), GPUContext: readFirst("/proc/driver/nvidia/version"), PowerMode: readFirst("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"), HostLoad: readFirst("/proc/loadavg")}
 	if finalRSS > postWarmup {
 		output.PostWarmupGrowthBytes = finalRSS - postWarmup
 	}
@@ -84,13 +83,25 @@ func main() {
 	}
 }
 
-func evaluate(engine *policy.Engine, input insight.Input, config insight.Config, liveHash string, sequence uint64) []contracts.InsightCandidateV1 {
+type evaluation struct {
+	candidates []contracts.InsightCandidateV1
+	commit     contracts.PolicyCommitV2
+	stateHash  string
+}
+
+func evaluate(input insight.Input, config insight.Config, sequence uint64) evaluation {
 	input.Observation.Evidence.Sequence = sequence
-	input.Observation.Evidence.ReceiveTime = input.Observation.Evidence.ReceiveTime.Add(time.Duration(sequence) * time.Millisecond)
+	input.Observation.Evidence.ReceiveTime = time.Unix(1_700_000_000, 0).UTC().Add(time.Duration(sequence) * time.Millisecond)
 	input.PolicyTimeMS = input.Observation.Evidence.ReceiveTime.UnixMilli()
 	values := insight.Evaluate(input, config)
-	engine.EvaluateObservation(sequence, strings.Repeat("e", 64), liveHash, input.Observation.Evidence, values, input.PolicyTimeMS)
-	return values
+	liveHash, _ := contracts.CanonicalSHA256(input.Observation)
+	policyConfig := policy.DefaultConfig()
+	policyConfig.LineageID = input.Lineage.MustContentID()
+	policyConfig.CandidateConfigVersion = config.Version
+	policyConfig.CandidateConfigArtifact, policyConfig.CandidateRulesArtifact = input.Lineage.Config, input.Lineage.Rules
+	engine := policy.New("p1-session", policyConfig)
+	commit := engine.EvaluateObservation(sequence, strings.Repeat("e", 64), liveHash, input.Observation.Evidence, values, input.PolicyTimeMS)
+	return evaluation{values, commit, engine.StateHash()}
 }
 func nearest(v []int64, p int) int64 {
 	rank := (p*len(v) + 99) / 100
@@ -226,7 +237,7 @@ func historyFixture(observation contracts.LiveObservationV1) (contracts.Historic
 		}
 	}
 	artifact := contracts.PolicyArtifactIdentityV2{Version: "v1", ContentSHA256: strings.Repeat("9", 64)}
-	lineage := contracts.PolicyLineageManifestV2{SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: "p1-session", RawRecordSchema: artifact, RawRecordFraming: artifact, RawPayloadSchema: artifact, LiveObservationSchema: artifact, ProjectionMapping: artifact, TournamentScopeID: strings.Repeat("c", 64), TournamentScopeSHA256: strings.Repeat("c", 64), HistoricalSnapshotID: manifest.SnapshotID, HistoricalSnapshotSHA256: manifest.ContentSHA256, EligibleBaselineSHA256: hashes, Rules: artifact, Config: artifact, Catalog: artifact, Terminology: artifact, LocalizationParameterMapping: artifact, EngineBuild: artifact}
+	lineage := contracts.PolicyLineageManifestV2{SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: "p1-session", RawRecordSchema: artifact, RawRecordFraming: artifact, RawPayloadSchema: artifact, LiveObservationSchema: artifact, ProjectionMapping: artifact, TournamentScopeID: strings.Repeat("c", 64), TournamentScopeSHA256: strings.Repeat("c", 64), HistoricalSnapshotID: manifest.SnapshotID, HistoricalSnapshotSHA256: manifest.ContentSHA256, EligibleBaselineSHA256: hashes, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(insight.DefaultConfig()), Catalog: artifact, Terminology: artifact, LocalizationParameterMapping: artifact, EngineBuild: artifact}
 	if err := lineage.Validate(); err != nil {
 		panic(err)
 	}

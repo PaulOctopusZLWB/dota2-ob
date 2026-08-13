@@ -16,6 +16,7 @@ func TestRecoverContinuesCheckpointAndReturnsExactDurableDuplicate(t *testing.T)
 	manifest := recoveryManifest()
 	config := policy.DefaultConfig()
 	config.LineageID = manifest.MustContentID()
+	config.CandidateConfigArtifact, config.CandidateRulesArtifact = manifest.Config, manifest.Rules
 	verifier := commitlog.WithV2ReplayVerifier(commitlog.ReplayVerifierV2{VerifyObservation: func(contracts.PolicyCommitV2) error { return nil }, VerifyCommand: func(contracts.PolicyCommitV2) error { return nil }, Reevaluate: func(contracts.PolicyCommitV2) error { return nil }})
 	root := t.TempDir()
 	store, _, err := commitlog.OpenV2(root, "session", manifest, verifier)
@@ -50,7 +51,7 @@ func TestRecoverContinuesCheckpointAndReturnsExactDurableDuplicate(t *testing.T)
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	recovered, err := policyapp.Recover(reopened, "session", config, func(contracts.PolicyCommitV2) ([]contracts.InsightCandidateV1, error) {
+	recovered, err := policyapp.Recover(reopened, "session", manifest, config, func(contracts.PolicyCommitV2) ([]contracts.InsightCandidateV1, error) {
 		return []contracts.InsightCandidateV1{candidate}, nil
 	})
 	if err != nil || recovered.StateHash() != wantHash {
@@ -62,6 +63,83 @@ func TestRecoverContinuesCheckpointAndReturnsExactDurableDuplicate(t *testing.T)
 	if err != nil || !bytes.Equal(want, got) || recovered.StateHash() != wantHash {
 		t.Fatalf("durable duplicate diverged: %v", err)
 	}
+}
+
+func TestBoundApplicationRejectsRuleAndConfigContentMismatch(t *testing.T) {
+	manifest := recoveryManifest()
+	config := policy.DefaultConfig()
+	config.LineageID = manifest.MustContentID()
+	config.CandidateConfigArtifact, config.CandidateRulesArtifact = manifest.Config, manifest.Rules
+	for _, mutate := range []func(*policy.Config){func(c *policy.Config) { c.CandidateConfigArtifact.ContentSHA256 = recoveryHash('0') }, func(c *policy.Config) { c.CandidateRulesArtifact.ContentSHA256 = recoveryHash('0') }} {
+		bad := config
+		mutate(&bad)
+		if _, err := policy.NewBoundApplication(policy.New("session", bad), nil, manifest); err == nil {
+			t.Fatal("mismatched lineage artifact accepted")
+		}
+	}
+}
+
+func TestRecoverOutOfOrderObservationPreservesCausalTimeAndContinuation(t *testing.T) {
+	manifest := recoveryManifest()
+	config := policy.DefaultConfig()
+	config.LineageID = manifest.MustContentID()
+	config.CandidateConfigArtifact, config.CandidateRulesArtifact = manifest.Config, manifest.Rules
+	verifier := commitlog.WithV2ReplayVerifier(commitlog.ReplayVerifierV2{VerifyObservation: func(contracts.PolicyCommitV2) error { return nil }, VerifyCommand: func(contracts.PolicyCommitV2) error { return nil }, Reevaluate: func(contracts.PolicyCommitV2) error { return nil }})
+
+	for _, withCheckpoint := range []bool{false, true} {
+		t.Run(map[bool]string{false: "full_replay", true: "checkpoint_continuation"}[withCheckpoint], func(t *testing.T) {
+			root := t.TempDir()
+			store, _, err := commitlog.OpenV2(root, "session", manifest, verifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := policy.New("session", config)
+			candidate := recoveryCandidate()
+			first := engine.EvaluateObservation(1, recoveryHash('1'), recoveryHash('2'), recoveryEvidence(1), []contracts.InsightCandidateV1{candidate}, 10)
+			committed, err := store.Append(first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if withCheckpoint {
+				if err := store.WriteCheckpoint(recoveryCheckpoint(engine, config.LineageID, committed.Hash, 10)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outOfOrder := engine.EvaluateObservation(1, recoveryHash('3'), recoveryHash('4'), recoveryEvidence(1), nil, 20)
+			if _, err := store.Append(outOfOrder); err != nil {
+				t.Fatal(err)
+			}
+			wantState := engine.StateHash()
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			reopened, _, err := commitlog.OpenV2(root, "session", manifest, verifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			recovered, err := policyapp.Recover(reopened, "session", manifest, config, func(contracts.PolicyCommitV2) ([]contracts.InsightCandidateV1, error) {
+				return []contracts.InsightCandidateV1{candidate}, nil
+			})
+			if err != nil || recovered.StateHash() != wantState {
+				t.Fatalf("recovery diverged: state=%s want=%s err=%v", recovered.StateHash(), wantState, err)
+			}
+
+			want := engine.EvaluateObservation(2, recoveryHash('5'), recoveryHash('6'), recoveryEvidence(2), nil, 30)
+			got, err := recovered.EvaluateObservation(2, recoveryHash('5'), recoveryHash('6'), recoveryEvidence(2), nil, 30)
+			wantBytes, _ := contracts.MarshalCanonical(want)
+			gotBytes, _ := contracts.MarshalCanonical(got)
+			if err != nil || !bytes.Equal(wantBytes, gotBytes) || recovered.StateHash() != engine.StateHash() {
+				t.Fatalf("continuation diverged: %v", err)
+			}
+		})
+	}
+}
+
+func recoveryCheckpoint(engine *policy.Engine, lineageID, referencedHash string, createdTimeMS int64) contracts.PolicyCheckpointV2 {
+	state := engine.State()
+	return contracts.PolicyCheckpointV2{SchemaVersion: contracts.PolicyCheckpointSchemaV2, LineageManifestID: lineageID, LineageManifestSHA256: lineageID, SessionID: state.SessionID, CommitSequence: 1, ReferencedCommitSHA256: referencedHash, LastObservationSequence: state.LastObservationSequence, PolicyRevision: state.PolicyRevision, LastPolicyTimeMS: state.LastPolicyTimeMS, StateHash: engine.StateHash(), CreatedTimeMS: createdTimeMS, Preview: state.Preview, DisabledRuleIDs: state.DisabledRuleIDs, Cooldowns: state.Cooldowns, Pins: state.Pins, EmergencyHide: state.EmergencyHide, ActivePrimary: state.ActivePrimary, CommandResults: state.CommandResults, CommandLocators: []contracts.PolicyCommandLocatorV2{}, CandidateTombstones: state.CandidateTombstones}
 }
 
 func recoveryManifest() contracts.PolicyLineageManifestV2 {

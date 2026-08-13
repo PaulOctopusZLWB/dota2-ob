@@ -105,8 +105,9 @@ func TestHistoryBindingRejectsAdversarialInputsWithoutSuppressingLiveRule(t *tes
 		{"mismatched key", func(_ *contracts.HistoricalSnapshotManifestV1, _ *contracts.PolicyLineageManifestV2, b []contracts.HistoricalBaselineV1, _ *insight.Config) {
 			b[0].Key.Window = "trailing_90_days"
 		}},
-		{"stale snapshot", func(_ *contracts.HistoricalSnapshotManifestV1, _ *contracts.PolicyLineageManifestV2, _ []contracts.HistoricalBaselineV1, c *insight.Config) {
+		{"stale snapshot", func(_ *contracts.HistoricalSnapshotManifestV1, l *contracts.PolicyLineageManifestV2, _ []contracts.HistoricalBaselineV1, c *insight.Config) {
 			c.MaximumHistoryAgeMS = 1
+			l.Config = insight.ConfigArtifact(*c)
 		}},
 	}
 	for _, tc := range cases {
@@ -159,6 +160,58 @@ func TestMaximumLiveAgeSuppressesAllClaims(t *testing.T) {
 	if len(got) != 1 || got[0].Reason != "stale_live_input" {
 		t.Fatalf("stale observation not failed closed: %#v", got)
 	}
+}
+
+func TestFrozenMinimaLaneBoundaryAndArtifactBinding(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	observation := completeObservation(now)
+	previous := completeObservation(now.Add(-time.Second))
+	previous.Evidence.Sequence = 1
+	manifest, lineage, baselines := validHistory(t, observation, map[string]uint64{"draft_hero_performance": 1, "lane_10_net_worth": 1, "teamfight_readiness": 1})
+	low := insight.Config{Version: "config.v1", DraftMinimum: 1, DistributionMinimum: 1, TeamMinimum: 1}
+	lineage.Config = insight.ConfigArtifact(low)
+	got := insight.Evaluate(insight.Input{Observation: observation, Previous: &previous, Manifest: &manifest, Lineage: &lineage, Baselines: baselines, PolicyTimeMS: now.UnixMilli()}, low)
+	for _, c := range got {
+		if (insight.Family(c.RuleVersion) == "draft" || insight.Family(c.RuleVersion) == "lane" || insight.Family(c.RuleVersion) == "readiness") && c.Availability == "available" {
+			t.Fatalf("lowered frozen minimum: %#v", c)
+		}
+	}
+
+	manifest, lineage, baselines = validHistory(t, observation, map[string]uint64{"lane_10_net_worth": 8})
+	observation.Map.ClockTime = contracts.Present(int64(599))
+	got = insight.Evaluate(insight.Input{Observation: observation, Previous: &previous, Manifest: &manifest, Lineage: &lineage, Baselines: baselines, PolicyTimeMS: now.UnixMilli()}, insight.DefaultConfig())
+	for _, c := range got {
+		if insight.Family(c.RuleVersion) == "lane" && c.Reason != "not_lane_checkpoint" {
+			t.Fatalf("lane fired off checkpoint: %#v", c)
+		}
+	}
+	lineage.Config.ContentSHA256 = hash('0')
+	got = insight.Evaluate(insight.Input{Observation: observation, Previous: &previous, Manifest: &manifest, Lineage: &lineage, Baselines: baselines, PolicyTimeMS: now.UnixMilli()}, insight.DefaultConfig())
+	if len(got) != 1 || got[0].Reason != "lineage_artifact_mismatch" {
+		t.Fatalf("config artifact mismatch accepted: %#v", got)
+	}
+}
+
+func TestNetWorthOnlyExchangeIsObservableEvent(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	current := completeObservation(now)
+	previous := completeObservation(now.Add(-time.Second))
+	previous.Evidence.Sequence = 1
+	previous.Buildings = current.Buildings
+	previous.Map = current.Map
+	previous.Roshan = current.Roshan
+	previous.Tormentor = current.Tormentor
+	previous.Participants[0].NetWorth = contracts.Present(contracts.Decimal("5999.5"))
+	got := insight.Evaluate(insight.Input{Observation: current, Previous: &previous, PolicyTimeMS: now.UnixMilli()}, insight.DefaultConfig())
+	for _, c := range got {
+		if insight.Family(c.RuleVersion) == "objective" {
+			if c.Availability != "available" {
+				t.Fatalf("net worth event suppressed: %#v", c)
+			}
+			return
+		}
+	}
+	t.Fatal("missing objective family")
 }
 
 func TestLiveSafetyAndHistoricalEligibilityReasons(t *testing.T) {
@@ -229,7 +282,7 @@ func validHistory(t *testing.T, observation contracts.LiveObservationV1, samples
 		}
 	}
 	artifact := contracts.PolicyArtifactIdentityV2{Version: "v1", ContentSHA256: hash('9')}
-	lineage := contracts.PolicyLineageManifestV2{SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: observation.Evidence.SessionID, RawRecordSchema: artifact, RawRecordFraming: artifact, RawPayloadSchema: artifact, LiveObservationSchema: artifact, ProjectionMapping: artifact, TournamentScopeID: hash('c'), TournamentScopeSHA256: hash('c'), HistoricalSnapshotID: manifest.SnapshotID, HistoricalSnapshotSHA256: manifest.ContentSHA256, EligibleBaselineSHA256: hashes, Rules: artifact, Config: artifact, Catalog: artifact, Terminology: artifact, LocalizationParameterMapping: artifact, EngineBuild: artifact}
+	lineage := contracts.PolicyLineageManifestV2{SchemaVersion: contracts.PolicyLineageManifestSchemaV2, SessionID: observation.Evidence.SessionID, RawRecordSchema: artifact, RawRecordFraming: artifact, RawPayloadSchema: artifact, LiveObservationSchema: artifact, ProjectionMapping: artifact, TournamentScopeID: hash('c'), TournamentScopeSHA256: hash('c'), HistoricalSnapshotID: manifest.SnapshotID, HistoricalSnapshotSHA256: manifest.ContentSHA256, EligibleBaselineSHA256: hashes, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(insight.DefaultConfig()), Catalog: artifact, Terminology: artifact, LocalizationParameterMapping: artifact, EngineBuild: artifact}
 	if err := lineage.Validate(); err != nil {
 		t.Fatal(err)
 	}

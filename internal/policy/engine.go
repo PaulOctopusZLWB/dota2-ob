@@ -14,16 +14,20 @@ import (
 )
 
 type Config struct {
-	Version       string
-	LineageID     string
-	QueueLimit    int
-	TombstoneMS   int64
-	CooldownMS    int64
-	AutoShowRules []string
+	Version                 string
+	LineageID               string
+	QueueLimit              int
+	TombstoneMS             int64
+	CooldownMS              int64
+	AutoShowRules           []string
+	CandidateConfigVersion  string
+	AllowedRuleVersions     []string
+	CandidateConfigArtifact contracts.PolicyArtifactIdentityV2
+	CandidateRulesArtifact  contracts.PolicyArtifactIdentityV2
 }
 
 func DefaultConfig() Config {
-	return Config{Version: "policy.v1", LineageID: strings.Repeat("f", 64), QueueLimit: contracts.MaxPreviewCandidates, TombstoneMS: 60_000, CooldownMS: 15_000}
+	return Config{Version: "policy.v1", LineageID: strings.Repeat("f", 64), QueueLimit: contracts.MaxPreviewCandidates, TombstoneMS: 60_000, CooldownMS: 15_000, CandidateConfigVersion: "config.v1", AllowedRuleVersions: []string{"draft.v1", "item.v1", "lane.v1", "objective.v1", "readiness.v1"}}
 }
 
 type Engine struct {
@@ -51,6 +55,13 @@ func New(sessionID string, config Config) *Engine {
 	if config.CooldownMS <= 0 {
 		config.CooldownMS = defaults.CooldownMS
 	}
+	if config.CandidateConfigVersion == "" {
+		config.CandidateConfigVersion = defaults.CandidateConfigVersion
+	}
+	if len(config.AllowedRuleVersions) == 0 {
+		config.AllowedRuleVersions = append([]string(nil), defaults.AllowedRuleVersions...)
+	}
+	sort.Strings(config.AllowedRuleVersions)
 	e := &Engine{config: config, commandCommits: map[string]contracts.PolicyCommitV2{}}
 	e.state = contracts.PolicyStateV2{SchemaVersion: contracts.PolicyStateSchemaV2, SessionID: sessionID, Preview: []contracts.InsightCandidateV1{}, DisabledRuleIDs: []string{}, Cooldowns: []contracts.RuleCooldownV2{}, Pins: []contracts.PolicyPinV2{}, CommandResults: []contracts.PolicyCommandResultRefV2{}, CandidateTombstones: []contracts.PolicyCandidateTombstoneV2{}}
 	e.hash = stateHash(e.state)
@@ -86,7 +97,7 @@ func (e *Engine) ReplayCommit(committed contracts.PolicyCommitV2, candidates []c
 	if committed.Command != nil {
 		replayed = e.ApplyCommand(*committed.Command)
 	} else if committed.ObservationEvidence != nil {
-		replayed = e.EvaluateObservation(committed.ObservationSequence, committed.RawRecordSHA256, committed.LiveObservationSHA256, *committed.ObservationEvidence, candidates, committed.ResultingPolicyTimeMS)
+		replayed = e.EvaluateObservation(committed.ObservationSequence, committed.RawRecordSHA256, committed.LiveObservationSHA256, *committed.ObservationEvidence, candidates, causalPolicyTime(committed))
 	} else {
 		return errors.New("replay missing causal input")
 	}
@@ -138,11 +149,11 @@ func (e *Engine) EvaluateObservation(observationSequence uint64, rawRecordHash, 
 		commit.Publication = contracts.PublicationSuppressedV2
 		return e.finish(commit)
 	}
-	e.expire(policyTimeMS, &commit)
+	activeExpired := e.expire(policyTimeMS, &commit)
 	SortCandidates(candidates)
 	changed := false
 	for _, candidate := range candidates {
-		reason := e.candidateSuppression(candidate, policyTimeMS)
+		reason := e.candidateSuppression(candidate, evidence, policyTimeMS)
 		if reason == "" && len(e.state.Preview) >= e.config.QueueLimit {
 			reason = "queue_full"
 		}
@@ -164,7 +175,11 @@ func (e *Engine) EvaluateObservation(observationSequence uint64, rawRecordHash, 
 	if len(commit.AuditEvents) == 0 {
 		commit.AuditEvents = []contracts.AuditEventV1{audit(e.state.SessionID, policyTimeMS, "observation_evaluated", "", "", "", "no_candidate")}
 	}
-	commit.Publication = contracts.PublicationSuppressedV2
+	if activeExpired {
+		commit.Publication = contracts.PublicationHide
+	} else {
+		commit.Publication = contracts.PublicationSuppressedV2
+	}
 	return e.finish(commit)
 }
 
@@ -279,6 +294,7 @@ func (e *Engine) mutate(command contracts.OperatorCommandV1) ([]contracts.Broadc
 		} else {
 			e.state.ActivePrimary = nil
 		}
+		removePin(&e.state.Pins, candidate.CandidateID)
 	case contracts.ActionPin:
 		resulting = contracts.DecisionPinned
 		if !containsPin(e.state.Pins, candidate.CandidateID) {
@@ -318,7 +334,8 @@ func (e *Engine) mutate(command contracts.OperatorCommandV1) ([]contracts.Broadc
 	return []contracts.BroadcastDecisionV1{decision}, command.Action, contracts.CommandAccepted
 }
 
-func (e *Engine) expire(now int64, commit *contracts.PolicyCommitV2) {
+func (e *Engine) expire(now int64, commit *contracts.PolicyCommitV2) bool {
+	activeExpired := false
 	e.state.CandidateTombstones = contracts.ExpirePolicyTombstonesV2(e.state.CandidateTombstones, now)
 	cooldowns := e.state.Cooldowns[:0]
 	for _, cooldown := range e.state.Cooldowns {
@@ -337,11 +354,29 @@ func (e *Engine) expire(now int64, commit *contracts.PolicyCommitV2) {
 		commit.Decisions = append(commit.Decisions, decision)
 		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, now, "candidate_expired", candidate.CandidateID, decision.DecisionID, "", "expired"))
 		e.tombstone(candidate, decision, now)
+		removePin(&e.state.Pins, candidate.CandidateID)
 	}
 	e.state.Preview = remaining
+	if e.state.ActivePrimary != nil && e.state.ActivePrimary.Candidate.ExpiryTimeMS <= now {
+		candidate := e.state.ActivePrimary.Candidate
+		decision := contracts.BroadcastDecisionV1{SchemaVersion: contracts.BroadcastDecisionSchemaV1, DecisionID: id("expiry", candidate.CandidateID), SessionID: e.state.SessionID, PolicyRevision: e.state.PolicyRevision + 1, CandidateID: candidate.CandidateID, PriorState: e.state.ActivePrimary.Decision.ResultingState, ResultingState: contracts.DecisionExpired, PolicyTimeMS: now, Reason: "expired"}
+		commit.Decisions = append(commit.Decisions, decision)
+		commit.AuditEvents = append(commit.AuditEvents, audit(e.state.SessionID, now, "active_primary_expired", candidate.CandidateID, decision.DecisionID, "", "expired"))
+		e.tombstone(candidate, decision, now)
+		removePin(&e.state.Pins, candidate.CandidateID)
+		e.state.ActivePrimary = nil
+		activeExpired = true
+	}
+	return activeExpired
 }
 
-func (e *Engine) candidateSuppression(candidate contracts.InsightCandidateV1, now int64) string {
+func (e *Engine) candidateSuppression(candidate contracts.InsightCandidateV1, evidence contracts.EvidenceRefV1, now int64) string {
+	if candidate.Validate() != nil || len(candidate.Evidence) != 1 || !evidenceEqual(candidate.Evidence[0], evidence) {
+		return "candidate_evidence_mismatch"
+	}
+	if candidate.ConfigVersion != e.config.CandidateConfigVersion || !contains(e.config.AllowedRuleVersions, candidate.RuleVersion) {
+		return "candidate_artifact_mismatch"
+	}
 	if candidate.SessionID != e.state.SessionID || candidate.Availability != "available" {
 		if candidate.Reason != "" {
 			return candidate.Reason
@@ -365,12 +400,41 @@ func (e *Engine) candidateSuppression(candidate contracts.InsightCandidateV1, no
 	if candidateIndex(e.state.Preview, candidate.CandidateID) >= 0 || (e.state.ActivePrimary != nil && e.state.ActivePrimary.Candidate.CandidateID == candidate.CandidateID) {
 		return "duplicate_candidate"
 	}
+	for _, existing := range e.state.Preview {
+		if semanticCandidateEqual(existing, candidate) {
+			return "duplicate_candidate"
+		}
+	}
+	if e.state.ActivePrimary != nil && semanticCandidateEqual(e.state.ActivePrimary.Candidate, candidate) {
+		return "duplicate_candidate"
+	}
 	for _, value := range e.state.CandidateTombstones {
 		if value.CandidateID == candidate.CandidateID {
 			return "duplicate_candidate"
 		}
 	}
 	return ""
+}
+
+func causalPolicyTime(commit contracts.PolicyCommitV2) int64 {
+	if len(commit.AuditEvents) > 0 {
+		return commit.AuditEvents[0].PolicyTimeMS
+	}
+	return commit.ResultingPolicyTimeMS
+}
+func evidenceEqual(a, b contracts.EvidenceRefV1) bool {
+	x, _ := contracts.MarshalCanonical(a)
+	y, _ := contracts.MarshalCanonical(b)
+	return string(x) == string(y)
+}
+func semanticCandidateEqual(a, b contracts.InsightCandidateV1) bool {
+	a.CandidateID, b.CandidateID = "", ""
+	a.Evidence, b.Evidence = nil, nil
+	a.CreatedTimeMS, b.CreatedTimeMS = 0, 0
+	a.ExpiryTimeMS, b.ExpiryTimeMS = 0, 0
+	x, _ := contracts.MarshalCanonical(a)
+	y, _ := contracts.MarshalCanonical(b)
+	return string(x) == string(y)
 }
 
 func (e *Engine) tombstone(candidate contracts.InsightCandidateV1, decision contracts.BroadcastDecisionV1, now int64) {
