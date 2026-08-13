@@ -110,7 +110,11 @@ func TestV2CheckpointValidatesLocatorsAndReplaysLaterFrames(t *testing.T) {
 	if _, err := store.Append(observation); err != nil {
 		t.Fatal(err)
 	}
-	loaded, later, err := store.LoadCheckpoint()
+	var later []commitlog.CommittedV2
+	loaded, err := store.LoadCheckpoint(func(committed commitlog.CommittedV2) error {
+		later = append(later, committed)
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +143,10 @@ func TestV2MissingOrSyntacticallyCorruptCheckpointUsesStreamingOpenReplay(t *tes
 		} else if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		loaded, replay, err := store.LoadCheckpoint()
-		if err != nil || loaded != nil || len(replay) != 0 {
-			t.Fatalf("loaded=%#v replay=%d err=%v", loaded, len(replay), err)
+		replayed := 0
+		loaded, err := store.LoadCheckpoint(func(commitlog.CommittedV2) error { replayed++; return nil })
+		if err != nil || loaded != nil || replayed != 0 {
+			t.Fatalf("loaded=%#v replay=%d err=%v", loaded, replayed, err)
 		}
 	}
 }
@@ -172,7 +177,7 @@ func TestV2CheckpointLocatorMissingDuplicateSubstitutionOrCorruptionFailsClosed(
 			if err := os.WriteFile(filepath.Join(root, "session", "checkpoint.v2.json"), raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := store.LoadCheckpoint(); !errors.Is(err, commitlog.ErrInvalidCheckpoint) {
+			if _, err := store.LoadCheckpoint(func(commitlog.CommittedV2) error { return nil }); !errors.Is(err, commitlog.ErrInvalidCheckpoint) {
 				t.Fatalf("locator mutation error = %v", err)
 			}
 		})

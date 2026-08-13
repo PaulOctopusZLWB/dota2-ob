@@ -37,11 +37,21 @@ func TestV2RecoveryMemoryBoundAtRepresentativeScale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	priorHash := ""
-	for sequence := uint64(1); sequence <= 800; sequence++ {
-		commit := scaledObservationCommitV2(manifest, sequence, priorHash)
+	first, checkpoint := firstV2CommandAndCheckpoint(t, manifest)
+	stored, err := store.Append(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.CommandLocators = []contracts.PolicyCommandLocatorV2{stored.Locator}
+	checkpoint.ReferencedCommitSHA256 = stored.Hash
+	if err := store.WriteCheckpoint(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	priorHash := first.ResultingStateHash
+	for observationSequence := uint64(1); observationSequence <= 800; observationSequence++ {
+		commit := scaledObservationCommitV2(manifest, observationSequence+1, observationSequence, priorHash)
 		if _, err := store.Append(commit); err != nil {
-			t.Fatalf("append scaled frame %d: %v", sequence, err)
+			t.Fatalf("append scaled frame %d: %v", observationSequence, err)
 		}
 		priorHash = commit.ResultingStateHash
 	}
@@ -86,13 +96,14 @@ func TestV2RecoveryMemoryBoundAtRepresentativeScale(t *testing.T) {
 	if maxRSSKiB > 192<<10 {
 		t.Fatalf("streaming recovery max RSS = %d KiB, exceeds 192 MiB component budget (log=%d bytes)", maxRSSKiB, retainedBytes)
 	}
-	t.Logf("retained_log_bytes=%d recovery_max_rss_kib=%d combined_gate_kib=%d", retainedBytes, maxRSSKiB, 384<<10)
+	t.Logf("retained_log_bytes=%d retained_frames=%d continuation_frames=%d recovery_max_rss_kib=%d combined_gate_kib=%d", retainedBytes, 801, 800, maxRSSKiB, 384<<10)
 }
 
 func runV2RecoveryMemoryChild(t *testing.T) {
 	root := os.Getenv(v2MemoryRootEnv)
 	manifest := validManifestForStore()
-	expectedSequence := uint64(0)
+	expectedCommitSequence := uint64(0)
+	expectedObservationSequence := uint64(0)
 	priorHash := ""
 	verifier := commitlog.ReplayVerifierV2{
 		VerifyObservation: func(commit contracts.PolicyCommitV2) error {
@@ -101,11 +112,27 @@ func runV2RecoveryMemoryChild(t *testing.T) {
 			}
 			return nil
 		},
-		VerifyCommand: func(contracts.PolicyCommitV2) error { return fmt.Errorf("unexpected command") },
+		VerifyCommand: func(commit contracts.PolicyCommitV2) error {
+			if commit.CommitSequence != 1 || commit.CommandID != "command-1" {
+				return fmt.Errorf("unexpected command")
+			}
+			return nil
+		},
 		Reevaluate: func(commit contracts.PolicyCommitV2) error {
-			expectedSequence++
-			if commit.CommitSequence != expectedSequence || commit.ObservationSequence != expectedSequence || commit.PriorStateHash != priorHash || commit.ResultingStateHash != storedMatrixSHA(expectedSequence+3000) {
-				return fmt.Errorf("scaled semantic replay mismatch at %d", expectedSequence)
+			expectedCommitSequence++
+			if expectedCommitSequence == 1 {
+				first, _ := firstV2CommandAndCheckpoint(t, manifest)
+				want, _ := contracts.MarshalCanonical(first)
+				got, _ := contracts.MarshalCanonical(commit)
+				if string(got) != string(want) {
+					return fmt.Errorf("scaled checkpoint command mismatch")
+				}
+				priorHash = commit.ResultingStateHash
+				return nil
+			}
+			expectedObservationSequence++
+			if commit.CommitSequence != expectedCommitSequence || commit.ObservationSequence != expectedObservationSequence || commit.PriorStateHash != priorHash || commit.ResultingStateHash != storedMatrixSHA(expectedObservationSequence+3000) {
+				return fmt.Errorf("scaled semantic replay mismatch at %d", expectedObservationSequence)
 			}
 			priorHash = commit.ResultingStateHash
 			return nil
@@ -115,8 +142,27 @@ func runV2RecoveryMemoryChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.CommitSequence != 800 || len(state.Commits) != 0 || expectedSequence != 800 {
-		t.Fatalf("streaming state=%#v verified=%d", state, expectedSequence)
+	if state.CommitSequence != 801 || len(state.Commits) != 0 || expectedCommitSequence != 801 || expectedObservationSequence != 800 {
+		t.Fatalf("streaming state=%#v verified_commits=%d verified_observations=%d", state, expectedCommitSequence, expectedObservationSequence)
+	}
+	continuationFrames := 0
+	checkpoint, err := store.LoadCheckpoint(func(committed commitlog.CommittedV2) error {
+		continuationFrames++
+		observationSequence := uint64(continuationFrames)
+		continuationPriorHash := firstV2StateHash(t, manifest)
+		if observationSequence > 1 {
+			continuationPriorHash = storedMatrixSHA(observationSequence - 1 + 3000)
+		}
+		expected := scaledObservationCommitV2(manifest, observationSequence+1, observationSequence, continuationPriorHash)
+		want, _ := contracts.MarshalCanonical(expected)
+		got, _ := contracts.MarshalCanonical(committed.Commit)
+		if string(got) != string(want) {
+			return fmt.Errorf("stale checkpoint continuation mismatch at %d", observationSequence)
+		}
+		return nil
+	})
+	if err != nil || checkpoint == nil || checkpoint.CommitSequence != 1 || continuationFrames != 800 {
+		t.Fatalf("stale checkpoint continuation checkpoint=%v frames=%d err=%v", checkpoint != nil, continuationFrames, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -129,16 +175,22 @@ func runV2RecoveryMemoryChild(t *testing.T) {
 	fmt.Printf("V2_RECOVERY_MAX_RSS_KIB=%d\n", usage.Maxrss)
 }
 
-func scaledObservationCommitV2(manifest contracts.PolicyLineageManifestV2, sequence uint64, priorHash string) contracts.PolicyCommitV2 {
-	evidence := contracts.EvidenceRefV1{RecordSchemaVersion: 2, SessionID: "session", Sequence: sequence, ReceiveTime: time.Unix(int64(sequence), 0).UTC(), Source: "gsi", ProviderVersion: contracts.Absent[int64](), RawPayloadSHA256: storedMatrixSHA(sequence)}
+func scaledObservationCommitV2(manifest contracts.PolicyLineageManifestV2, commitSequence, observationSequence uint64, priorHash string) contracts.PolicyCommitV2 {
+	evidence := contracts.EvidenceRefV1{RecordSchemaVersion: 2, SessionID: "session", Sequence: observationSequence, ReceiveTime: time.Unix(int64(observationSequence), 0).UTC(), Source: "gsi", ProviderVersion: contracts.Absent[int64](), RawPayloadSHA256: storedMatrixSHA(observationSequence)}
 	audits := make([]contracts.AuditEventV1, 10)
 	for i := range audits {
-		audits[i] = contracts.AuditEventV1{SchemaVersion: contracts.AuditEventSchemaV1, EventID: fmt.Sprintf("audit-%04d-%02d", sequence, i), SessionID: "session", EventType: "observation", PolicyTimeMS: int64(sequence), CandidateID: fmt.Sprintf("candidate-%04d-%02d", sequence, i), Reason: strings.Repeat("x", 8<<10)}
+		audits[i] = contracts.AuditEventV1{SchemaVersion: contracts.AuditEventSchemaV1, EventID: fmt.Sprintf("audit-%04d-%02d", observationSequence, i), SessionID: "session", EventType: "observation", PolicyTimeMS: int64(observationSequence + 10), CandidateID: fmt.Sprintf("candidate-%04d-%02d", observationSequence, i), Reason: strings.Repeat("x", 8<<10)}
 	}
 	return contracts.PolicyCommitV2{
-		SchemaVersion: contracts.PolicyCommitSchemaV2, LineageManifestID: manifest.MustContentID(), LineageManifestSHA256: manifest.MustContentID(), SessionID: "session", CommitSequence: sequence,
-		ObservationSequence: sequence, ObservationEvidence: &evidence, RawRecordSHA256: storedMatrixSHA(sequence + 1000), LiveObservationSHA256: storedMatrixSHA(sequence + 2000),
-		PriorStateHash: priorHash, ResultingStateHash: storedMatrixSHA(sequence + 3000), ResultingObservationSequence: sequence, ResultingPolicyTimeMS: int64(sequence),
+		SchemaVersion: contracts.PolicyCommitSchemaV2, LineageManifestID: manifest.MustContentID(), LineageManifestSHA256: manifest.MustContentID(), SessionID: "session", CommitSequence: commitSequence,
+		ObservationSequence: observationSequence, ObservationEvidence: &evidence, RawRecordSHA256: storedMatrixSHA(observationSequence + 1000), LiveObservationSHA256: storedMatrixSHA(observationSequence + 2000),
+		PriorPolicyRevision: 1, ResultingPolicyRevision: 1, PriorStateHash: priorHash, ResultingStateHash: storedMatrixSHA(observationSequence + 3000), ResultingObservationSequence: observationSequence, ResultingPolicyTimeMS: int64(observationSequence + 10),
 		Decisions: []contracts.BroadcastDecisionV1{}, AuditEvents: audits, Publication: contracts.PublicationSuppressedV2,
 	}
+}
+
+func firstV2StateHash(t *testing.T, manifest contracts.PolicyLineageManifestV2) string {
+	t.Helper()
+	first, _ := firstV2CommandAndCheckpoint(t, manifest)
+	return first.ResultingStateHash
 }

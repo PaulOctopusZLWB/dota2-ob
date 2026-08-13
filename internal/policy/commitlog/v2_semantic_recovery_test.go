@@ -71,9 +71,10 @@ func TestV2RecoveredAndUninterruptedSemanticMatrixCrossesProductionStorage(t *te
 	if err != nil {
 		t.Fatalf("production reopen: %v", err)
 	}
-	loaded, later, err := reopened.LoadCheckpoint()
-	if err != nil || loaded == nil || len(later) != 0 {
-		t.Fatalf("load production checkpoint loaded=%v later=%d err=%v", loaded != nil, len(later), err)
+	laterCount := 0
+	loaded, err := reopened.LoadCheckpoint(func(commitlog.CommittedV2) error { laterCount++; return nil })
+	if err != nil || loaded == nil || laterCount != 0 {
+		t.Fatalf("load production checkpoint loaded=%v later=%d err=%v", loaded != nil, laterCount, err)
 	}
 	wantCheckpoint, _ := contracts.MarshalCanonical(checkpoint)
 	gotCheckpoint, _ := contracts.MarshalCanonical(*loaded)
@@ -100,9 +101,10 @@ func TestV2RecoveredAndUninterruptedSemanticMatrixCrossesProductionStorage(t *te
 		t.Fatalf("final production reopen: %v", err)
 	}
 	defer finalStore.Close()
-	loaded, later, err = finalStore.LoadCheckpoint()
-	if err != nil || loaded == nil || len(later) != len(steps)-checkpointAfter {
-		t.Fatalf("checkpoint/later-frame recovery loaded=%v later=%d err=%v", loaded != nil, len(later), err)
+	laterCount = 0
+	loaded, err = finalStore.LoadCheckpoint(func(commitlog.CommittedV2) error { laterCount++; return nil })
+	if err != nil || loaded == nil || laterCount != len(steps)-checkpointAfter {
+		t.Fatalf("checkpoint/later-frame recovery loaded=%v later=%d err=%v", loaded != nil, laterCount, err)
 	}
 
 	if len(uninterruptedBytes) != len(recoveredBytes) {

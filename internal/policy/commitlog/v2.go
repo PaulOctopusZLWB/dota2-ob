@@ -461,44 +461,53 @@ func (s *StoreV2) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV2) error
 
 // LoadCheckpoint treats an unreadable/noncanonical/semantically corrupt cache
 // as absent, but a structurally present locator table that is missing,
-// duplicated, substituted, or frame-mismatched fails closed.
-func (s *StoreV2) LoadCheckpoint() (*contracts.PolicyCheckpointV2, []CommittedV2, error) {
+// duplicated, substituted, or frame-mismatched fails closed. Later frames are
+// delivered one at a time so a stale checkpoint cannot materialize its entire
+// continuation in memory.
+func (s *StoreV2) LoadCheckpoint(visit func(CommittedV2) error) (*contracts.PolicyCheckpointV2, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if visit == nil {
+		return nil, errors.New("v2 checkpoint continuation visitor required")
+	}
 	payload, err := os.ReadFile(filepath.Join(s.dir, "checkpoint.v2.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, nil
+		return nil, nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var checkpoint contracts.PolicyCheckpointV2
 	if contracts.DecodeStrict(payload, &checkpoint) != nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	canonical, err := contracts.MarshalCanonical(checkpoint)
 	if err != nil || !bytes.Equal(canonical, payload) {
-		return nil, nil, nil
+		return nil, nil
 	}
 	if !locatorShapeMatches(checkpoint) {
-		return nil, nil, ErrInvalidCheckpoint
+		return nil, ErrInvalidCheckpoint
 	}
 	commit, ok, scanErr := s.commitAt(checkpoint.CommitSequence)
 	if scanErr != nil {
-		return nil, nil, scanErr
+		return nil, scanErr
 	}
 	if !ok || checkpoint.ValidateAgainstCommit(commit.Commit, commit.Hash) != nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 	if err := s.validateCheckpointLocators(checkpoint); err != nil {
-		return nil, nil, ErrInvalidCheckpoint
+		return nil, ErrInvalidCheckpoint
 	}
-	later, err := s.collectCommitsAfter(checkpoint.CommitSequence)
-	if err != nil {
-		return nil, nil, err
+	if err := s.scanFrames(func(committed CommittedV2) error {
+		if committed.Commit.CommitSequence <= checkpoint.CommitSequence {
+			return nil
+		}
+		return visit(committed)
+	}); err != nil {
+		return nil, err
 	}
 	copyCheckpoint := cloneCheckpointV2(checkpoint)
-	return &copyCheckpoint, later, nil
+	return &copyCheckpoint, nil
 }
 
 func locatorShapeMatches(checkpoint contracts.PolicyCheckpointV2) bool {
@@ -888,17 +897,6 @@ func (s *StoreV2) scanFrames(visit func(CommittedV2) error) error {
 		}
 	}
 	return nil
-}
-
-func (s *StoreV2) collectCommitsAfter(sequence uint64) ([]CommittedV2, error) {
-	var commits []CommittedV2
-	err := s.scanFrames(func(committed CommittedV2) error {
-		if committed.Commit.CommitSequence > sequence {
-			commits = append(commits, committed)
-		}
-		return nil
-	})
-	return commits, err
 }
 
 func cloneCheckpointV2(checkpoint contracts.PolicyCheckpointV2) contracts.PolicyCheckpointV2 {
