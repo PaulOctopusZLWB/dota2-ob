@@ -140,10 +140,17 @@ func TestBatchRetriesUntilTerminal(t *testing.T) {
 	p := sc.buildPipeline(3, func(b StageBatch) error { saved = b; return nil })
 	var err error
 	for i := 0; i < 4; i++ {
-		err = nil
 		_, err = p.Run(manifest, saved)
+		var tf *TerminalFailures
+		if errors.As(err, &tf) {
+			break // terminal failure reached
+		}
+		var pending *ErrRetryablePending
+		if errors.As(err, &pending) {
+			continue
+		}
 		if err != nil {
-			break
+			t.Fatalf("unexpected error: %v", err)
 		}
 	}
 	if err == nil {
@@ -188,17 +195,51 @@ func TestBatchResumesMidStage(t *testing.T) {
 	sc := newStageCounts()
 	var saved StageBatch
 	p := sc.buildPipeline(1, func(b StageBatch) error { saved = b; return nil })
-	// Start from a state where m1 reached verification but not succeeded.
-	prior := StageBatch{Entries: map[string]StageEntry{"m1": {MatchID: "m1", Status: StageQueued, ReachedStage: StageAcquisition, ReplaySHA256: testSHA("m1")}}}
+	// Start from an identity-bound state where m1 reached acquire but not succeeded.
+	prior := NewStageBatch(manifest)
+	prior.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageQueued, ReachedStage: StageAcquisition, ReplaySHA256: testSHA("m1")}
 	if _, err := p.Run(manifest, prior); err != nil {
 		t.Fatalf("resume mid-stage: %v", err)
 	}
 	if saved.Entries["m1"].Status != StageSucceeded {
 		t.Fatalf("m1 should reach succeeded: %s", saved.Entries["m1"].Status)
 	}
-	// Acquire should not re-run since entry had not declared it reached acquire;
-	// but our driver re-runs from the start of the pipeline when not succeeded.
-	// That is acceptable; the key guarantee is no duplicate terminal facts and
-	// a succeeded terminal state.
+	// Acquire was already reached, so resume must NOT re-run it.
+	if sc.calls["acquire:m1"] != 0 {
+		t.Fatalf("resume re-ran already-reached acquire: %d", sc.calls["acquire:m1"])
+	}
 	_ = contracts.IdentityVerified
+}
+
+// TestBatchRejectsMismatchedManifestCheckpoint proves a checkpoint bound to
+// one discovery manifest cannot be applied to a different manifest (which
+// could skip or replay matching ids). The run must fail closed.
+func TestBatchRejectsMismatchedManifestCheckpoint(t *testing.T) {
+	manifestA := buildBatchManifest(t, "m1")
+	manifestB := buildBatchManifest(t, "m2")
+	sc := newStageCounts()
+	p := sc.buildPipeline(1, func(b StageBatch) error { return nil })
+	stale := NewStageBatch(manifestA)
+	stale.Entries["m1"] = StageEntry{MatchID: "m1", Status: StageSucceeded, ReachedStage: StageAggregate}
+	if _, err := p.Run(manifestB, stale); !errors.Is(err, ErrBatchManifestMismatch) {
+		t.Fatalf("expected ErrBatchManifestMismatch, got %v", err)
+	}
+}
+
+// TestBatchRetryablePendingIsNotSuccess proves a non-terminal failure below
+// MaxRetries surfaces ErrRetryablePending rather than nil, so a caller cannot
+// read a partially failed run as success.
+func TestBatchRetryablePendingIsNotSuccess(t *testing.T) {
+	manifest := buildBatchManifest(t, "m_flaky")
+	sc := newStageCounts()
+	sc.parseFail["m_flaky"] = true
+	p := sc.buildPipeline(3, func(b StageBatch) error { return nil })
+	_, err := p.Run(manifest, NewStageBatch(manifest))
+	if err == nil {
+		t.Fatalf("expected ErrRetryablePending, got nil")
+	}
+	var pending *ErrRetryablePending
+	if !errors.As(err, &pending) {
+		t.Fatalf("expected ErrRetryablePending, got %v", err)
+	}
 }

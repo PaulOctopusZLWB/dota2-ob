@@ -27,22 +27,43 @@ type ReadinessEvidence struct {
 // frozen scope's discovery policy and returns the evidence.
 //
 //   - full_history_go requires at least 100 replay-accessible verified
-//     replays, all 16 teams represented by at least five matches, and every
-//     enabled baseline cell meeting its rule's published minimum;
+//     replays, all 16 teams represented by at least five matches; per-cell
+//     baseline minima are enforced by Aggregate (cells below min publish as
+//     absent), so the gate additionally requires at least one accessible
+//     baseline family to be enabled;
 //   - restricted_history_go is an explicit reviewed scope revision when fewer
-//     than 100 replays or a team has fewer than five; historical rules are
-//     disabled per uncovered team/cell;
+//     than 100 replays or a team has fewer than five, BUT at least one team
+//     reaches the minimum so some baseline families can be enabled;
+//     historical rules are disabled per uncovered team/cell;
 //   - historical_no_go applies when no historical rule family can meet its
-//     published minimum.
+//     published minimum (no accessible replays, or no team reaches its
+//     minimum-match coverage).
 //
-// The gate cannot return a fourth state.
+// The gate validates the scope and that the manifest binds to it before
+// evaluating coverage. It cannot return a fourth state.
 func ReadinessGate(scope contracts.TournamentScopeV1, manifest DiscoveryManifestV1) ReadinessEvidence {
-	_ = scope.Validate()
 	e := ReadinessEvidence{
 		SchemaVersion:     ReadinessSchema,
 		TournamentScopeID: scope.ScopeID,
 		TeamMatchCount:    map[string]uint32{},
 		PerStateCounts:    map[string]uint32{},
+	}
+	// Validate scope and that the manifest binds to it; an invalid or unbound
+	// manifest cannot support any baseline family.
+	if err := scope.Validate(); err != nil {
+		e.Outcome = ReadinessHistoricalNoGo
+		e.RestrictedReason = "scope_invalid:" + err.Error()
+		return e
+	}
+	if err := manifest.Validate(); err != nil {
+		e.Outcome = ReadinessHistoricalNoGo
+		e.RestrictedReason = "manifest_invalid:" + err.Error()
+		return e
+	}
+	if manifest.TournamentScopeID != scope.ScopeID || manifest.TournamentScopeSHA != scope.ContentSHA256 || !manifest.CutoffTime.Equal(scope.HistoryCutoff) || manifest.Request.ContractVersion != scope.DiscoveryContractVersion {
+		e.Outcome = ReadinessHistoricalNoGo
+		e.RestrictedReason = "manifest_not_bound_to_scope"
+		return e
 	}
 	teamMatches := map[string]uint32{}
 	teams := map[string]bool{}
@@ -74,26 +95,35 @@ func ReadinessGate(scope contracts.TournamentScopeV1, manifest DiscoveryManifest
 	fullTarget := scope.Discovery.FullHistoryReplayTarget
 	minTeamMatches := scope.Discovery.MinimumTeamMatches
 
-	// Match every scope team to its accessible match count (0 when absent)
-	// so under-represented and absent teams are disabled per cell/family.
 	scopeTeams := map[string]bool{}
 	for _, t := range scope.Teams {
 		scopeTeams[t.TeamID] = true
 	}
 	teamBelowMin := []string{}
+	teamsMeetingMin := uint32(0)
 	for t := range scopeTeams {
 		if teamMatches[t] < minTeamMatches {
 			teamBelowMin = append(teamBelowMin, t)
+		} else {
+			teamsMeetingMin++
 		}
 	}
 	sort.Strings(teamBelowMin)
 	allTeamsCovered := len(teamBelowMin) == 0
+	noTeamMeetsMin := teamsMeetingMin == 0
 
 	switch {
-	case accessible >= fullTarget && allTeamsCovered:
+	case accessible >= fullTarget && allTeamsCovered && accessible > 0:
 		e.Outcome = ReadinessFullHistoryGo
-	case accessible == 0:
+	case accessible == 0 || noTeamMeetsMin:
+		// One accessible match (or none) where no team reaches its minimum
+		// cannot meet any baseline cell minimum -> no_go, not restricted.
 		e.Outcome = ReadinessHistoricalNoGo
+		if accessible == 0 {
+			e.RestrictedReason = "no_accessible_replays"
+		} else {
+			e.RestrictedReason = "no_team_meets_minimum_matches"
+		}
 	default:
 		e.Outcome = ReadinessRestrictedGo
 		if accessible < fullTarget {

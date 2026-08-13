@@ -21,6 +21,7 @@ func buildSnapshotInput(t *testing.T, nMatches int) (SnapshotInput, RosterManife
 		facts = append(facts, buildFacts(t, mid, base.Add(time.Duration(i)*time.Hour), "team-a", "team-b", i%2 == 0, roster))
 		m := makeMatch(mid, base.Add(time.Duration(i)*time.Hour), MatchReplayAccessible, "team-a", "team-b")
 		m.ReplaySHA256 = testSHA(mid)
+		m.GameBuild = facts[len(facts)-1].GameBuild
 		m.IdentityStatus = contracts.IdentityVerified
 		matches = append(matches, m)
 	}
@@ -29,16 +30,17 @@ func buildSnapshotInput(t *testing.T, nMatches int) (SnapshotInput, RosterManife
 		Facts: facts, Roster: roster, Windows: windows, Patch: PatchWindow{PatchID: "60", DotaPatch: "7.41"},
 		ActiveMatchID: "active", GeneratedAt: mustParseTime(t, "2026-08-11T12:00:00Z"),
 	}
-	cells, err := Aggregate(aggIn)
+	cellsUnused, err := Aggregate(aggIn)
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
+	_ = cellsUnused // baselines are recomputed inside BuildSnapshot from included facts
 	return SnapshotInput{
-		Scope: scope, Roster: roster, Discovery: dm, Facts: facts, Cells: cells,
+		Scope: scope, Roster: roster, Discovery: dm, Facts: facts, Windows: windows, Patch: PatchWindow{PatchID: "60", DotaPatch: "7.41"},
 		Binding: contracts.LiveSessionBindingV1{
 			SessionID: "sess-1", ActiveMatchID: "active",
-			SessionStartTime:      mustParseTime(t, "2026-08-11T23:00:00Z"),
-			TournamentScopeID:     scope.ScopeID, TournamentScopeSHA256: scope.ContentSHA256,
+			SessionStartTime:  mustParseTime(t, "2026-08-11T23:00:00Z"),
+			TournamentScopeID: scope.ScopeID, TournamentScopeSHA256: scope.ContentSHA256,
 		},
 		SealedAt:         mustParseTime(t, "2026-08-11T22:00:00Z"),
 		GeneratedAt:      mustParseTime(t, "2026-08-11T12:00:00Z"),
@@ -122,5 +124,63 @@ func TestSnapshotSealedAfterSessionStartRejected(t *testing.T) {
 	in.SealedAt = in.Binding.SessionStartTime.Add(time.Second)
 	if _, err := BuildSnapshot(in); err == nil {
 		t.Fatalf("expected snapshot sealed after session start to be rejected")
+	}
+}
+
+// TestSnapshotCorrelationMismatchExcludes proves a fact from the wrong replay
+// (mismatched SHA, time, patch, or teams) is quarantined out of the snapshot
+// rather than joined by MatchID alone.
+func TestSnapshotCorrelationMismatchExcludes(t *testing.T) {
+	in, _ := buildSnapshotInput(t, 6)
+	// Tamper the first fact's replay SHA so it no longer correlates with its
+	// discovery record; it must be excluded with a correlation reason.
+	in.Facts[0].ReplaySHA256 = sha256HexSeed("wrong-replay")
+	if err := SealNormalizedMatchFacts(&in.Facts[0]); err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	res, err := BuildSnapshot(in)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	excluded := false
+	for _, x := range res.Snapshot.ExcludedMatches {
+		if x.MatchID == in.Facts[0].MatchID && (x.Reason == "replay_identity_mismatch" || x.Reason == "identity_not_verified") {
+			excluded = true
+		}
+	}
+	if !excluded {
+		t.Fatalf("expected mismatched-replay fact excluded, got excluded=%v", res.Snapshot.ExcludedMatches)
+	}
+	for _, inc := range res.Snapshot.IncludedMatches {
+		if inc.MatchID == in.Facts[0].MatchID {
+			t.Fatalf("mismatched-replay fact must not be included")
+		}
+	}
+}
+
+func TestSnapshotGameBuildMismatchExcludes(t *testing.T) {
+	in, _ := buildSnapshotInput(t, 6)
+	in.Discovery.Matches[0].GameBuild++
+	if err := SealDiscoveryManifestV1(&in.Discovery); err != nil {
+		t.Fatalf("reseal discovery: %v", err)
+	}
+	res, err := BuildSnapshot(in)
+	if err != nil {
+		t.Fatalf("build snapshot: %v", err)
+	}
+	wantID := in.Facts[0].MatchID
+	for _, inc := range res.Snapshot.IncludedMatches {
+		if inc.MatchID == wantID {
+			t.Fatalf("game-build-mismatched fact must not be included")
+		}
+	}
+	found := false
+	for _, x := range res.Snapshot.ExcludedMatches {
+		if x.MatchID == wantID && x.Reason == "game_build_mismatch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected game_build_mismatch exclusion, got %v", res.Snapshot.ExcludedMatches)
 	}
 }

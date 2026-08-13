@@ -152,6 +152,21 @@ func (m RosterManifestV1) ValidateAgainstScope(scope contracts.TournamentScopeV1
 			return errors.New("roster team not present in scope")
 		}
 	}
+	// Every roster player must bind to a scope participant by person, team,
+	// role, and effective window. A roster player with no matching scope
+	// participant is uncorroborated identity and must not bind to the scope.
+	for _, p := range m.Players {
+		found := false
+		for _, sp := range scope.Participants {
+			if sp.PersonID == p.PersonID && sp.TeamID == p.TeamID && sp.Role == p.Role && sp.EffectiveFrom.Equal(p.EffectiveFrom) && sp.EffectiveUntil.Equal(p.EffectiveUntil) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("roster player not present in scope")
+		}
+	}
 	return nil
 }
 

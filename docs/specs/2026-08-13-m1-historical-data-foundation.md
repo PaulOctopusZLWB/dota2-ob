@@ -2,7 +2,7 @@
 
 Date: 2026-08-13
 
-Status: M1 implementation (proposed for independent review and G胖 acceptance)
+Status: M1 code-foundation successor (proposed for independent re-review; real-data gate pending)
 
 Issue: DOT-22
 
@@ -63,9 +63,10 @@ is recorded in `internal/architecture/dependencies_test.go`.
 - `internal/replay/normalize.go` — adapter mapping `ReplayFactsV1` + public
   metadata + optional participant mapping to `NormalizedMatchFacts`; identity
   is quarantined unless a full 10-hero mapping binds every parsed hero.
-- `cmd/history/main.go` — composition root: deterministic representative
-  `corpus` and `report` subcommands; wires atomic local state to the pure
-  seams; no network, no credentials, no replay download.
+- `cmd/history/main.go` — explicitly synthetic fixture harness: deterministic
+  `corpus` and `report` subcommands wire atomic local state to the pure seams;
+  no network, credentials, or replay download. This command is reproducibility
+  evidence for the code paths only, never tournament-readiness evidence.
 
 ## Determinism, Resume, And Identity Quarantine
 
@@ -75,8 +76,9 @@ network, no replay bytes). Running `go build -o ./history ./cmd/history &&
 identities:
 
 ```
-discovery_manifest_id = 06705fc5f9b7a14647ec60242cd5e8631d4e6682b37a803c78858c3e1076d0f8
-snapshot_manifest_id  = 2a7e26e7dae7a45fbf5654eb566c98f6a033fb446792f5bdadf04eb2ff5bcc4e
+discovery_manifest_id = fbba0a07b8f27cceb213e6a91094aceba7f1b63c0c60c027c7df613bab8e5198
+snapshot_manifest_id  = ada88309bd6ccfb818d44c6409c18a9a932409a73a7ce38d76bf91b884310e06
+batch_state_sha256    = 144102e29e66d1b67ff8e01bd0cf6c06e124f7cb2415a49239e9a10bd0a9a288
 ```
 
 The second batch pass (resume) re-runs zero stages — every succeeded entry is
@@ -89,17 +91,19 @@ matches are excluded from the sealed snapshot; expired matches reach a
 ## Readiness Outcome (representative corpus)
 
 The representative corpus is deliberately below the 100-replay / 16-team ×
-5-match full-history gate, so the gate returns `restricted_history_go` and
-records the disabled families honestly rather than fabricating coverage:
+5-match full-history gate. The six-match report returns `historical_no_go`
+because no team reaches the minimum; this is fixture behavior, not a request
+to accept a restricted tournament-history scope:
 
 ```
-outcome                = restricted_history_go
+outcome                = historical_no_go
 replay_accessible_total= 6
 full_history_target    = 100
 minimum_team_matches   = 5
+replay_quarantined     = 2
+replay_expired         = 1
 ```
 
-This is the spec-defined restricted-history path, not a silent weakening.
 Reaching full-history would require a real bounded discovery + acquisition
 run against the corroborated TI 2026 roster (an upstream M1 input) and at
 least 100 replay-accessible professional replays. That run is a field test
@@ -140,9 +144,10 @@ go build -o ./history ./cmd/history && ./history corpus --data-dir ./data-m1-run
                                                 ./history corpus --data-dir ./data-m1-run-b
 ```
 
-Measured results: all pass. Representative corpus resource measurements on
-PaulPC4090 for the default 12-match corpus: elapsed ~15.8s, user CPU ~16.2s,
-system CPU ~0.8s, peak heap 8 MiB.
+Measured results: all pass. Two clean-root default 12-match fixture runs took
+17.614s / 17.855s elapsed, 18.739s / 18.812s user CPU, 1.398s / 1.365s system
+CPU, and 6 / 7 MiB peak heap. Each root contained one 3,955-byte checkpoint;
+all three deterministic identities above matched across runs.
 
 ## Residual Risks And Non-Goals
 

@@ -32,10 +32,38 @@ type StageEntry struct {
 	TerminalReason string     `json:"terminal_reason,omitempty"`
 }
 
-// StageBatch is the complete resumable state for a discovery manifest run.
+// StageBatch is the complete resumable state for one discovery manifest run.
+// It binds to the schema version AND the discovery manifest's content identity
+// so a checkpoint written for one manifest can never be silently applied to a
+// different manifest (which could skip or replay matching ids).
 type StageBatch struct {
-	Entries map[string]StageEntry `json:"entries"`
+	SchemaVersion string             `json:"schema_version"`
+	ManifestID    string             `json:"manifest_id"`
+	Entries       map[string]StageEntry `json:"entries"`
 }
+
+// NewStageBatch builds a fresh, identity-bound batch for a discovery manifest.
+func NewStageBatch(manifest DiscoveryManifestV1) StageBatch {
+	return StageBatch{
+		SchemaVersion: StageSchema,
+		ManifestID:    manifest.ContentSHA256,
+		Entries:       map[string]StageEntry{},
+	}
+}
+
+// ErrRetryablePending is returned by Run when retryable work remains queued
+// (an entry failed non-terminally below MaxRetries). A caller must NOT read
+// this as a successful run: work remains and the batch must be resumed.
+type ErrRetryablePending struct{ IDs []string }
+
+func (e *ErrRetryablePending) Error() string {
+	return "history: retryable work pending for " + lenStr(len(e.IDs)) + " entry(ies): " + joinIDs(e.IDs)
+}
+func (e *ErrRetryablePending) Unwrap() error { return nil }
+
+// ErrBatchManifestMismatch is returned when a prior batch does not bind to the
+// discovery manifest being run (wrong schema or manifest id).
+var ErrBatchManifestMismatch = errors.New("history: batch checkpoint does not bind to this discovery manifest")
 
 // StageFunc is the seam for one stage. It receives the current entry and the
 // adapter-provided match context, and returns an updated entry plus a terminal
@@ -80,8 +108,13 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 	if err := manifest.Validate(); err != nil {
 		return prior, err
 	}
-	if prior.Entries == nil {
-		prior.Entries = map[string]StageEntry{}
+	// Bind the batch to this manifest. A fresh (empty, unbound) batch is
+	// initialized; a non-empty batch must already bind to this manifest or the
+	// run fails closed rather than replaying/skipping work for the wrong run.
+	if prior.SchemaVersion == "" && len(prior.Entries) == 0 {
+		prior = NewStageBatch(manifest)
+	} else if prior.SchemaVersion != StageSchema || prior.ManifestID != manifest.ContentSHA256 || prior.Entries == nil {
+		return prior, ErrBatchManifestMismatch
 	}
 	if p.MaxRetries < 1 {
 		p.MaxRetries = 1
@@ -92,11 +125,21 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		}
 		return p.Save(b)
 	}
+	stageIndex := func(name string) int {
+		for i, s := range p.StageOrder {
+			if s == name {
+				return i
+			}
+		}
+		return -1
+	}
 	var terminal []string
+	var retryable []string
 	for _, m := range manifest.Matches {
 		entry, exists := prior.Entries[m.MatchID]
 		if !exists {
 			entry = StageEntry{MatchID: m.MatchID, Status: StageQueued, ReachedStage: StageDiscovery}
+			prior.Entries[m.MatchID] = entry
 		}
 		if entry.Status == StageSucceeded {
 			continue
@@ -104,6 +147,12 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		if entry.Status == StageFailedTerminal {
 			terminal = append(terminal, m.MatchID)
 			continue
+		}
+		// Resume from the furthest stage reached: skip stages already
+		// completed so a crash mid-pipeline never replays side effects.
+		startAt := 0
+		if idx := stageIndex(entry.ReachedStage); idx >= 0 {
+			startAt = idx + 1
 		}
 		ctx := MatchContext{Discovery: m}
 		entry.Status = StageRunning
@@ -113,7 +162,8 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 		}
 
 		failed := false
-		for _, stageName := range p.StageOrder {
+		for i := startAt; i < len(p.StageOrder); i++ {
+			stageName := p.StageOrder[i]
 			stageFn, ok := p.Stages[stageName]
 			if !ok {
 				return prior, errors.New("batch: missing stage " + stageName)
@@ -156,11 +206,21 @@ func (p *StagePipeline) Run(manifest DiscoveryManifestV1, prior StageBatch) (Sta
 			}
 		} else if entry.Status == StageFailedTerminal {
 			terminal = append(terminal, m.MatchID)
+		} else {
+			// Non-terminal failure: work remains queued. This must not be read
+			// as a successful run.
+			retryable = append(retryable, m.MatchID)
 		}
 	}
+	// Terminal failures take precedence: a partially failed run is never
+	// reported as success.
 	if len(terminal) > 0 {
 		sort.Strings(terminal)
 		return prior, &TerminalFailures{IDs: terminal}
+	}
+	if len(retryable) > 0 {
+		sort.Strings(retryable)
+		return prior, &ErrRetryablePending{IDs: retryable}
 	}
 	return prior, nil
 }

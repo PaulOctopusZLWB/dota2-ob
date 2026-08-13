@@ -4,7 +4,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestMeasureRunJoinsSampler(t *testing.T) {
+	res := measureRun(func() (*corpusResult, error) {
+		time.Sleep(60 * time.Millisecond)
+		return &corpusResult{}, nil
+	})
+	if res.err != nil {
+		t.Fatalf("measure: %v", res.err)
+	}
+}
 
 func TestCorpusDeterministicAndIdempotent(t *testing.T) {
 	dir1 := filepath.Join(t.TempDir(), "d1")
@@ -50,5 +61,30 @@ func TestCorpusReportRestrictedOutcome(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")
 	if err := runReport([]string{"--data-dir", dir}); err != nil {
 		t.Fatalf("report: %v", err)
+	}
+}
+
+// TestLoadBatchFailsOnMissing proves a missing checkpoint is a hard error, not
+// silently empty — a crash before the first checkpoint write must not be read
+// as an empty (fresh) batch.
+func TestLoadBatchFailsOnMissing(t *testing.T) {
+	if _, err := loadBatch(filepath.Join(t.TempDir(), "nope", "state.json")); err == nil {
+		t.Fatalf("expected error loading missing checkpoint")
+	}
+}
+
+// TestLoadBatchFailsOnCorrupt proves a corrupt/truncated checkpoint is a hard
+// error, never silently empty.
+func TestLoadBatchFailsOnCorrupt(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(p, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadBatch(p); err == nil {
+		t.Fatalf("expected error loading corrupt checkpoint")
 	}
 }

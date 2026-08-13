@@ -119,3 +119,16 @@ func TestRosterManifestRejectsTooFewPlayers(t *testing.T) {
 		t.Fatalf("expected seal to reject roster with a team below five players")
 	}
 }
+
+// TestRosterManifestRejectsPlayerNotInScope proves ValidateAgainstScope binds
+// every roster player to a scope participant, not just teams — an
+// uncorroborated player is not accepted tournament identity.
+func TestRosterManifestRejectsPlayerNotInScope(t *testing.T) {
+	scope := buildScope(t)
+	roster := buildRoster(t, scope)
+	// Tamper one player's TeamID so it no longer matches any scope participant.
+	roster.Players[0].TeamID = "team-zzz"
+	if err := roster.ValidateAgainstScope(scope); err == nil {
+		t.Fatalf("expected scope binding to reject a player absent from the scope")
+	}
+}

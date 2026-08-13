@@ -3,6 +3,7 @@ package history
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ func makeMatch(id string, eventTime time.Time, state string, radiant, dire strin
 	return DiscoveryMatch{
 		MatchID: id, SourceEventTime: eventTime, PatchID: "60",
 		RadiantTeamID: radiant, DireTeamID: dire, State: state,
-		Providers: []string{ProviderOpenDota}, PlayerPersonIDs: []string{"p1", "p2"},
+		Providers: []string{ProviderOpenDota},
 	}
 }
 
@@ -32,6 +33,17 @@ func buildDiscovery(t *testing.T, scope contracts.TournamentScopeV1, roster Rost
 	for i := range matches {
 		switch matches[i].State {
 		case MatchReplayAccessible:
+			if matches[i].GameBuild == 0 {
+				matches[i].GameBuild = 6896
+			}
+			if len(matches[i].PlayerPersonIDs) == 0 {
+				for _, p := range roster.Players {
+					if p.Role == "player" && (p.TeamID == matches[i].RadiantTeamID || p.TeamID == matches[i].DireTeamID) {
+						matches[i].PlayerPersonIDs = append(matches[i].PlayerPersonIDs, p.PersonID)
+					}
+				}
+				sort.Strings(matches[i].PlayerPersonIDs)
+			}
 			if matches[i].ReplaySHA256 == "" {
 				matches[i].ReplaySHA256 = testSHA(matches[i].MatchID)
 			}
@@ -56,7 +68,7 @@ func buildDiscovery(t *testing.T, scope contracts.TournamentScopeV1, roster Rost
 			Providers:       []string{ProviderOpenDota, ProviderSteam},
 			Endpoint:        "https://api.opendota.com/api/explorer",
 			Query:           map[string]string{"q": "pro"},
-			PageLimit:      100,
+			PageLimit:       100,
 			CutoffTime:      scope.HistoryCutoff,
 			RetrievedAt:     scope.SampledAt,
 			PageSHA256:      []string{"abc123"},

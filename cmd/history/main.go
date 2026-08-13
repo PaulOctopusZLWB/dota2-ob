@@ -87,20 +87,21 @@ func runCorpus(args []string) error {
 }
 
 type corpusResult struct {
-	err            error
-	discoveryID    string
-	snapshotID     string
-	baselineCount  int
-	includedCount  int
-	excludedCount  int
-	quarantined    int
-	stageCalls     map[string]int
-	resumeCalls    map[string]int
-	elapsed        time.Duration
-	userCPU        float64
-	sysCPU         float64
-	peakHeapMiB    uint64
-	statePath      string
+	err           error
+	discoveryID   string
+	discovery     history.DiscoveryManifestV1
+	snapshotID    string
+	baselineCount int
+	includedCount int
+	excludedCount int
+	quarantined   int
+	stageCalls    map[string]int
+	resumeCalls   map[string]int
+	elapsed       time.Duration
+	userCPU       float64
+	sysCPU        float64
+	peakHeapMiB   uint64
+	statePath     string
 }
 
 func printCorpus(r *corpusResult) {
@@ -127,7 +128,9 @@ func measureRun(f func() (*corpusResult, error)) *corpusResult {
 	t0 := time.Now()
 	var peak uint64
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		t := time.NewTicker(25 * time.Millisecond)
 		defer t.Stop()
 		var s runtime.MemStats
@@ -145,6 +148,7 @@ func measureRun(f func() (*corpusResult, error)) *corpusResult {
 	}()
 	r, err := f()
 	close(done)
+	<-stopped
 	elapsed := time.Since(t0)
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
 	if r == nil {
@@ -200,10 +204,11 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		f := buildVerifiedFacts(idx, mid, base.Add(time.Duration(i)*time.Hour), radiant, dire, teams, heroes, i%2 == 0)
 		facts = append(facts, f)
 		discoveryMatches = append(discoveryMatches, history.DiscoveryMatch{
-			MatchID: mid, SourceEventTime: f.SourceEventTime, PatchID: "60",
+			MatchID: mid, SourceEventTime: f.SourceEventTime, PatchID: "60", GameBuild: f.GameBuild,
 			RadiantTeamID: radiant, DireTeamID: dire, State: history.MatchReplayAccessible,
 			ReplaySHA256: f.ReplaySHA256, IdentityStatus: contracts.IdentityVerified,
-			Providers: []string{history.ProviderOpenDota, history.ProviderSteam},
+			PlayerPersonIDs: participantIDs(f.Participants),
+			Providers:       []string{history.ProviderOpenDota, history.ProviderSteam},
 		})
 		idx++
 	}
@@ -217,7 +222,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 			MatchID: mid, SourceEventTime: f.SourceEventTime, PatchID: "60",
 			RadiantTeamID: "team-e", DireTeamID: "team-f", State: history.MatchReplayQuarantined,
 			IdentityStatus: contracts.IdentityQuarantined,
-			Providers: []string{history.ProviderOpenDota},
+			Providers:      []string{history.ProviderOpenDota},
 		})
 		quarantinedCount++
 		idx++
@@ -243,7 +248,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 			PageLimit: 100, CutoffTime: scope.HistoryCutoff, RetrievedAt: scope.SampledAt,
 			PageSHA256: []string{"page-hash-fixed"},
 		},
-		Matches:  history.DedupeAndSortMatches(discoveryMatches),
+		Matches: history.DedupeAndSortMatches(discoveryMatches),
 	}
 	dm.Coverage = history.SummarizeCoverage(dm.Matches)
 	if err := history.SealDiscoveryManifestV1(&dm); err != nil {
@@ -265,7 +270,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 	pipeline := &history.StagePipeline{
 		Stages:     mu.stages,
 		StageOrder: mu.order,
-		MaxRetries:  3,
+		MaxRetries: 3,
 		Save: func(b history.StageBatch) error {
 			return saveBatch(statePath, b)
 		},
@@ -277,7 +282,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 			expectedTerminal[m.MatchID] = true
 		}
 	}
-	if _, err := pipeline.Run(dm, history.StageBatch{Entries: map[string]history.StageEntry{}}); err != nil {
+	if _, err := pipeline.Run(dm, history.NewStageBatch(dm)); err != nil {
 		// Quarantined matches legitimately reach terminal dead-letter in the
 		// stage pipeline (identity not correlated). That is an expected, not a
 		// fatal, outcome: the snapshot excludes them. Any OTHER terminal entry
@@ -297,20 +302,16 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 		stageCalls[k] = v
 	}
 
-	// Aggregate + seal snapshot.
-	cells, err := history.Aggregate(history.AggregateInput{
-		Facts: facts, Roster: roster, Windows: windows, Patch: history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
-		ActiveMatchID: "active", GeneratedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("aggregate: %w", err)
-	}
+	// Snapshot: baselines are recomputed from the included facts inside
+	// BuildSnapshot, so the snapshot provably derives from the sealed input
+	// manifest rather than caller-supplied cells.
 	snap, err := history.BuildSnapshot(history.SnapshotInput{
-		Scope: scope, Roster: roster, Discovery: dm, Facts: facts, Cells: cells,
+		Scope: scope, Roster: roster, Discovery: dm, Facts: facts,
+		Windows: windows, Patch: history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
 		Binding: contracts.LiveSessionBindingV1{
 			SessionID: "sess-corpus", ActiveMatchID: "active",
-			SessionStartTime:      time.Date(2026, 8, 11, 23, 0, 0, 0, time.UTC),
-			TournamentScopeID:     scope.ScopeID, TournamentScopeSHA256: scope.ContentSHA256,
+			SessionStartTime:  time.Date(2026, 8, 11, 23, 0, 0, 0, time.UTC),
+			TournamentScopeID: scope.ScopeID, TournamentScopeSHA256: scope.ContentSHA256,
 		},
 		SealedAt:         time.Date(2026, 8, 11, 22, 0, 0, 0, time.UTC),
 		GeneratedAt:      time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
@@ -322,8 +323,13 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 	}
 
 	// Idempotent resume: re-run the batch over the persisted state; no stage
-	// should re-execute and no fact should be duplicated.
-	if _, err := pipeline.Run(dm, mustLoadBatch(statePath)); err != nil {
+	// should re-execute and no fact should be duplicated. A missing, corrupt, or
+	// manifest-mismatched checkpoint is a hard error, never silently empty.
+	prior, err := loadBatch(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("batch resume load: %w", err)
+	}
+	if _, err := pipeline.Run(dm, prior); err != nil {
 		var tf *history.TerminalFailures
 		if !errorsAs(err, &tf) {
 			return nil, fmt.Errorf("batch resume: %w", err)
@@ -341,6 +347,7 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 
 	return &corpusResult{
 		discoveryID:   dm.ContentSHA256,
+		discovery:     dm,
 		snapshotID:    snap.Snapshot.ContentSHA256,
 		baselineCount: len(snap.Baselines),
 		includedCount: len(snap.Snapshot.IncludedMatches),
@@ -356,9 +363,9 @@ func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*c
 // stamp content identities on each entry. They prove the pipeline advances
 // every accessible match to succeeded and skips terminal entries on resume.
 func noopStages(facts []history.NormalizedMatchFacts) struct {
-	stages      map[string]history.StageFunc
-	order       []string
-	calls       map[string]int
+	stages map[string]history.StageFunc
+	order  []string
+	calls  map[string]int
 } {
 	factsByID := map[string]history.NormalizedMatchFacts{}
 	for _, f := range facts {
@@ -374,9 +381,9 @@ func noopStages(facts []history.NormalizedMatchFacts) struct {
 		}
 	}
 	return struct {
-		stages      map[string]history.StageFunc
-		order       []string
-		calls       map[string]int
+		stages map[string]history.StageFunc
+		order  []string
+		calls  map[string]int
 	}{
 		stages: map[string]history.StageFunc{
 			history.StageAcquisition: mk(history.StageAcquisition, func(e history.StageEntry, ctx history.MatchContext, f history.NormalizedMatchFacts) (history.StageEntry, *history.StageFailure) {
@@ -421,19 +428,19 @@ func saveBatch(path string, b history.StageBatch) error {
 	return atomicfile.WriteFile(path, append(enc, '\n'), 0o644)
 }
 
-func mustLoadBatch(path string) history.StageBatch {
+func loadBatch(path string) (history.StageBatch, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return history.StageBatch{Entries: map[string]history.StageEntry{}}
+		return history.StageBatch{}, fmt.Errorf("checkpoint missing: %w", err)
 	}
 	var out history.StageBatch
 	if err := contracts.DecodeStrict(b, &out); err != nil {
-		return history.StageBatch{Entries: map[string]history.StageEntry{}}
+		return history.StageBatch{}, fmt.Errorf("checkpoint corrupt/truncated: %w", err)
 	}
 	if out.Entries == nil {
 		out.Entries = map[string]history.StageEntry{}
 	}
-	return out
+	return out, nil
 }
 
 // runReport emits the readiness/no-go evidence for the representative corpus
@@ -449,21 +456,19 @@ func runReport(args []string) error {
 	}
 	cutoff, _ := time.Parse(time.RFC3339, "2026-08-12T00:00:00Z")
 	scope := buildScopeFixture(cutoff)
-	roster := buildRosterFixture(scope)
 
-	// Build a corpus mirroring `corpus` defaults and evaluate the readiness
-	// gate against it. Uses the same deterministic match construction.
+	// Run the SAME deterministic corpus the `corpus` subcommand runs, then
+	// evaluate the readiness gate against the sealed manifest it produced, so
+	// the report's accessible total, per-state coverage, and gate outcome are
+	// internally consistent (one coherent manifest).
 	res, err := buildAndRunCorpus(6, 2, 1, *dataDir)
 	if err != nil {
 		return err
 	}
-	// Rebuild the discovery manifest for the gate (cheaper to reconstruct
-	// coverage from the same builder than to thread it back).
-	dm := buildGateCorpusManifest(scope, roster)
-	evidence := history.ReadinessGate(scope, dm)
+	evidence := history.ReadinessGate(scope, res.discovery)
 
 	var b strings.Builder
-	fmt.Fprintln(&b, "=== M1 readiness evidence ===")
+	fmt.Fprintln(&b, "=== M1 deterministic fixture-corpus gate (NOT real tournament readiness evidence) ===")
 	fmt.Fprintf(&b, "outcome                = %s\n", evidence.Outcome)
 	fmt.Fprintf(&b, "replay_accessible_total= %d\n", evidence.ReplayAccessibleTotal)
 	fmt.Fprintf(&b, "full_history_target    = %d\n", scope.Discovery.FullHistoryReplayTarget)
@@ -494,65 +499,30 @@ func runReport(args []string) error {
 	return nil
 }
 
-func buildGateCorpusManifest(scope contracts.TournamentScopeV1, roster history.RosterManifestV1) history.DiscoveryManifestV1 {
-	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	teams := scopeTeams(scope)
-	radiant := []string{"team-a", "team-b", "team-c", "team-d"}
-	dire := []string{"team-b", "team-c", "team-d", "team-a"}
-	var matches []history.DiscoveryMatch
-	for i := 0; i < 12; i++ {
-		mid := fmt.Sprintf("8941000%03d", i)
-		matches = append(matches, history.DiscoveryMatch{
-			MatchID: mid, SourceEventTime: base.Add(time.Duration(i) * time.Hour), PatchID: "60",
-			RadiantTeamID: radiant[i%len(radiant)], DireTeamID: dire[i%len(dire)],
-			State: history.MatchReplayAccessible, ReplaySHA256: sha256Hex(fmt.Sprintf("%s", mid)),
-			IdentityStatus: contracts.IdentityVerified, Providers: []string{history.ProviderOpenDota, history.ProviderSteam},
-		})
-	}
-	for i := 0; i < 2; i++ {
-		mid := fmt.Sprintf("8941000%03d", 12+i)
-		matches = append(matches, history.DiscoveryMatch{
-			MatchID: mid, SourceEventTime: base.Add(time.Duration(12+i) * time.Hour), PatchID: "60",
-			RadiantTeamID: "team-e", DireTeamID: "team-f", State: history.MatchReplayQuarantined,
-			IdentityStatus: contracts.IdentityQuarantined, Providers: []string{history.ProviderOpenDota},
-		})
-	}
-	matches = append(matches, history.DiscoveryMatch{
-		MatchID: "8941000013", SourceEventTime: base.Add(13 * time.Hour), PatchID: "60",
-		RadiantTeamID: "team-g", DireTeamID: "team-h", State: history.MatchReplayExpired,
-		Providers: []string{history.ProviderOpenDota},
-	})
-	matches = history.DedupeAndSortMatches(matches)
-	dm := history.DiscoveryManifestV1{
-		SchemaVersion: history.DiscoverySchema, TournamentScopeID: scope.ScopeID,
-		TournamentScopeSHA: scope.ContentSHA256, RosterManifestID: roster.ManifestID,
-		CutoffTime: scope.HistoryCutoff,
-		Request: history.DiscoveryRequest{
-			ContractVersion: history.DiscoveryContractVersion,
-			Providers:       []string{history.ProviderOpenDota, history.ProviderSteam},
-			Endpoint:        "https://api.opendota.com/api/explorer", Query: map[string]string{"q": "pro"},
-			PageLimit: 100, CutoffTime: scope.HistoryCutoff, RetrievedAt: scope.SampledAt, PageSHA256: []string{"page-hash-fixed"},
-		},
-		Matches:  matches,
-	}
-	dm.Coverage = history.SummarizeCoverage(matches)
-	_ = history.SealDiscoveryManifestV1(&dm)
-	_ = teams
-	return dm
-}
-
 func sha256Hex(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
 }
 
-// buildScopeFixture constructs a sealed 16-team TI-2026 TournamentScopeV1 with
-// the frozen cutoff, patch, and discovery policy for the representative
-// corpus. It is a deterministic fixture, not the real roster: real roster
-// provenance is an upstream M1 input (roster manifest) that binds to this
-// scope. Handles/aliases here are neutral placeholders so no personal data is
-// committed.
+func participantIDs(in []history.ParticipantFacts) []string {
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		out = append(out, p.PersonID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// buildScopeFixture constructs a sealed 16-team TI-2026-shaped TournamentScopeV1
+// for the DETERMINISTIC FIXTURE corpus only. It is NOT the accepted real TI
+// scope: handles/aliases are neutral placeholders (team-a, person-a0, ...) and
+// the source URL is a fixture URL, never the real tournament site, so invented
+// identity is never attributed to real tournament evidence. Real roster
+// provenance is an upstream M1 input (a roster manifest) that binds to the
+// accepted scope. Handles/aliases here are neutral placeholders so no personal
+// data is committed.
 func buildScopeFixture(cutoff time.Time) contracts.TournamentScopeV1 {
+	const fixtureSource = "https://dota2-ob.fixture/deterministic-corpus/scope"
 	effFrom := cutoff.AddDate(0, 0, -180)
 	effUntil := cutoff.Add(time.Hour)
 	teamIDs := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p"}
@@ -571,7 +541,7 @@ func buildScopeFixture(cutoff time.Time) contracts.TournamentScopeV1 {
 	}
 	scope := contracts.TournamentScopeV1{
 		SchemaVersion:            contracts.TournamentScopeSchemaV1,
-		Edition:                  "ti-2026",
+		Edition:                  "ti-2026-fixture",
 		SampledAt:                cutoff,
 		HistoryCutoff:            cutoff,
 		DiscoveryContractVersion: history.DiscoveryContractVersion,
@@ -579,7 +549,7 @@ func buildScopeFixture(cutoff time.Time) contracts.TournamentScopeV1 {
 		DotaPatch:                "7.41",
 		Teams:                    teams,
 		Participants:             participants,
-		Sources:                  []contracts.PublicSourceV1{{URL: "https://www.dota2.com.cn/international/2026", RetrievedAt: cutoff}},
+		Sources:                  []contracts.PublicSourceV1{{URL: fixtureSource, RetrievedAt: cutoff}},
 		Discovery: contracts.DiscoveryPolicyV1{
 			ContractVersion:         history.DiscoveryContractVersion,
 			Providers:               []string{history.ProviderOpenDota, history.ProviderSteam},
@@ -596,24 +566,28 @@ func buildScopeFixture(cutoff time.Time) contracts.TournamentScopeV1 {
 }
 
 func buildRosterFixture(scope contracts.TournamentScopeV1) history.RosterManifestV1 {
+	const fixtureSource = "https://dota2-ob.fixture/deterministic-corpus/roster"
 	roster := history.RosterManifestV1{
-		SchemaVersion: history.RosterSchema, TournamentScopeID: scope.ScopeID,
-		TournamentScopeSHA: scope.ContentSHA256, Edition: scope.Edition,
-		SampledAt: scope.SampledAt, EffectiveCutoff: scope.HistoryCutoff,
-		Sources: []history.ProvenanceRef{{URL: "https://www.dota2.com.cn/international/2026", RetrievedAt: scope.SampledAt}},
+		SchemaVersion:      history.RosterSchema,
+		TournamentScopeID:  scope.ScopeID,
+		TournamentScopeSHA: scope.ContentSHA256,
+		Edition:            scope.Edition,
+		SampledAt:          scope.SampledAt,
+		EffectiveCutoff:    scope.HistoryCutoff,
+		Sources:            []history.ProvenanceRef{{URL: fixtureSource, RetrievedAt: scope.SampledAt}},
 	}
 	for _, t := range scope.Teams {
 		roster.Teams = append(roster.Teams, history.RosterTeam{
 			TeamID: t.TeamID, RosterID: t.RosterID, Handle: "Team " + t.TeamID,
 			Aliases: []string{"T" + t.TeamID}, EffectiveFrom: t.EffectiveFrom, EffectiveUntil: t.EffectiveUntil,
-			Provenance: []history.ProvenanceRef{{URL: "https://www.dota2.com.cn/international/2026", RetrievedAt: scope.SampledAt}},
+			Provenance: []history.ProvenanceRef{{URL: fixtureSource, RetrievedAt: scope.SampledAt}},
 		})
 	}
 	for _, p := range scope.Participants {
 		roster.Players = append(roster.Players, history.RosterPlayer{
 			PersonID: p.PersonID, TeamID: p.TeamID, Handle: p.Handle, Aliases: []string{p.Handle + "-alt"},
 			Role: p.Role, EffectiveFrom: p.EffectiveFrom, EffectiveUntil: p.EffectiveUntil,
-			Provenance: []history.ProvenanceRef{{URL: "https://www.dota2.com.cn/international/2026", RetrievedAt: scope.SampledAt}},
+			Provenance: []history.ProvenanceRef{{URL: fixtureSource, RetrievedAt: scope.SampledAt}},
 		})
 	}
 	if err := history.SealRosterManifestV1(&roster); err != nil {
@@ -685,8 +659,8 @@ func buildQuarantinedFacts(idx int, matchID string, eventTime time.Time, radiant
 		RadiantTeamID: radiant, DireTeamID: dire,
 		Participants: nil, IdentityStatus: contracts.IdentityQuarantined,
 		Availability: history.FactsAvailability{
-			Available: []string{"match_header", "game_build"},
-			Deferred:  []string{history.MetricKills, history.MetricDeaths, history.MetricAssists, history.MetricGPM, history.MetricXPM, history.MetricKillParticipation, history.MetricFarmCheckpoint, history.MetricKeyItemTiming},
+			Available:   []string{"match_header", "game_build"},
+			Deferred:    []string{history.MetricKills, history.MetricDeaths, history.MetricAssists, history.MetricGPM, history.MetricXPM, history.MetricKillParticipation, history.MetricFarmCheckpoint, history.MetricKeyItemTiming},
 			Unavailable: []string{"replay_salt_or_gc_credentials", "hidden_fog_of_war_state", "identity_not_correlated"},
 		},
 	}

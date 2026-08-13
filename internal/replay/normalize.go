@@ -14,11 +14,11 @@ import (
 // verified without fabricating identity. When no mapping is supplied for a
 // parsed hero, that participant stays unbound and the match is quarantined.
 type ParticipantMapping struct {
-	PersonID  string
-	TeamID    string
-	HeroName  string
-	Role      string
-	Slot      int
+	PersonID string
+	TeamID   string
+	HeroName string
+	Role     string
+	Slot     int
 }
 
 // NormalizeMeta is the acquisition/metadata side of one match: the public
@@ -77,26 +77,47 @@ func Normalize(facts *ReplayFactsV1, meta NormalizeMeta, mapping []ParticipantMa
 	identityStatus := contracts.IdentityQuarantined
 	var participants []history.ParticipantFacts
 
-	// Identity is verified only when a full mapping binds every parsed hero to
-	// a roster person. A partial mapping or any unbound/mismatched hero keeps
-	// the match quarantined.
-	if len(mapping) == len(facts.Heroes) && len(mapping) > 0 {
-		bound := 0
-		participants = make([]history.ParticipantFacts, 0, len(mapping))
+	// A replay is identity-verified only when the public metadata and the
+	// parsed demo agree on the game build AND a complete ten-player mapping
+	// binds ten unique heroes to ten unique people in ten unique slots. A
+	// partial mapping, a duplicate hero/person/slot, an unknown hero, or a
+	// build mismatch quarantines the whole match so M1 never publishes
+	// uncorrelated or wrong-replay facts.
+	buildCorrelated := meta.GameBuild != 0 && facts.Meta.GameBuild != 0 && meta.GameBuild == facts.Meta.GameBuild
+	const requiredBindings = 10
+	if buildCorrelated && len(facts.Heroes) == requiredBindings && len(parsedHeroes) == requiredBindings && len(mapping) == requiredBindings {
+		heroesSet := map[string]bool{}
+		personsSet := map[string]bool{}
+		slotsSet := map[int]bool{}
+		participants = make([]history.ParticipantFacts, 0, requiredBindings)
+		ok := true
 		for _, m := range mapping {
-			base, ok := parsedHeroes[m.HeroName]
-			if !ok {
-				identityStatus = contracts.IdentityQuarantined
+			base, heroFound := parsedHeroes[m.HeroName]
+			if !heroFound || m.PersonID == "" || m.TeamID == "" || m.Role != "player" || m.Slot < 0 || m.Slot >= requiredBindings {
+				ok = false
 				break
 			}
-			p := history.ParticipantFacts{
+			expectedTeam := meta.RadiantTeamID
+			if m.Slot >= 5 {
+				expectedTeam = meta.DireTeamID
+			}
+			if expectedTeam == "" || m.TeamID != expectedTeam {
+				ok = false
+				break
+			}
+			if heroesSet[m.HeroName] || personsSet[m.PersonID] || slotsSet[m.Slot] {
+				ok = false // duplicate binding — quarantine, do not silently dedupe
+				break
+			}
+			heroesSet[m.HeroName] = true
+			personsSet[m.PersonID] = true
+			slotsSet[m.Slot] = true
+			participants = append(participants, history.ParticipantFacts{
 				PersonID: m.PersonID, TeamID: m.TeamID, HeroName: m.HeroName,
 				Role: m.Role, Slot: m.Slot, Kills: base.Kills, Deaths: base.Deaths,
-			}
-			participants = append(participants, p)
-			bound++
+			})
 		}
-		if bound == len(facts.Heroes) {
+		if ok && len(participants) == requiredBindings {
 			identityStatus = contracts.IdentityVerified
 		} else {
 			participants = nil

@@ -14,30 +14,33 @@ import (
 // bounds, retrieval time, and response-page hashes are all pinned.
 type DiscoveryRequest struct {
 	ContractVersion string            `json:"contract_version"`
-	Providers      []string          `json:"providers"`
-	Endpoint       string            `json:"endpoint"`
-	Query          map[string]string `json:"query"`
-	PageLimit      uint32            `json:"page_limit"`
-	CutoffTime     time.Time         `json:"cutoff_time"`
-	RetrievedAt    time.Time         `json:"retrieved_at"`
-	PageSHA256     []string          `json:"page_sha256"`
+	Providers       []string          `json:"providers"`
+	Endpoint        string            `json:"endpoint"`
+	Query           map[string]string `json:"query"`
+	PageLimit       uint32            `json:"page_limit"`
+	CutoffTime      time.Time         `json:"cutoff_time"`
+	RetrievedAt     time.Time         `json:"retrieved_at"`
+	PageSHA256      []string          `json:"page_sha256"`
 }
 
-// Terminal states for one discovered match/replay. Every item in the union
-// gets exactly one of these; none means "still running", which is not a
-// terminal publishable state.
+// Match states for one discovered match/replay. `discovered` is the single
+// NONTERMINAL state: metadata seen, replay not yet attempted. A sealed
+// publishable manifest may never carry a `discovered` entry — every item must
+// resolve to one of the terminal states below. None means "still running",
+// which is not a terminal publishable state.
 const (
-	MatchDiscovered       = "discovered"         // metadata seen, replay not yet attempted
-	MatchReplayAccessible = "replay_accessible"   // download+checksum+magic+identity all passed
+	MatchDiscovered        = "discovered"         // NONTERMINAL: metadata seen, replay not yet attempted
+	MatchReplayAccessible  = "replay_accessible"  // download+checksum+magic+identity all passed
 	MatchReplayQuarantined = "replay_quarantined" // held: identity mismatch pending reconciliation
-	MatchReplayExpired    = "replay_expired"      // CDN returned 404/expired
-	MatchReplayPurged     = "replay_purged"       // provider metadata purged
-	MatchReplayUnlisted   = "replay_unlisted"     // no replay_url in metadata
-	MatchChecksumMismatch = "replay_checksum_mismatch"
-	MatchIdentityMismatch = "replay_identity_mismatch"
-	MatchParseFailed      = "parse_failed"
-	MatchNormalizeFailed  = "normalize_failed"
-	MatchOmitted          = "omitted" // excluded with an explicit reason (e.g. wrong patch, non-pro)
+	MatchReplayExpired     = "replay_expired"     // CDN returned 404/expired
+	MatchReplayPurged      = "replay_purged"      // provider metadata purged
+	MatchReplayUnlisted    = "replay_unlisted"    // no replay_url in metadata
+	MatchChecksumMismatch  = "replay_checksum_mismatch"
+	MatchIdentityMismatch  = "replay_identity_mismatch"
+	MatchParseFailed       = "parse_failed"
+	MatchNormalizeFailed   = "normalize_failed"
+	MatchOmitted           = "omitted"           // excluded with an explicit reason (e.g. wrong patch, non-pro)
+	MatchProviderConflict  = "provider_conflict" // providers disagreed on a fact; held for reconciliation
 )
 
 // IdentityStatus for a match whose replay has been correlated against public
@@ -45,52 +48,53 @@ const (
 
 // DiscoveryMatch is one item in the deduplicated match/replay union.
 type DiscoveryMatch struct {
-	MatchID              string   `json:"match_id"`
-	SourceEventTime      time.Time `json:"source_event_time"`
-	LeagueID             string   `json:"league_id"`
-	PatchID              string   `json:"patch_id"`
-	RadiantTeamID        string   `json:"radiant_team_id"`
-	DireTeamID           string   `json:"dire_team_id"`
-	PlayerPersonIDs      []string `json:"player_person_ids"`
-	ReplayURL            string   `json:"replay_url,omitempty"`
-	ReplayCluster        string   `json:"replay_cluster,omitempty"`
-	ReplaySalt           string   `json:"replay_salt,omitempty"`
-	ReplayFormatVersion  uint32   `json:"replay_format_version,omitempty"`
-	Providers            []string `json:"providers"`
-	PageSHA256           []string `json:"page_sha256"`
-	State                string   `json:"state"`
-	Reason               string   `json:"reason,omitempty"`
-	IdentityStatus       string   `json:"identity_status,omitempty"`
-	ReplaySHA256         string   `json:"replay_sha256,omitempty"`
-	ParseAttempts        int      `json:"parse_attempts,omitempty"`
+	MatchID             string    `json:"match_id"`
+	SourceEventTime     time.Time `json:"source_event_time"`
+	LeagueID            string    `json:"league_id"`
+	PatchID             string    `json:"patch_id"`
+	GameBuild           uint32    `json:"game_build"`
+	RadiantTeamID       string    `json:"radiant_team_id"`
+	DireTeamID          string    `json:"dire_team_id"`
+	PlayerPersonIDs     []string  `json:"player_person_ids"`
+	ReplayURL           string    `json:"replay_url,omitempty"`
+	ReplayCluster       string    `json:"replay_cluster,omitempty"`
+	ReplaySalt          string    `json:"replay_salt,omitempty"`
+	ReplayFormatVersion uint32    `json:"replay_format_version,omitempty"`
+	Providers           []string  `json:"providers"`
+	PageSHA256          []string  `json:"page_sha256"`
+	State               string    `json:"state"`
+	Reason              string    `json:"reason,omitempty"`
+	IdentityStatus      string    `json:"identity_status,omitempty"`
+	ReplaySHA256        string    `json:"replay_sha256,omitempty"`
+	ParseAttempts       int       `json:"parse_attempts,omitempty"`
 }
 
 // DiscoveryCoverage summarizes the manifest so an operator can read coverage
 // rather than fabricate it. Counts are derived from the match list; they must
 // match a fresh recount or the manifest is invalid.
 type DiscoveryCoverage struct {
-	DiscoveredTotal uint32            `json:"discovered_total"`
-	DeduplicatedTotal uint32          `json:"deduplicated_total"`
-	ByState         map[string]uint32 `json:"by_state"`
-	TeamsRepresented []string         `json:"teams_represented"`
-	TeamMatchCount  map[string]uint32 `json:"team_match_count"`
-	PatchesSeen     []string          `json:"patches_seen"`
+	DiscoveredTotal   uint32            `json:"discovered_total"`
+	DeduplicatedTotal uint32            `json:"deduplicated_total"`
+	ByState           map[string]uint32 `json:"by_state"`
+	TeamsRepresented  []string          `json:"teams_represented"`
+	TeamMatchCount    map[string]uint32 `json:"team_match_count"`
+	PatchesSeen       []string          `json:"patches_seen"`
 }
 
 // DiscoveryManifestV1 is the content-addressed, deduplicated 180-day
 // match/replay manifest. Every discovered item has a terminal, explainable
 // state.
 type DiscoveryManifestV1 struct {
-	SchemaVersion       string             `json:"schema_version"`
-	ManifestID          string             `json:"manifest_id"`
-	ContentSHA256       string             `json:"content_sha256"`
-	TournamentScopeID   string             `json:"tournament_scope_id"`
-	TournamentScopeSHA  string             `json:"tournament_scope_sha256"`
-	RosterManifestID     string             `json:"roster_manifest_id"`
-	CutoffTime          time.Time          `json:"cutoff_time"`
-	Request             DiscoveryRequest   `json:"request"`
-	Matches             []DiscoveryMatch   `json:"matches"`
-	Coverage            DiscoveryCoverage  `json:"coverage"`
+	SchemaVersion      string            `json:"schema_version"`
+	ManifestID         string            `json:"manifest_id"`
+	ContentSHA256      string            `json:"content_sha256"`
+	TournamentScopeID  string            `json:"tournament_scope_id"`
+	TournamentScopeSHA string            `json:"tournament_scope_sha256"`
+	RosterManifestID   string            `json:"roster_manifest_id"`
+	CutoffTime         time.Time         `json:"cutoff_time"`
+	Request            DiscoveryRequest  `json:"request"`
+	Matches            []DiscoveryMatch  `json:"matches"`
+	Coverage           DiscoveryCoverage `json:"coverage"`
 }
 
 func (m DiscoveryManifestV1) Validate() error {
@@ -118,7 +122,7 @@ func (m DiscoveryManifestV1) Validate() error {
 		if !validMatchState(x.State) {
 			return errors.New("discovery match has invalid state")
 		}
-		if x.State == MatchReplayAccessible && (!isSHA(x.ReplaySHA256) || x.IdentityStatus != contracts.IdentityVerified) {
+		if x.State == MatchReplayAccessible && (!isSHA(x.ReplaySHA256) || x.IdentityStatus != contracts.IdentityVerified || x.GameBuild == 0 || len(x.PlayerPersonIDs) != 10) {
 			return errors.New("replay_accessible match missing verified identity")
 		}
 		if x.State == MatchReplayQuarantined && x.IdentityStatus != contracts.IdentityQuarantined {
@@ -252,11 +256,40 @@ func DedupeAndSortMatches(candidates []DiscoveryMatch) []DiscoveryMatch {
 }
 
 func mergeMatch(dst, src *DiscoveryMatch) {
+	var conflicts []string
+	conflictStr := func(field, a, b string) {
+		if a != "" && b != "" && a != b {
+			conflicts = append(conflicts, field+":"+a+"|"+b)
+		}
+	}
+	conflictTime := func(field string, a, b time.Time) {
+		if !a.IsZero() && !b.IsZero() && !a.Equal(b) {
+			conflicts = append(conflicts, field+":time_mismatch")
+		}
+	}
+	conflictU32 := func(field string, a, b uint32) {
+		if a != 0 && b != 0 && a != b {
+			conflicts = append(conflicts, field+":u32_mismatch")
+		}
+	}
+	conflictStr("league", dst.LeagueID, src.LeagueID)
+	conflictStr("patch", dst.PatchID, src.PatchID)
+	conflictU32("game_build", dst.GameBuild, src.GameBuild)
+	conflictStr("radiant_team", dst.RadiantTeamID, src.RadiantTeamID)
+	conflictStr("dire_team", dst.DireTeamID, src.DireTeamID)
+	conflictStr("state", dst.State, src.State)
+	conflictStr("replay_sha", dst.ReplaySHA256, src.ReplaySHA256)
+	conflictTime("source_event_time", dst.SourceEventTime, src.SourceEventTime)
+	conflictU32("replay_format", dst.ReplayFormatVersion, src.ReplayFormatVersion)
+
 	if dst.LeagueID == "" {
 		dst.LeagueID = src.LeagueID
 	}
 	if dst.PatchID == "" {
 		dst.PatchID = src.PatchID
+	}
+	if dst.GameBuild == 0 {
+		dst.GameBuild = src.GameBuild
 	}
 	if dst.RadiantTeamID == "" {
 		dst.RadiantTeamID = src.RadiantTeamID
@@ -297,13 +330,26 @@ func mergeMatch(dst, src *DiscoveryMatch) {
 	dst.Providers = sortedDedupe(append(dst.Providers, src.Providers...))
 	dst.PageSHA256 = sortedDedupe(append(dst.PageSHA256, src.PageSHA256...))
 	dst.PlayerPersonIDs = sortedDedupe(append(dst.PlayerPersonIDs, src.PlayerPersonIDs...))
+
+	// Provider conflicts quarantine the match for reconciliation instead of
+	// silently keeping the first provider's facts. A quarantined entry is
+	// terminal and never enters a published snapshot.
+	if len(conflicts) > 0 {
+		dst.State = MatchProviderConflict
+		dst.IdentityStatus = contracts.IdentityQuarantined
+		if dst.Reason == "" {
+			dst.Reason = "provider_conflict:" + joinComma(conflicts)
+		}
+	}
 }
 
 func validMatchState(s string) bool {
 	switch s {
-	case MatchDiscovered, MatchReplayAccessible, MatchReplayQuarantined, MatchReplayExpired,
+	// `discovered` is intentionally excluded: it is a nonterminal state and a
+	// sealed manifest may not publish unresolved work.
+	case MatchReplayAccessible, MatchReplayQuarantined, MatchReplayExpired,
 		MatchReplayPurged, MatchReplayUnlisted, MatchChecksumMismatch, MatchIdentityMismatch,
-		MatchParseFailed, MatchNormalizeFailed, MatchOmitted:
+		MatchParseFailed, MatchNormalizeFailed, MatchOmitted, MatchProviderConflict:
 		return true
 	}
 	return false
@@ -341,6 +387,17 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func joinComma(in []string) string {
+	out := ""
+	for i, s := range in {
+		if i > 0 {
+			out += ","
+		}
+		out += s
+	}
+	return out
 }
 
 func verifySealedDiscovery(m DiscoveryManifestV1) error {
