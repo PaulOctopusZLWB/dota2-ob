@@ -489,8 +489,8 @@ Before its first commit, each V2 policy-log lineage synchronously seals one
 content-addressed, 2 MiB-bounded `PolicyLineageManifestV2`. It binds the
 session ID; append-only raw-record schema/framing; raw/live schema and mapping
 identities; `TournamentScopeV1` and `HistoricalSnapshotManifestV1` identities;
-the ordered
-eligible `HistoricalBaselineV1` content hashes; rule, config, catalog, and
+the ordered eligible `HistoricalBaselineV1` content hashes; rule, config,
+catalog, and
 localization-parameter-mapping versions plus content hashes; and pure-engine
 build identity. Every `PolicyCommitV2` and `PolicyCheckpointV2` carries the
 manifest ID and SHA-256. The referenced manifest and artifacts are immutable
@@ -504,9 +504,12 @@ growing session-log contents; each later observation commit is content-bound by
 its own evidence and live-observation hashes above.
 
 The pure core deterministically returns the unpersisted commit payload from its
-explicit input and prior state. The application layer supplies the next commit
-sequence and performs the storage protocol; no filesystem operation or retry
-policy enters the core.
+explicit input and prior state. Its semantic idempotency entry contains only the
+command ID and SHA-256 of the canonical `OperatorCommandResultV1`, both known
+before framing. The application layer later supplies the commit sequence and
+cache-only frame locator and performs the storage protocol; none of those
+application values enters `policy_state.v2`, and no filesystem operation or
+retry policy enters the core.
 
 The application adapter serializes `PolicyCommitV2` frames into a policy-only
 append log. Each frame is `length || canonical payload || SHA-256 || commit
@@ -522,14 +525,14 @@ and are retained through release acceptance plus 180 days.
 
 The committed frame—not a separate decision, result, audit, or checkpoint
 write—is the source of truth. Presentation consumes only a synced committed
-frame. Repeating an indexed admitted command ID returns the exact stored result
-from the frame named by its validated in-memory or checkpoint index entry; this
-direct frame lookup is not pre-checkpoint state replay. Replay reconstructs
-revision/state and the idempotency index from committed frames. Checkpoints are
-optional caches written with file sync, atomic rename, and parent-directory
-sync; losing one only forces log replay. This stronger policy protocol
-deliberately differs from the OS-buffered raw-capture boundary and its cost is
-included in P5.
+frame. Repeating an indexed admitted command ID resolves its cache-only locator,
+validates the complete frame, and returns the exact stored result only when its
+canonical result hash matches the semantic index entry. This direct lookup is
+not pre-checkpoint state replay. Replay reconstructs semantic entries and
+locators from committed frames. Checkpoints are optional caches written with
+file sync, atomic rename, and parent-directory sync; losing one only forces log
+replay. This stronger policy protocol deliberately differs from the OS-buffered
+raw-capture boundary and its cost is included in P5.
 
 The M2 policy area owns these supporting schemas and transition semantics.
 M3 owns the authenticated HTTP adapter and operator client. The M3 presentation
@@ -564,9 +567,13 @@ The checkpointed semantic state contains complete preview
 rules; cooldowns; pins; emergency-hide state; and the optional active primary as
 its complete candidate plus latest `BroadcastDecisionV1`. It also contains:
 
-- at most 4,096 command-index entries in canonical command-ID order, each with
-  command ID, original commit sequence, and frame SHA-256 for exact-result
-  lookup;
+- at most 4,096 semantic idempotency entries in canonical command-ID order,
+  each containing only command ID and canonical `OperatorCommandResultV1`
+  SHA-256; these entries are part of `policy_state.v2` and are computed by the
+  pure core;
+- a one-to-one cache-only locator table containing command ID, segment ID, frame
+  offset, commit sequence, and frame SHA-256; these application values are
+  excluded from `policy_state.v2`;
 - at most 4,096 candidate tombstones, each with candidate ID, rule ID, terminal
   decision ID/state, and `suppress_until_policy_time_ms`, ordered by suppression
   deadline then candidate ID; the deadline is derived from the bound rule/config
@@ -592,9 +599,12 @@ over-limit, malformed, and out-of-order commands do not.
 The V2 checkpoint is bounded to 16 MiB canonical JSON; policy-owned identifiers
 stored in its bounded indexes are at most 128 UTF-8 bytes. Its state hash is
 SHA-256 over a documented canonical `policy_state.v2` projection containing all
-semantic state above while excluding cache creation time and the commit/hash
-anchor. Validators recompute that projection rather than trusting an opaque
-hash.
+semantic state above while excluding cache creation time, the checkpoint
+commit/hash anchor, and the cache-only locator table. Validators recompute that
+projection rather than trusting an opaque hash. Each locator must resolve to one
+complete valid frame whose sequence/hash, command ID, and canonical command
+result hash match both the locator and semantic entry; a missing, duplicate, or
+tampered locator fails closed.
 
 Restart validates the complete V2 checkpoint anchor and state, then replays
 later commits strictly by commit sequence. For an observation commit, recovery
@@ -622,13 +632,14 @@ migration must never synthesize missing command data.
 
 The migration gate requires V2 documentation, validators, canonical
 goldens/hashes, dependency checks, and recovery tests for admitted versus
-over-limit IDs, rejected-command index-only hash mutation, exact duplicate frame
-lookup, accepted/rejected `disable_rule`/`enable_rule`, lineage-manifest
-loss/mismatch, later-appended observation evidence/raw/live hash mismatch,
-size/identifier admission limits, preview ordering/expiry, tombstone
-eviction/capacity, time high-water ordering, active-primary continuation, pins,
-valid/missing/corrupt checkpoint anchors, later-frame replay, mixed-version
-rejection, and state/hash mismatch before M2 resumes.
+over-limit IDs, rejected-command index-only hash mutation, non-circular first
+command construction, exact duplicate frame lookup, locator tampering,
+accepted/rejected `disable_rule`/`enable_rule`, lineage-manifest loss/mismatch,
+later-appended observation evidence/raw/live hash mismatch, size/identifier
+admission limits, preview ordering/expiry, tombstone eviction/capacity, time
+high-water ordering, active-primary continuation, pins, valid/missing/corrupt
+checkpoint anchors, later-frame replay, mixed-version rejection, and state/hash
+mismatch before M2 resumes.
 
 ## Dependency Direction
 
