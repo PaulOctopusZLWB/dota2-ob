@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -211,7 +212,7 @@ func TestRunDeliveryBindFailureLeavesCapturePersistingGSI(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("POST /gsi status=%d body=%q", response.Code, response.Body.String())
 		}
-		if data, err := os.ReadFile(store.RawPath()); err != nil || !bytes.Contains(data, []byte(`"game_time":41`)) {
+		if data, err := os.ReadFile(store.RawPath()); err != nil || !rawV3Contains(data, `{"map":{"game_time":41}}`) {
 			t.Fatalf("persisted raw=%q err=%v", data, err)
 		}
 		waiter.Wait()
@@ -499,7 +500,7 @@ func TestDeliveryServeFailureLeavesCapturePersistingGSI(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("POST /gsi status=%d", response.StatusCode)
 	}
-	if data, err := os.ReadFile(store.RawPath()); err != nil || !bytes.Contains(data, []byte(`"game_time":42`)) {
+	if data, err := os.ReadFile(store.RawPath()); err != nil || !rawV3Contains(data, `{"map":{"game_time":42}}`) {
 		t.Fatalf("persisted raw=%q err=%v", data, err)
 	}
 	unauthorized, err := http.Get("http://" + captureListener.Addr().String() + "/api/latest")
@@ -546,16 +547,27 @@ func TestDeliveryServeFailureLeavesCapturePersistingGSI(t *testing.T) {
 	rebuilt := &retryingProjection{}
 	restarted := gsi.NewServer(reopened, gsi.WithLiveProjections(rebuilt))
 	deadline = time.Now().Add(time.Second)
-	for rebuilt.count() != 2 && time.Now().Before(deadline) {
+	for rebuilt.count() != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if rebuilt.count() != 2 {
-		t.Fatalf("restart reconstruction count=%d want=2", rebuilt.count())
+	if rebuilt.count() != 1 {
+		t.Fatalf("valid cursor must resume strictly after cached prefix: count=%d want=1", rebuilt.count())
 	}
 	restarted.Wait()
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func rawV3Contains(data []byte, want string) bool {
+	var frame struct {
+		RawBase64 string `json:"raw_base64"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(data), &frame); err != nil {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(frame.RawBase64)
+	return err == nil && string(raw) == want
 }
 
 func TestRunCreatesPrivateEphemeralTokenAndProductionCaptureProfile(t *testing.T) {

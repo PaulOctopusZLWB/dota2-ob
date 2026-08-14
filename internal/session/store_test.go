@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -113,13 +114,15 @@ func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 	}
 
 	var persisted struct {
-		SchemaVersion int             `json:"schema_version"`
-		SessionID     string          `json:"session_id"`
-		Sequence      uint64          `json:"sequence"`
-		ReceivedAt    time.Time       `json:"received_at"`
-		Source        string          `json:"source"`
-		Payload       map[string]any  `json:"payload"`
-		Raw           json.RawMessage `json:"raw"`
+		SchemaVersion    int       `json:"schema_version"`
+		SessionID        string    `json:"session_id"`
+		Sequence         uint64    `json:"sequence"`
+		ReceivedAt       time.Time `json:"received_at"`
+		Source           string    `json:"source"`
+		RawEncoding      string    `json:"raw_encoding"`
+		RawByteLength    int       `json:"raw_byte_length"`
+		RawBase64        string    `json:"raw_base64"`
+		RawPayloadSHA256 string    `json:"raw_payload_sha256"`
 	}
 	if err := json.Unmarshal([]byte(lines[0]), &persisted); err != nil {
 		t.Fatalf("JSONL line did not parse as JSON object: %v", err)
@@ -128,19 +131,12 @@ func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 	if !persisted.ReceivedAt.Equal(now) {
 		t.Fatalf("persisted timestamp = %s, want %s", persisted.ReceivedAt, now)
 	}
-	if persisted.SchemaVersion != 2 || persisted.SessionID != "test-session" || persisted.Sequence != 1 || persisted.Source != "gsi" {
+	if persisted.SchemaVersion != 3 || persisted.SessionID != "test-session" || persisted.Sequence != 1 || persisted.Source != "gsi" || persisted.RawEncoding != "base64_std" {
 		t.Fatalf("persisted capture identity = %#v", persisted)
 	}
-	if persisted.Payload["provider"] == nil {
-		t.Fatalf("persisted payload missing provider: %#v", persisted.Payload)
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal(persisted.Raw, &raw); err != nil {
-		t.Fatalf("raw payload did not parse as JSON: %v", err)
-	}
-	if raw["map"] == nil {
-		t.Fatalf("raw payload missing map: %#v", raw)
+	decoded, err := base64.StdEncoding.DecodeString(persisted.RawBase64)
+	if err != nil || string(decoded) != `{"provider":{"name":"Dota 2","appid":570},"map":{"game_time":123}}` {
+		t.Fatalf("raw evidence mismatch: %q err=%v", decoded, err)
 	}
 }
 
@@ -205,12 +201,21 @@ func TestStoreRollbackSeekMismatchSeals(t *testing.T) {
 
 func TestStoreRecoveryRemovesOnlyUnterminatedTail(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "recover")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	initial, err := session.NewStore(root, session.WithSessionID("recover"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	valid := `{"schema_version":2,"session_id":"recover","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{},"raw":{}}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), append([]byte(valid), []byte(`{"partial"`)...), 0o644); err != nil {
+	if _, err := initial.Append([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := os.ReadFile(initial.RawPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(initial.RawPath(), append(append([]byte(nil), valid...), []byte(`{"partial"`)...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	store, err := session.NewStore(root, session.WithSessionID("recover"))
@@ -219,7 +224,7 @@ func TestStoreRecoveryRemovesOnlyUnterminatedTail(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	data, _ := os.ReadFile(store.RawPath())
-	if !bytes.Equal(data, []byte(valid)) {
+	if !bytes.Equal(data, valid) {
 		t.Fatalf("recovered data = %q", data)
 	}
 	rec, err := store.Append([]byte(`{"ok":true}`))

@@ -306,7 +306,7 @@ func TestAnalyzeSessionRejectsTwoValuesOnOneTerminatedLine(t *testing.T) {
 	}
 }
 
-func TestAnalyzeSessionRebuildsAcceptedNullPayload(t *testing.T) {
+func TestAnalyzeSessionConsumesLegacyNullWithoutOutput(t *testing.T) {
 	dir := t.TempDir()
 	raw := `{"schema_version":2,"session_id":"null-session","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":null,"raw":null}` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
@@ -316,7 +316,7 @@ func TestAnalyzeSessionRebuildsAcceptedNullPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AnalyzeSession: %v", err)
 	}
-	if snap.TickCount != 1 {
+	if snap.TickCount != 0 {
 		t.Fatalf("tick count=%d", snap.TickCount)
 	}
 }
