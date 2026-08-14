@@ -80,7 +80,11 @@ func loadPolicyLineage(path, sessionID string) (contracts.PolicyLineageManifestV
 		return contracts.PolicyLineageManifestV2{}, errors.New("policy lineage file is unreadable")
 	}
 	var lineage contracts.PolicyLineageManifestV2
-	if err := contracts.DecodeStrict(payload, &lineage); err != nil || lineage.Validate() != nil || lineage.SessionID != sessionID {
+	if err := contracts.DecodeStrict(payload, &lineage); err != nil || lineage.SessionID != sessionID {
+		return contracts.PolicyLineageManifestV2{}, errors.New("policy lineage file is invalid for this session")
+	}
+	lineage = assembleProductLineage(lineage, sessionID)
+	if lineage.Validate() != nil {
 		return contracts.PolicyLineageManifestV2{}, errors.New("policy lineage file is invalid for this session")
 	}
 	return lineage, nil

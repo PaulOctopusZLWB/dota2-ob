@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,20 +16,17 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-// The capture listener accepts at most 10 MiB of JSON. Persisted records retain
-// both decoded payload and the exact raw JSON, so recovery allows twice that
-// body plus a bounded envelope margin.
-const maximumPersistedRecordBytes = (2 * (10 << 20)) + (1 << 20)
+const observationIndexEntryBytes = 16
 
 type observationResolver struct {
 	rawPath   string
 	sessionID string
 	lineage   contracts.PolicyLineageManifestV2
 	previous  *contracts.LiveObservationV1
-	file      *os.File
+	data      *os.File
 	index     *os.File
 	indexPath string
-	rawSize   int64
+	dataPath  string
 	maximum   uint64
 }
 
@@ -41,9 +36,9 @@ func newObservationResolver(rawPath, sessionID string, lineage contracts.PolicyL
 
 func (r *observationResolver) Close() error {
 	var errs []error
-	if r.file != nil {
-		errs = append(errs, r.file.Close())
-		r.file = nil
+	if r.data != nil {
+		errs = append(errs, r.data.Close())
+		r.data = nil
 	}
 	if r.index != nil {
 		errs = append(errs, r.index.Close())
@@ -55,15 +50,17 @@ func (r *observationResolver) Close() error {
 		}
 		r.indexPath = ""
 	}
+	if r.dataPath != "" {
+		if err := os.Remove(r.dataPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+		r.dataPath = ""
+	}
 	return errors.Join(errs...)
 }
 
 func (r *observationResolver) resolve(commit contracts.PolicyCommitV2) ([]contracts.InsightCandidateV1, error) {
-	record, err := r.readCommittedRecord(commit.ObservationSequence)
-	if err != nil {
-		return nil, err
-	}
-	observation, err := capture.MapLiveObservationV1(record)
+	observation, err := r.readCommittedObservation(commit.ObservationSequence)
 	if err != nil {
 		return nil, err
 	}
@@ -80,9 +77,9 @@ func (r *observationResolver) resolve(commit contracts.PolicyCommitV2) ([]contra
 		policyTimeMS = commit.AuditEvents[0].PolicyTimeMS
 	}
 	candidates := insight.Evaluate(insight.Input{
-		Observation: observation, Previous: r.previous, Lineage: &r.lineage, PolicyTimeMS: policyTimeMS,
+		Observation: *observation, Previous: r.previous, Lineage: &r.lineage, PolicyTimeMS: policyTimeMS,
 	}, insight.DefaultConfig())
-	copyObservation := observation
+	copyObservation := *observation
 	r.previous = &copyObservation
 	return candidates, nil
 }
@@ -134,7 +131,7 @@ func recoverProductionApplication(store *commitlog.StoreV2, sessionID string, li
 	return policy.NewBoundApplication(engine, store, lineage)
 }
 
-func (r *observationResolver) readCommittedRecord(sequence uint64) (*session.Record, error) {
+func (r *observationResolver) readCommittedObservation(sequence uint64) (*contracts.LiveObservationV1, error) {
 	if sequence == 0 {
 		return nil, errors.New("committed observation sequence is invalid")
 	}
@@ -144,107 +141,111 @@ func (r *observationResolver) readCommittedRecord(sequence uint64) (*session.Rec
 	if sequence > r.maximum {
 		return nil, fmt.Errorf("committed record %d unavailable", sequence)
 	}
-	offset, err := r.indexOffset(sequence)
+	offset, length, err := r.indexEntry(sequence)
 	if err != nil {
 		return nil, err
 	}
-	end := r.rawSize
-	if sequence < r.maximum {
-		end, err = r.indexOffset(sequence + 1)
-		if err != nil {
-			return nil, err
-		}
+	if length == 0 || length > contracts.MaxLiveObservationBytes {
+		return nil, errors.New("committed sequence has no produced observation")
 	}
-	if end <= offset || end-offset > maximumPersistedRecordBytes {
-		return nil, errors.New("persisted record frame is invalid")
-	}
-	payload := make([]byte, end-offset)
-	if _, err := r.file.ReadAt(payload, offset); err != nil {
+	payload := make([]byte, length)
+	if _, err := r.data.ReadAt(payload, int64(offset)); err != nil {
 		return nil, err
 	}
-	payload = bytes.TrimSuffix(payload, []byte{'\n'})
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	var record session.Record
-	if err := decoder.Decode(&record); err != nil {
+	var observation contracts.LiveObservationV1
+	if err := contracts.DecodeStrict(payload, &observation); err != nil {
 		return nil, err
 	}
-	if record.SessionID != r.sessionID || record.Sequence != sequence {
-		return nil, errors.New("persisted record identity mismatch")
+	if err := observation.Validate(); err != nil {
+		return nil, err
 	}
-	return &record, nil
+	if observation.Evidence.SessionID != r.sessionID || observation.Evidence.Sequence != sequence {
+		return nil, errors.New("persisted observation identity mismatch")
+	}
+	return &observation, nil
 }
 
 func (r *observationResolver) ensureIndex() (resultErr error) {
 	if r.index != nil {
 		return nil
 	}
-	raw, err := os.Open(r.rawPath)
-	if err != nil {
-		return err
-	}
 	index, err := os.CreateTemp("", "dota2-ob-policy-raw-index-*")
 	if err != nil {
-		_ = raw.Close()
 		return err
 	}
 	indexPath := index.Name()
 	if err := os.Remove(indexPath); err != nil {
-		_ = raw.Close()
 		_ = index.Close()
 		return err
 	}
 	indexPath = ""
-	defer func() {
-		if resultErr != nil {
-			_ = raw.Close()
-			_ = index.Close()
-			_ = os.Remove(indexPath)
-		}
-	}()
-	scanner := bufio.NewScanner(raw)
-	scanner.Buffer(make([]byte, 64<<10), maximumPersistedRecordBytes)
-	var offset int64
-	var sequence uint64
-	for scanner.Scan() {
-		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
-		decoder.UseNumber()
-		var record session.Record
-		if err := decoder.Decode(&record); err != nil {
-			return err
-		}
-		sequence++
-		if record.SessionID != r.sessionID || record.Sequence != sequence {
-			return errors.New("persisted record identity mismatch")
-		}
-		var encoded [8]byte
-		binary.BigEndian.PutUint64(encoded[:], uint64(offset))
-		if _, err := index.Write(encoded[:]); err != nil {
-			return err
-		}
-		offset += int64(len(scanner.Bytes()) + 1)
-	}
-	if err := scanner.Err(); err != nil {
+	data, err := os.CreateTemp("", "dota2-ob-policy-observations-*")
+	if err != nil {
+		_ = index.Close()
 		return err
 	}
-	info, err := raw.Stat()
+	dataPath := data.Name()
+	if err := os.Remove(dataPath); err != nil {
+		_ = index.Close()
+		_ = data.Close()
+		return err
+	}
+	dataPath = ""
+	defer func() {
+		if resultErr != nil {
+			_ = index.Close()
+			_ = data.Close()
+			_ = os.Remove(indexPath)
+			_ = os.Remove(dataPath)
+		}
+	}()
+	var offset uint64
+	err = session.StreamRecords(r.rawPath, r.sessionID, func(record *session.Record) error {
+		var payload []byte
+		if record.ProjectionResult == session.ProjectionProduced {
+			observation, mapErr := capture.MapLiveObservationV1(record)
+			if mapErr != nil {
+				return mapErr
+			}
+			payload, mapErr = contracts.MarshalCanonical(observation)
+			if mapErr != nil {
+				return mapErr
+			}
+			if len(payload) > contracts.MaxLiveObservationBytes {
+				return errors.New("persisted observation exceeds contract bound")
+			}
+		}
+		var entry [observationIndexEntryBytes]byte
+		binary.BigEndian.PutUint64(entry[:8], offset)
+		binary.BigEndian.PutUint64(entry[8:], uint64(len(payload)))
+		if _, writeErr := index.Write(entry[:]); writeErr != nil {
+			return writeErr
+		}
+		if len(payload) > 0 {
+			if _, writeErr := data.Write(payload); writeErr != nil {
+				return writeErr
+			}
+			offset += uint64(len(payload))
+		}
+		r.maximum = record.Sequence
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	r.file, r.index, r.indexPath = raw, index, indexPath
-	r.rawSize, r.maximum = info.Size(), sequence
+	r.data, r.index, r.indexPath, r.dataPath = data, index, indexPath, dataPath
 	return nil
 }
 
-func (r *observationResolver) indexOffset(sequence uint64) (int64, error) {
-	var encoded [8]byte
-	if _, err := r.index.ReadAt(encoded[:], int64(sequence-1)*int64(len(encoded))); err != nil {
+func (r *observationResolver) indexEntry(sequence uint64) (uint64, uint64, error) {
+	var encoded [observationIndexEntryBytes]byte
+	if _, err := r.index.ReadAt(encoded[:], int64(sequence-1)*observationIndexEntryBytes); err != nil {
 		if errors.Is(err, io.EOF) {
-			return 0, fmt.Errorf("committed record %d unavailable", sequence)
+			return 0, 0, fmt.Errorf("committed record %d unavailable", sequence)
 		}
-		return 0, err
+		return 0, 0, err
 	}
-	return int64(binary.BigEndian.Uint64(encoded[:])), nil
+	return binary.BigEndian.Uint64(encoded[:8]), binary.BigEndian.Uint64(encoded[8:]), nil
 }
 
 func canonicalEqual(left, right any) bool {

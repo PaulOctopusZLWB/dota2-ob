@@ -13,6 +13,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/presentation"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
 const overlayFreshness = 2 * time.Second
@@ -27,13 +28,16 @@ type broadcastConfig struct {
 }
 
 type broadcastRuntime struct {
-	mu       sync.Mutex
-	app      *policy.Application
-	store    *commitlog.StoreV2
-	now      func() time.Time
-	lineage  contracts.PolicyLineageManifestV2
-	previous *contracts.LiveObservationV1
-	overlay  contracts.OverlayStateV1
+	mu                   sync.Mutex
+	app                  *policy.Application
+	store                *commitlog.StoreV2
+	now                  func() time.Time
+	lineage              contracts.PolicyLineageManifestV2
+	previous             *contracts.LiveObservationV1
+	overlay              contracts.OverlayStateV1
+	restoringProjection  bool
+	projectionRejected   bool
+	projectionHealthCode string
 }
 
 func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
@@ -166,6 +170,14 @@ func hasCommandResult(results []contracts.PolicyCommandResultRefV2, commandID st
 }
 
 func (r *broadcastRuntime) publishLocked(commit contracts.PolicyCommitV2) {
+	if r.restoringProjection {
+		r.hideLocked("projection_restoring")
+		return
+	}
+	if r.projectionRejected {
+		r.hideLocked(r.projectionHealthCode)
+		return
+	}
 	state := r.app.State()
 	if state.EmergencyHide {
 		r.hideLocked("emergency_hide")
@@ -195,6 +207,72 @@ func (r *broadcastRuntime) publishLocked(commit contracts.PolicyCommitV2) {
 		return
 	}
 	r.overlay = visible
+}
+
+func (r *broadcastRuntime) republishLocked() {
+	if r.restoringProjection {
+		r.hideLocked("projection_restoring")
+		return
+	}
+	if r.projectionRejected {
+		r.hideLocked(r.projectionHealthCode)
+		return
+	}
+	state := r.app.State()
+	if state.EmergencyHide {
+		r.hideLocked("emergency_hide")
+		return
+	}
+	if state.ActivePrimary == nil {
+		r.hideLocked("no_active_decision")
+		return
+	}
+	r.publishLocked(contracts.PolicyCommitV2{Publication: contracts.PublicationPublish})
+}
+
+func (r *broadcastRuntime) BeginRestore(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.restoringProjection = true
+	r.hideLocked("projection_restoring")
+	return nil
+}
+
+func (r *broadcastRuntime) CompleteRestore(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.restoringProjection = false
+	r.republishLocked()
+	return nil
+}
+
+func (r *broadcastRuntime) ProjectionHealth(ctx context.Context, transition session.RejectionTransition) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if transition.Active {
+		switch transition.Code {
+		case "gsi_projection_non_object", "gsi_projection_bounds_exceeded":
+		default:
+			return errors.New("invalid projection rejection transition")
+		}
+		r.projectionRejected = true
+		r.projectionHealthCode = transition.Code
+		r.hideLocked(transition.Code)
+		return nil
+	}
+	r.projectionRejected = false
+	r.projectionHealthCode = ""
+	r.republishLocked()
+	return nil
 }
 
 func (r *broadcastRuntime) hideLocked(code string) {

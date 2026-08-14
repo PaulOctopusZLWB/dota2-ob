@@ -176,7 +176,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 			newTrackedCaptureProjection(capture.NewProfileProjection(profilerInstance, store.SessionDir()), tracker, operator.SubsystemProfile, "profile_failed"),
 			newTrackedCaptureProjection(capture.NewAnalyticsProjection(analyticsEngine, store.SessionDir(), store.SessionID()), tracker, operator.SubsystemAnalytics, "analytics_failed"),
 			newPolicyObservationProjection(broadcast, tracker),
-		))
+		), gsi.WithProjectionStartupBarrier(broadcast), gsi.WithProjectionRejectionHealthSink(broadcast))
 	}
 	if *diagnosticMode {
 		captureOptions = append(captureOptions,

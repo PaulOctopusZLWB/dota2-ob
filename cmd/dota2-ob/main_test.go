@@ -20,6 +20,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/delivery"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/preflight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
@@ -320,6 +321,36 @@ func TestRunMissingLineageDisablesDeliveryWithoutBlockingRawCapture(t *testing.T
 	}
 }
 
+func TestLoadPolicyLineageAssemblesOwnedCaptureAndPolicyArtifacts(t *testing.T) {
+	const sessionID = "assembled-lineage"
+	seed := testLineage(sessionID)
+	foreign := contracts.PolicyArtifactIdentityV2{Version: "foreign.v1", ContentSHA256: strings.Repeat("f", 64)}
+	seed.RawRecordSchema = foreign
+	seed.RawRecordFraming = foreign
+	seed.RawPayloadSchema = foreign
+	seed.LiveObservationSchema = foreign
+	seed.ProjectionMapping = foreign
+	seed.Rules = foreign
+	seed.Config = foreign
+	seed.Catalog = foreign
+	seed.Terminology = foreign
+	seed.LocalizationParameterMapping = foreign
+	seed.EngineBuild = foreign
+	path := filepath.Join(t.TempDir(), "lineage-input.json")
+	writeTestLineage(t, path, seed)
+
+	got, err := loadPolicyLineage(path, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matchesProductLineage(got, sessionID) {
+		t.Fatalf("assembled lineage does not bind owned artifacts: %#v", got)
+	}
+	if got.TournamentScopeID != seed.TournamentScopeID || got.HistoricalSnapshotID != seed.HistoricalSnapshotID {
+		t.Fatalf("assembly replaced external history identities: %#v", got)
+	}
+}
+
 func TestRunConfiguredProductProjectsCommittedRawIntoDurablePolicy(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	const sessionID = "configured-projection"
@@ -372,6 +403,93 @@ func TestRunConfiguredProductProjectsCommittedRawIntoDurablePolicy(t *testing.T)
 
 	var output bytes.Buffer
 	if code := runWithDependencies([]string{"--data-dir", root, "--policy-lineage-file", lineagePath}, &output, deps); code != 0 {
+		t.Fatalf("exit=%d output=%q", code, output.String())
+	}
+}
+
+func TestRunConfiguredProductConsumesNoOutputWithoutPolicyCommit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	const sessionID = "projection-rejection"
+	lineagePath := filepath.Join(t.TempDir(), "lineage.v2.json")
+	writeTestLineage(t, lineagePath, testLineage(sessionID))
+	deps := defaultRunDependencies()
+	deps.newStore = func(root, _ string) (*session.Store, error) {
+		return session.NewStore(root, session.WithSessionID(sessionID), session.WithClock(func() time.Time { return time.UnixMilli(10_000).UTC() }))
+	}
+	deps.newTokenFile = func(string) (string, string, func(), error) {
+		return "test-only-operator-token", "", func() {}, nil
+	}
+	deps.listen = func(_ string, address string) (net.Listener, error) {
+		return commandListener{address: commandAddress(address)}, nil
+	}
+	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		postGSI := func(body string) {
+			t.Helper()
+			response := httptest.NewRecorder()
+			product.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("GSI body=%q status=%d response=%s", body, response.Code, response.Body.String())
+			}
+		}
+		waitProjection := func(sequence uint64, rejected bool) liveprojection.Health {
+			t.Helper()
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				response := httptest.NewRecorder()
+				product.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+				var status struct {
+					LiveProjection liveprojection.Health `json:"live_projection"`
+				}
+				if response.Code == http.StatusOK && json.Unmarshal(response.Body.Bytes(), &status) == nil && status.LiveProjection.ProjectedSequence >= sequence && status.LiveProjection.ProjectionRejectionActive == rejected {
+					return status.LiveProjection
+				}
+				time.Sleep(time.Millisecond)
+			}
+			t.Fatalf("projection did not reach sequence=%d rejected=%t", sequence, rejected)
+			return liveprojection.Health{}
+		}
+		overlay := func() contracts.OverlayStateV1 {
+			t.Helper()
+			response := httptest.NewRecorder()
+			product.delivery.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+			var state contracts.OverlayStateV1
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &state) != nil {
+				t.Fatalf("overlay status=%d body=%s", response.Code, response.Body.String())
+			}
+			return state
+		}
+
+		postGSI(`{}`)
+		waitProjection(1, false)
+		policyDir := filepath.Join(root, sessionID)
+		before := policyLogBytes(t, policyDir)
+		postGSI(`null`)
+		health := waitProjection(2, true)
+		if health.LastProjectionRejectionCode != "gsi_projection_non_object" || health.LastProjectionRejectionReason != "top_level_non_object" {
+			t.Fatalf("rejection health=%#v", health)
+		}
+		if after := policyLogBytes(t, policyDir); after != before {
+			t.Fatalf("consumed-no-output record appended policy bytes: before=%d after=%d", before, after)
+		}
+		if state := overlay(); state.Visibility != "hidden" || state.HealthCode != "gsi_projection_non_object" || state.Claim != nil {
+			t.Fatalf("terminal no-output did not hide overlay: %#v", state)
+		}
+
+		postGSI(`{}`)
+		waitProjection(3, false)
+		if after := policyLogBytes(t, policyDir); after <= before {
+			t.Fatalf("later produced record did not append policy commit: before=%d after=%d", before, after)
+		}
+		if state := overlay(); state.HealthCode == "gsi_projection_non_object" {
+			t.Fatalf("later produced record did not clear rejection: %#v", state)
+		}
+		waiter.Wait()
+		return appender.Close()
+	}
+
+	var output bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root, "--session-id", sessionID, "--policy-lineage-file", lineagePath}, &output, deps); code != 0 {
 		t.Fatalf("exit=%d output=%q", code, output.String())
 	}
 }

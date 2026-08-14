@@ -151,19 +151,16 @@ func TestBroadcastRuntimeRejectsSubstitutedLocalLineageArtifact(t *testing.T) {
 
 func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 	files := map[string]string{
-		"../../internal/session/store.go":            sessionStoreSourceSHA256,
-		"../../internal/gsi/server.go":               gsiServerSourceSHA256,
-		"../../internal/contracts/contracts.go":      contractsSourceSHA256,
-		"../../internal/capture/live_observation.go": liveMappingSourceSHA256,
-		"../../internal/presentation/catalog.go":     presentationCatalogSHA256,
-		"main.go":                                    productMainSourceSHA256,
-		"broadcast_ports.go":                         productPortsSourceSHA256,
-		"broadcast_recovery.go":                      productRecoverySourceSHA256,
-		"broadcast_runtime.go":                       productRuntimeSourceSHA256,
-		"broadcast_lineage.go":                       productLineageSourceSHA256,
-		"../../internal/insight/engine.go":           insightEngineSourceSHA256,
-		"../../internal/policy/engine.go":            policyEngineSourceSHA256,
-		"../../internal/policy/application.go":       policyApplicationSourceSHA256,
+		"../../internal/contracts/contracts.go":  contractsSourceSHA256,
+		"../../internal/presentation/catalog.go": presentationCatalogSHA256,
+		"main.go":                                productMainSourceSHA256,
+		"broadcast_ports.go":                     productPortsSourceSHA256,
+		"broadcast_recovery.go":                  productRecoverySourceSHA256,
+		"broadcast_runtime.go":                   productRuntimeSourceSHA256,
+		"broadcast_lineage.go":                   productLineageSourceSHA256,
+		"../../internal/insight/engine.go":       insightEngineSourceSHA256,
+		"../../internal/policy/engine.go":        policyEngineSourceSHA256,
+		"../../internal/policy/application.go":   policyApplicationSourceSHA256,
 	}
 	for path, want := range files {
 		payload, err := os.ReadFile(path)
@@ -174,6 +171,81 @@ func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 		if got := hex.EncodeToString(digest[:]); got != want {
 			t.Errorf("lineage source fingerprint for %s = %s want %s", path, got, want)
 		}
+	}
+}
+
+func TestProductLineageUsesAcceptedCaptureV3Identities(t *testing.T) {
+	artifacts := expectedProductLineageArtifacts()
+	wants := map[string]struct {
+		got      contracts.PolicyArtifactIdentityV2
+		version  string
+		identity string
+	}{
+		"raw record schema":  {artifacts.rawRecordSchema, "raw_record.v3", session.RawRecordSchemaV3Identity},
+		"raw record framing": {artifacts.rawRecordFraming, "raw_record_framing.v3", session.RawRecordFramingV3Identity},
+		"raw payload schema": {artifacts.rawPayloadSchema, "dota2_gsi.v3", session.RawPayloadSchemaV3Identity},
+		"projection mapping": {artifacts.projectionMapping, "gsi_projection.v3", session.GSIProjectionMappingV3Identity},
+	}
+	for name, want := range wants {
+		if want.got.Version != want.version || "sha256:"+want.got.ContentSHA256 != want.identity {
+			t.Errorf("%s identity=%#v want version=%q identity=%q", name, want.got, want.version, want.identity)
+		}
+	}
+}
+
+func TestBroadcastRuntimeProjectionRecoveryBarrierFailsClosedAndRepublishes(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	const sessionID = "projection-health"
+	runtime, err := newBroadcastRuntime(broadcastConfig{
+		DataRoot: t.TempDir(), SessionID: sessionID, RawPath: filepath.Join(t.TempDir(), "raw.jsonl"),
+		Lineage: testLineage(sessionID), Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	observation := testObservation(sessionID, 1, now)
+	candidate := testPresentationCandidate(observation)
+	if err := runtime.commitCandidates(observation, []contracts.InsightCandidateV1{candidate}, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	show := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "projection-show", SessionID: sessionID, Action: contracts.ActionShow, TargetCandidateID: candidate.CandidateID, ExpectedPolicyRevision: 1, PolicyTimeMS: now.UnixMilli()}
+	if result, err := runtime.execute(context.Background(), show); err != nil || result.Status != contracts.CommandAccepted {
+		t.Fatalf("show result=%#v err=%v", result, err)
+	}
+
+	type projectionControl interface {
+		BeginRestore(context.Context) error
+		CompleteRestore(context.Context) error
+		ProjectionHealth(context.Context, session.RejectionTransition) error
+	}
+	control, ok := any(runtime).(projectionControl)
+	if !ok {
+		t.Fatal("broadcast runtime does not implement the accepted projection recovery boundary")
+	}
+	if err := control.BeginRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertOverlayHealth(t, runtime, "projection_restoring", "hidden")
+	if err := control.ProjectionHealth(context.Background(), session.RejectionTransition{Active: true, Sequence: 2, Count: 1, Code: "gsi_projection_non_object", Reason: "top_level_non_object"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.CompleteRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertOverlayHealth(t, runtime, "gsi_projection_non_object", "hidden")
+	if err := control.ProjectionHealth(context.Background(), session.RejectionTransition{Active: false, Sequence: 3, Count: 1, Code: "gsi_projection_non_object", Reason: "top_level_non_object"}); err != nil {
+		t.Fatal(err)
+	}
+	assertOverlayHealth(t, runtime, "", "visible")
+}
+
+func assertOverlayHealth(t *testing.T, runtime *broadcastRuntime, health, visibility string) {
+	t.Helper()
+	overlay, err := runtime.overlayState(context.Background())
+	if err != nil || overlay.Visibility != visibility || overlay.HealthCode != health {
+		t.Fatalf("overlay=%#v err=%v want visibility=%q health=%q", overlay, err, visibility, health)
 	}
 }
 
@@ -351,7 +423,7 @@ func TestObservationResolverStreamsRawSessionOnce(t *testing.T) {
 	}
 }
 
-func TestObservationResolverUnlinksIndexAndAcceptsMaximumPersistedCapture(t *testing.T) {
+func TestObservationResolverUnlinksCachesAndAcceptsMaximumPersistedCapture(t *testing.T) {
 	root := t.TempDir()
 	const sessionID = "maximum-raw-record"
 	store, err := session.NewStore(root, session.WithSessionID(sessionID))
@@ -370,12 +442,20 @@ func TestObservationResolverUnlinksIndexAndAcceptsMaximumPersistedCapture(t *tes
 	}
 	resolver := newObservationResolver(filepath.Join(root, sessionID, "raw.jsonl"), sessionID, testLineage(sessionID))
 	defer resolver.Close()
-	resolved, err := resolver.readCommittedRecord(record.Sequence)
-	if err != nil || resolved.Sequence != record.Sequence {
-		t.Fatalf("maximum persisted capture was not recoverable: record=%#v err=%v", resolved, err)
+	observation, err := capture.MapLiveObservationV1(record)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if resolver.indexPath != "" {
-		t.Fatalf("recovery index remains named and can leak across SIGKILL: %q", resolver.indexPath)
+	liveHash, err := contracts.CanonicalSHA256(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := contracts.PolicyCommitV2{ObservationSequence: record.Sequence, ObservationEvidence: &observation.Evidence, RawRecordSHA256: observation.Evidence.RawPayloadSHA256, LiveObservationSHA256: liveHash, ResultingPolicyTimeMS: observation.Evidence.ReceiveTime.UnixMilli()}
+	if _, err := resolver.resolve(commit); err != nil {
+		t.Fatalf("maximum persisted capture was not recoverable: %v", err)
+	}
+	if resolver.indexPath != "" || resolver.dataPath != "" {
+		t.Fatalf("recovery caches remain named and can leak across SIGKILL: index=%q data=%q", resolver.indexPath, resolver.dataPath)
 	}
 }
 
