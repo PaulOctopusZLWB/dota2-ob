@@ -13,7 +13,7 @@ func validNoGoBindingV1() HistoryAvailabilityBindingV1 {
 		EvidenceCommit: AcceptedHistoryEvidenceCommit, EvidenceIndexSHA256: AcceptedEvidenceIndexSHA256,
 		ArtifactTreeSHA256: AcceptedArtifactTreeSHA256, ReplayGateAuditSHA256: AcceptedReplayGateAuditSHA256,
 		SourceProvenanceSHA256: AcceptedSourceProvenanceSHA256,
-		DisabledFamilies:       append([]string(nil), HistoricalDisabledFamiliesV1...),
+		DisabledFamilies:       HistoricalDisabledFamiliesV1(),
 		TournamentScopeID:      AcceptedTournamentScopeID, TournamentScopeSHA256: AcceptedTournamentScopeSHA256,
 		Cutoff:           "2026-08-12T00:00:00Z",
 		Trailing90Start:  "2026-05-14T00:00:00Z",

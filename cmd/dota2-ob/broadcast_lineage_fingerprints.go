@@ -18,6 +18,6 @@ const (
 	sessionHighWaterSourceSHA256  = "8cd02d084a5ae7077364e5c93872b2aa00a0f13ae0fbaa9e20d1abdf5a3263c7"
 	sessionFollowerSourceSHA256   = "022ac146cdea343cd3c438eab8be585862874914d33fb16e765edbbdd2a8f435"
 	insightEngineSourceSHA256     = "03fe0d238c1bb1eb166414e1baa060362356fcdfe964cc968808107e63e7f55f"
-	policyEngineSourceSHA256      = "f73d242b74f06589cc68d00592eb1dce6c940883ab6da7320d3ac9d24e06697f"
+	policyEngineSourceSHA256      = "805386b3fd50c58aa1435f791932336c6aeb40ff6d28feb1cdceeaa8d25cf6cb"
 	policyApplicationSourceSHA256 = "5678bc191e6e454694662488b4aa3af9950c1c14299aa70bc4babd3c84a6d771"
 )

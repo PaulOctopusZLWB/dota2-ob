@@ -22,7 +22,12 @@ const (
 	HistoricalNoGoOutcome                = "historical_no_go_accepted_live_only"
 )
 
-var HistoricalDisabledFamiliesV1 = []string{"hero", "item", "lane", "patch", "player", "player_hero", "role", "team"}
+var historicalDisabledFamiliesV1 = [...]string{"hero", "item", "lane", "patch", "player", "player_hero", "role", "team"}
+
+// HistoricalDisabledFamiliesV1 returns a copy of the immutable normative set.
+func HistoricalDisabledFamiliesV1() []string {
+	return append([]string(nil), historicalDisabledFamiliesV1[:]...)
+}
 
 const (
 	AcceptedHistoryCodeCommit      = "246a49825e2a7776c0673a2be448b23900a9d49e"
@@ -76,7 +81,7 @@ func (v HistoryAvailabilityBindingV1) Validate() error {
 		if v.HistoricalSnapshotID != "" || v.HistoricalSnapshotSHA256 != "" || len(v.EligibleBaselineSHA256) != 0 {
 			return errors.New("historical no-go contains snapshot")
 		}
-		if v.TerminalOutcome != HistoricalNoGoOutcome || v.CodeFoundationCommit != AcceptedHistoryCodeCommit || v.EvidenceCommit != AcceptedHistoryEvidenceCommit || v.EvidenceIndexSHA256 != AcceptedEvidenceIndexSHA256 || v.ArtifactTreeSHA256 != AcceptedArtifactTreeSHA256 || v.ReplayGateAuditSHA256 != AcceptedReplayGateAuditSHA256 || v.SourceProvenanceSHA256 != AcceptedSourceProvenanceSHA256 || v.TournamentScopeID != AcceptedTournamentScopeID || v.TournamentScopeSHA256 != AcceptedTournamentScopeSHA256 || v.PatchID != "60" || v.DotaPatch != "7.41" || v.Cutoff != "2026-08-12T00:00:00Z" || v.Trailing90Start != "2026-05-14T00:00:00Z" || v.Trailing180Start != "2026-02-13T00:00:00Z" || !equalStrings(v.DisabledFamilies, HistoricalDisabledFamiliesV1) {
+		if v.TerminalOutcome != HistoricalNoGoOutcome || v.CodeFoundationCommit != AcceptedHistoryCodeCommit || v.EvidenceCommit != AcceptedHistoryEvidenceCommit || v.EvidenceIndexSHA256 != AcceptedEvidenceIndexSHA256 || v.ArtifactTreeSHA256 != AcceptedArtifactTreeSHA256 || v.ReplayGateAuditSHA256 != AcceptedReplayGateAuditSHA256 || v.SourceProvenanceSHA256 != AcceptedSourceProvenanceSHA256 || v.TournamentScopeID != AcceptedTournamentScopeID || v.TournamentScopeSHA256 != AcceptedTournamentScopeSHA256 || v.PatchID != "60" || v.DotaPatch != "7.41" || v.Cutoff != "2026-08-12T00:00:00Z" || v.Trailing90Start != "2026-05-14T00:00:00Z" || v.Trailing180Start != "2026-02-13T00:00:00Z" || !equalStrings(v.DisabledFamilies, historicalDisabledFamiliesV1[:]) {
 			return errors.New("historical no-go identity mismatch")
 		}
 	default:
@@ -219,7 +224,7 @@ type HistoricalUnavailableFixtureV1 struct {
 }
 
 func (v HistoricalUnavailableFixtureV1) Validate() error {
-	if v.SchemaVersion != HistoricalUnavailableFixtureSchemaV1 || !isSHA(v.HistoryAvailabilityBindingID) || v.HistoryAvailabilityBindingID != v.HistoryAvailabilityBindingSHA256 || !isSHA(v.LineageManifestID) || v.LineageManifestID != v.LineageManifestSHA256 || v.HistoryState != "unavailable" || !equalStrings(v.DisabledFamilies, HistoricalDisabledFamiliesV1) || len(v.Observation.Participants) != 10 {
+	if v.SchemaVersion != HistoricalUnavailableFixtureSchemaV1 || !isSHA(v.HistoryAvailabilityBindingID) || v.HistoryAvailabilityBindingID != v.HistoryAvailabilityBindingSHA256 || !isSHA(v.LineageManifestID) || v.LineageManifestID != v.LineageManifestSHA256 || v.HistoryState != "unavailable" || !equalStrings(v.DisabledFamilies, historicalDisabledFamiliesV1[:]) || len(v.Observation.Participants) != 10 || v.Observation.Evidence.SessionID == "" {
 		return errors.New("invalid unavailable fixture")
 	}
 	if err := v.Observation.Validate(); err != nil {
@@ -232,6 +237,22 @@ func (v HistoricalUnavailableFixtureV1) ContentID() (string, error) {
 		return "", err
 	}
 	return CanonicalSHA256(v)
+}
+
+func (v HistoricalUnavailableFixtureV1) ValidateAgainst(binding HistoryAvailabilityBindingV1, lineage PolicyLineageManifestV3) error {
+	if err := v.Validate(); err != nil {
+		return err
+	}
+	bindingID, bindingErr := binding.ContentID()
+	lineageID, lineageErr := lineage.ContentID()
+	if bindingErr != nil || lineageErr != nil || binding.Mode != HistoryModeNoGo ||
+		v.HistoryAvailabilityBindingID != bindingID || v.HistoryAvailabilityBindingSHA256 != bindingID ||
+		v.LineageManifestID != lineageID || v.LineageManifestSHA256 != lineageID ||
+		lineage.HistoryAvailabilityBindingID != bindingID || lineage.HistoryAvailabilityBindingSHA256 != bindingID ||
+		v.Observation.Evidence.SessionID != lineage.SessionID || !equalStrings(v.DisabledFamilies, binding.DisabledFamilies) {
+		return errors.New("unavailable fixture cross-object mismatch")
+	}
+	return nil
 }
 
 type LiveOnlyReleaseBindingV1 struct {
@@ -264,7 +285,7 @@ type LiveOnlyReleaseBindingV1 struct {
 }
 
 func (v LiveOnlyReleaseBindingV1) Validate() error {
-	if v.SchemaVersion != LiveOnlyReleaseBindingSchemaV1 || !validGitCommit(v.SourceCommit) || v.LineageSchema != PolicyLineageManifestSchemaV3 || !isSHA(v.LineageManifestID) || v.LineageManifestID != v.LineageManifestSHA256 || !isSHA(v.HistoryAvailabilityBindingID) || v.HistoryAvailabilityBindingID != v.HistoryAvailabilityBindingSHA256 || v.CodeFoundationCommit != AcceptedHistoryCodeCommit || v.EvidenceCommit != AcceptedHistoryEvidenceCommit || v.EvidenceIndexSHA256 != AcceptedEvidenceIndexSHA256 || v.ArtifactTreeSHA256 != AcceptedArtifactTreeSHA256 || v.ReplayGateAuditSHA256 != AcceptedReplayGateAuditSHA256 || v.SourceProvenanceSHA256 != AcceptedSourceProvenanceSHA256 || v.TournamentScopeID != AcceptedTournamentScopeID || v.TournamentScopeSHA256 != AcceptedTournamentScopeSHA256 || v.Cutoff != "2026-08-12T00:00:00Z" || v.Trailing90Start != "2026-05-14T00:00:00Z" || v.Trailing180Start != "2026-02-13T00:00:00Z" || v.PatchID != "60" || v.DotaPatch != "7.41" || !equalStrings(v.DisabledFamilies, HistoricalDisabledFamiliesV1) {
+	if v.SchemaVersion != LiveOnlyReleaseBindingSchemaV1 || !validGitCommit(v.SourceCommit) || v.LineageSchema != PolicyLineageManifestSchemaV3 || !isSHA(v.LineageManifestID) || v.LineageManifestID != v.LineageManifestSHA256 || !isSHA(v.HistoryAvailabilityBindingID) || v.HistoryAvailabilityBindingID != v.HistoryAvailabilityBindingSHA256 || v.CodeFoundationCommit != AcceptedHistoryCodeCommit || v.EvidenceCommit != AcceptedHistoryEvidenceCommit || v.EvidenceIndexSHA256 != AcceptedEvidenceIndexSHA256 || v.ArtifactTreeSHA256 != AcceptedArtifactTreeSHA256 || v.ReplayGateAuditSHA256 != AcceptedReplayGateAuditSHA256 || v.SourceProvenanceSHA256 != AcceptedSourceProvenanceSHA256 || v.TournamentScopeID != AcceptedTournamentScopeID || v.TournamentScopeSHA256 != AcceptedTournamentScopeSHA256 || v.Cutoff != "2026-08-12T00:00:00Z" || v.Trailing90Start != "2026-05-14T00:00:00Z" || v.Trailing180Start != "2026-02-13T00:00:00Z" || v.PatchID != "60" || v.DotaPatch != "7.41" || !equalStrings(v.DisabledFamilies, historicalDisabledFamiliesV1[:]) {
 		return errors.New("invalid live-only release binding")
 	}
 	for n, a := range map[string]PolicyArtifactIdentityV2{"rules": v.Rules, "config": v.Config, "catalog": v.Catalog, "terminology": v.Terminology, "localization": v.LocalizationParameterMapping} {
@@ -287,4 +308,16 @@ func (v LiveOnlyReleaseBindingV1) ContentID() (string, error) {
 		return "", err
 	}
 	return CanonicalSHA256(v)
+}
+
+func (v LiveOnlyReleaseBindingV1) ValidateAgainst(binding HistoryAvailabilityBindingV1, lineage PolicyLineageManifestV3) error {
+	if err := v.Validate(); err != nil {
+		return err
+	}
+	bindingID, bindingErr := binding.ContentID()
+	lineageID, lineageErr := lineage.ContentID()
+	if bindingErr != nil || lineageErr != nil || v.HistoryAvailabilityBindingID != bindingID || v.HistoryAvailabilityBindingSHA256 != bindingID || v.LineageManifestID != lineageID || v.LineageManifestSHA256 != lineageID || lineage.HistoryAvailabilityBindingID != bindingID || v.Rules != lineage.Rules || v.Config != lineage.Config || v.Catalog != lineage.Catalog || v.Terminology != lineage.Terminology || v.LocalizationParameterMapping != lineage.LocalizationParameterMapping {
+		return errors.New("live-only release cross-object mismatch")
+	}
+	return nil
 }

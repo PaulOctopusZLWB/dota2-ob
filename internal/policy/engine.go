@@ -83,6 +83,17 @@ func NewFromCheckpoint(checkpoint contracts.PolicyCheckpointV2, config Config) (
 	return e, nil
 }
 
+// NewFromCheckpointV3 restores the unchanged semantic V2 state projection
+// from an explicitly V3-anchored checkpoint.
+func NewFromCheckpointV3(checkpoint contracts.PolicyCheckpointV3, config Config) (*Engine, error) {
+	if err := checkpoint.Validate(); err != nil {
+		return nil, err
+	}
+	v2 := contracts.PolicyCheckpointV2(checkpoint)
+	v2.SchemaVersion = contracts.PolicyCheckpointSchemaV2
+	return NewFromCheckpoint(v2, config)
+}
+
 func (e *Engine) State() contracts.PolicyStateV2 { return cloneState(e.state) }
 func (e *Engine) StateHash() string              { return e.hash }
 

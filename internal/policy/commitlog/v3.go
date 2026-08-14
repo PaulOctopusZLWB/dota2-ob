@@ -122,10 +122,17 @@ func OpenV3(root, sessionID string, binding contracts.HistoryAvailabilityBinding
 		opt(s)
 	}
 	if s.verifier == nil || s.verifier.VerifyObservation == nil || s.verifier.VerifyCommand == nil || s.verifier.Reevaluate == nil {
-		return nil, StateV3{}, errors.New("v2 recovery verifier and re-evaluator required")
+		return nil, StateV3{}, errors.New("v3 recovery verifier and re-evaluator required")
 	}
 	if err := s.rejectMixedFrames(); err != nil {
 		return nil, StateV3{}, err
+	}
+	frames, bindingRetained, manifestRetained, err := s.inspectRetainedV3()
+	if err != nil {
+		return nil, StateV3{}, err
+	}
+	if (frames && (!bindingRetained || !manifestRetained)) || bindingRetained != manifestRetained {
+		return nil, StateV3{}, fmt.Errorf("%w: retained V3 lineage incomplete", ErrLineage)
 	}
 	if err := s.sealArtifact("history-binding.v1.json", binding); err != nil {
 		return nil, StateV3{}, err
@@ -150,6 +157,29 @@ func OpenV3(root, sessionID string, binding contracts.HistoryAvailabilityBinding
 		return nil, StateV3{}, err
 	}
 	return s, cloneStateV3(state), nil
+}
+
+func (s *StoreV3) inspectRetainedV3() (frames, binding, manifest bool, err error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return false, false, false, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		switch entry.Name() {
+		case "history-binding.v1.json":
+			binding = true
+		case "lineage.v3.json":
+			manifest = true
+		default:
+			if strings.HasSuffix(entry.Name(), ".pcl3") {
+				frames = true
+			}
+		}
+	}
+	return frames, binding, manifest, nil
 }
 
 func (s *StoreV3) rejectMixedFrames() error {
@@ -550,7 +580,7 @@ func (s *StoreV3) LoadCheckpoint(visit func(CommittedV3) error) (*contracts.Poli
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if visit == nil {
-		return nil, errors.New("v2 checkpoint continuation visitor required")
+		return nil, errors.New("v3 checkpoint continuation visitor required")
 	}
 	payload, err := os.ReadFile(filepath.Join(s.dir, "checkpoint.v3.json"))
 	if errors.Is(err, os.ErrNotExist) {
@@ -596,7 +626,7 @@ func (s *StoreV3) LoadCheckpoint(visit func(CommittedV3) error) (*contracts.Poli
 // It is used when the checkpoint cache is missing or corrupt.
 func (s *StoreV3) VisitAll(visit func(CommittedV3) error) error {
 	if visit == nil {
-		return errors.New("v2 replay visitor required")
+		return errors.New("v3 replay visitor required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
