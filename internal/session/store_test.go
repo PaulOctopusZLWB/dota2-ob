@@ -140,6 +140,31 @@ func TestStoreAppendWritesJSONLRecord(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesPrivateSessionAndRawEvidence(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("private-evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for path, want := range map[string]os.FileMode{
+		store.SessionDir(): 0o700,
+		store.RawPath():    0o600,
+		filepath.Join(store.SessionDir(), "capture_lineage_v3.json"): 0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("stat %s: %v", path, err)
+			continue
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("path=%s mode=%v want=%v", path, info.Mode().Perm(), want)
+		}
+	}
+}
+
 func TestStoreShortWriteRollsBackAndReusesSequence(t *testing.T) {
 	f := &fakeRawFile{data: []byte("existing\n"), offset: int64(len("existing\n")), writeLimit: 8}
 	store, err := session.NewStore(t.TempDir(),

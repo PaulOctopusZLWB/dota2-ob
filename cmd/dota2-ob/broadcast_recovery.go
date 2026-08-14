@@ -84,8 +84,7 @@ func (r *observationResolver) resolve(commit contracts.PolicyCommitV2) ([]contra
 	return candidates, nil
 }
 
-func newProductionReplayVerifier(rawPath, sessionID string, lineage contracts.PolicyLineageManifestV2, config policy.Config) (commitlog.ReplayVerifierV2, *observationResolver) {
-	resolver := newObservationResolver(rawPath, sessionID, lineage)
+func newProductionReplayVerifier(resolver *observationResolver, sessionID string, config policy.Config) commitlog.ReplayVerifierV2 {
 	engine := policy.New(sessionID, config)
 	staged := make(map[uint64][]contracts.InsightCandidateV1)
 	return commitlog.ReplayVerifierV2{
@@ -102,7 +101,7 @@ func newProductionReplayVerifier(rawPath, sessionID string, lineage contracts.Po
 			delete(staged, commit.CommitSequence)
 			return engine.ReplayCommit(commit, candidates)
 		},
-	}, resolver
+	}
 }
 
 func verifyCommittedCommand(commit contracts.PolicyCommitV2) error {

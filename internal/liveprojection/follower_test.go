@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -651,6 +652,38 @@ func TestFollowerCountsRetriedNoOutputSequenceOnceAfterCursorFailure(t *testing.
 	health := follower.Health()
 	if health.ProjectionRejectionCount != 1 || health.LastProjectionRejectionSequence != 1 {
 		t.Fatalf("health=%#v", health)
+	}
+}
+
+func TestFollowerDoesNotClearRejectionBeforeProducedCursorPersists(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("clear-after-cursor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`null`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+	seed := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, nil)
+	if err := seed.CatchUp(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &controlSink{}
+	ops := &cursorFaultIO{fault: "create", target: cursorPath}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{&recordingProjection{}}, liveprojection.WithCursorIO(ops), liveprojection.WithStartupBarrier(sink), liveprojection.WithRejectionHealthSink(sink))
+	if err := follower.CatchUp(context.Background(), 2); err == nil {
+		t.Fatal("produced cursor failure succeeded")
+	}
+	sink.mu.Lock()
+	events := append([]string(nil), sink.events...)
+	sink.mu.Unlock()
+	if slices.Contains(events, "clear") {
+		t.Fatalf("rejection cleared before produced cursor persisted: %v", events)
 	}
 }
 

@@ -247,7 +247,15 @@ func TestRunConfiguresCommittedOverlayPort(t *testing.T) {
 			t.Fatal("configured product has no delivery server")
 		}
 		response := httptest.NewRecorder()
-		product.delivery.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			response = httptest.NewRecorder()
+			product.delivery.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+			if !strings.Contains(response.Body.String(), `"health_code":"projection_restoring"`) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		if response.Code != http.StatusOK {
 			t.Fatalf("configured overlay status=%d body=%s", response.Code, response.Body.String())
 		}
@@ -318,6 +326,63 @@ func TestRunMissingLineageDisablesDeliveryWithoutBlockingRawCapture(t *testing.T
 	}
 	if !strings.Contains(output.String(), "broadcast_policy_config_failed") {
 		t.Fatalf("missing bounded configuration failure: %q", output.String())
+	}
+}
+
+func TestRunLaterPolicyConfigurationReplaysRecordsNotConsumedByUnavailablePolicy(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	const sessionID = "late-policy-config"
+	newDeps := func() runDependencies {
+		deps := defaultRunDependencies()
+		deps.newTokenFile = func(string) (string, string, func(), error) { return "test-only-operator-token", "", func() {}, nil }
+		deps.listen = func(_ string, address string) (net.Listener, error) {
+			return commandListener{address: commandAddress(address)}, nil
+		}
+		return deps
+	}
+
+	first := newDeps()
+	first.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		product := server.(*pairedHTTPServer)
+		response := httptest.NewRecorder()
+		product.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{}`)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("capture status=%d body=%s", response.Code, response.Body.String())
+		}
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			status := httptest.NewRecorder()
+			product.capture.Handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+			if strings.Contains(status.Body.String(), `"high_water":1`) && (strings.Contains(status.Body.String(), `"projected_sequence":1`) || strings.Contains(status.Body.String(), `"last_error"`)) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		waiter.Wait()
+		return appender.Close()
+	}
+	var firstOutput bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root, "--session-id", sessionID}, &firstOutput, first); code != 0 {
+		t.Fatalf("first exit=%d output=%q", code, firstOutput.String())
+	}
+
+	lineagePath := filepath.Join(t.TempDir(), "lineage.v2.json")
+	writeTestLineage(t, lineagePath, testLineage(sessionID))
+	second := newDeps()
+	second.runLifecycle = func(_ lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		deadline := time.Now().Add(2 * time.Second)
+		for policyLogBytes(t, filepath.Join(root, sessionID)) == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := policyLogBytes(t, filepath.Join(root, sessionID)); got == 0 {
+			t.Fatal("late policy configuration skipped the already committed raw record")
+		}
+		waiter.Wait()
+		return appender.Close()
+	}
+	var secondOutput bytes.Buffer
+	if code := runWithDependencies([]string{"--data-dir", root, "--session-id", sessionID, "--policy-lineage-file", lineagePath}, &secondOutput, second); code != 0 {
+		t.Fatalf("second exit=%d output=%q", code, secondOutput.String())
 	}
 }
 

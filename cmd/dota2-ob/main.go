@@ -147,7 +147,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		lineage, lineageErr := loadPolicyLineage(*policyLineageFile, store.SessionID())
 		if lineageErr == nil {
 			broadcast, lineageErr = newBroadcastRuntime(broadcastConfig{
-				DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Lineage: lineage, Now: time.Now,
+				DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Lineage: lineage, Now: time.Now, ProjectionRestoreRequired: true,
 			})
 		}
 		if lineageErr != nil {
@@ -170,13 +170,18 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		gsi.WithLatest(latest), gsi.WithProfiler(profilerInstance),
 		gsi.WithAnalytics(analyticsEngine), gsi.WithTracker(tracker),
 	}
+	var policyProjection session.LiveProjection = unavailablePolicyObservationProjection{}
 	if broadcast != nil {
-		captureOptions = append(captureOptions, gsi.WithLiveProjections(
-			newTrackedCaptureProjection(capture.NewLatestProjection(latest), tracker, operator.SubsystemLatest, "latest_failed"),
-			newTrackedCaptureProjection(capture.NewProfileProjection(profilerInstance, store.SessionDir()), tracker, operator.SubsystemProfile, "profile_failed"),
-			newTrackedCaptureProjection(capture.NewAnalyticsProjection(analyticsEngine, store.SessionDir(), store.SessionID()), tracker, operator.SubsystemAnalytics, "analytics_failed"),
-			newPolicyObservationProjection(broadcast, tracker),
-		), gsi.WithProjectionStartupBarrier(broadcast), gsi.WithProjectionRejectionHealthSink(broadcast))
+		policyProjection = newPolicyObservationProjection(broadcast, tracker)
+	}
+	captureOptions = append(captureOptions, gsi.WithLiveProjections(
+		newTrackedCaptureProjection(capture.NewLatestProjection(latest), tracker, operator.SubsystemLatest, "latest_failed"),
+		newTrackedCaptureProjection(capture.NewProfileProjection(profilerInstance, store.SessionDir()), tracker, operator.SubsystemProfile, "profile_failed"),
+		newTrackedCaptureProjection(capture.NewAnalyticsProjection(analyticsEngine, store.SessionDir(), store.SessionID()), tracker, operator.SubsystemAnalytics, "analytics_failed"),
+		policyProjection,
+	))
+	if broadcast != nil {
+		captureOptions = append(captureOptions, gsi.WithProjectionStartupBarrier(broadcast), gsi.WithProjectionRejectionHealthSink(broadcast))
 	}
 	if *diagnosticMode {
 		captureOptions = append(captureOptions,

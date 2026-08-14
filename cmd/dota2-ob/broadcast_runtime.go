@@ -19,12 +19,13 @@ import (
 const overlayFreshness = 2 * time.Second
 
 type broadcastConfig struct {
-	DataRoot     string
-	SessionID    string
-	RawPath      string
-	Lineage      contracts.PolicyLineageManifestV2
-	Now          func() time.Time
-	StoreOptions []commitlog.V2Option
+	DataRoot                  string
+	SessionID                 string
+	RawPath                   string
+	Lineage                   contracts.PolicyLineageManifestV2
+	Now                       func() time.Time
+	StoreOptions              []commitlog.V2Option
+	ProjectionRestoreRequired bool
 }
 
 type broadcastRuntime struct {
@@ -52,20 +53,17 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 	policyConfig.CandidateConfigVersion = config.Lineage.Config.Version
 	policyConfig.CandidateConfigArtifact = config.Lineage.Config
 	policyConfig.CandidateRulesArtifact = config.Lineage.Rules
-	replayVerifier, verificationResolver := newProductionReplayVerifier(config.RawPath, config.SessionID, config.Lineage, policyConfig)
+	resolver := newObservationResolver(config.RawPath, config.SessionID, config.Lineage)
+	replayVerifier := newProductionReplayVerifier(resolver, config.SessionID, policyConfig)
 	verifier := commitlog.WithV2ReplayVerifier(replayVerifier)
 	storeOptions := append([]commitlog.V2Option(nil), config.StoreOptions...)
 	storeOptions = append(storeOptions, verifier)
 	store, _, err := commitlog.OpenV2(config.DataRoot, config.SessionID, config.Lineage, storeOptions...)
-	verificationCloseErr := verificationResolver.Close()
 	if err != nil {
+		_ = resolver.Close()
 		return nil, err
 	}
-	if verificationCloseErr != nil {
-		_ = store.Close()
-		return nil, verificationCloseErr
-	}
-	resolver := newObservationResolver(config.RawPath, config.SessionID, config.Lineage)
+	resolver.previous = nil
 	app, err := recoverProductionApplication(store, config.SessionID, config.Lineage, policyConfig, resolver)
 	resolverCloseErr := resolver.Close()
 	if err != nil {
@@ -77,12 +75,16 @@ func newBroadcastRuntime(config broadcastConfig) (*broadcastRuntime, error) {
 		return nil, resolverCloseErr
 	}
 	nowMS := config.Now().UTC().UnixMilli()
-	hidden, err := presentation.Hidden(config.SessionID, nowMS, nowMS+overlayFreshness.Milliseconds(), "waiting_for_policy_decision")
+	healthCode := "waiting_for_policy_decision"
+	if config.ProjectionRestoreRequired {
+		healthCode = "projection_restoring"
+	}
+	hidden, err := presentation.Hidden(config.SessionID, nowMS, nowMS+overlayFreshness.Milliseconds(), healthCode)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
 	}
-	return &broadcastRuntime{app: app, store: store, now: config.Now, lineage: config.Lineage, previous: resolver.previous, overlay: hidden}, nil
+	return &broadcastRuntime{app: app, store: store, now: config.Now, lineage: config.Lineage, previous: resolver.previous, overlay: hidden, restoringProjection: config.ProjectionRestoreRequired}, nil
 }
 
 func (r *broadcastRuntime) Close() error {
@@ -141,6 +143,9 @@ func (r *broadcastRuntime) execute(ctx context.Context, command contracts.Operat
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.restoringProjection {
+		return contracts.OperatorCommandResultV1{}, errors.New("projection restore in progress")
+	}
 	duplicate := hasCommandResult(r.app.State().CommandResults, command.CommandID)
 	commit, err := r.app.ApplyCommand(command)
 	if err != nil {

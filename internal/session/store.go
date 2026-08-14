@@ -110,8 +110,11 @@ func NewStore(root string, opts ...Option) (*Store, error) {
 	if !isSafeSessionID(store.sessionID) {
 		return nil, fmt.Errorf("unsafe session id %q", store.sessionID)
 	}
-	if err := os.MkdirAll(store.SessionDir(), 0o755); err != nil {
+	if err := os.MkdirAll(store.SessionDir(), 0o700); err != nil {
 		return nil, fmt.Errorf("create session dir: %w", err)
+	}
+	if err := os.Chmod(store.SessionDir(), 0o700); err != nil {
+		return nil, fmt.Errorf("secure session dir: %w", err)
 	}
 
 	sequence, version, err := recoverRawFile(store.RawPath(), store.sessionID)
@@ -122,12 +125,19 @@ func NewStore(root string, opts ...Option) (*Store, error) {
 		return nil, errors.New("legacy raw session is read-only; start a new V3 session")
 	}
 	store.sequence = sequence
+	if _, err := os.Stat(store.RawPath()); err == nil {
+		if err := os.Chmod(store.RawPath(), 0o600); err != nil {
+			return nil, fmt.Errorf("secure raw jsonl: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat raw jsonl: %w", err)
+	}
 	if err := ensureCaptureLineageV3(store.SessionDir(), store.sequence); err != nil {
 		return nil, err
 	}
 	if store.openFile == nil {
 		store.openFile = func(path string) (RawFile, error) {
-			return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+			return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 		}
 	}
 	if store.highWater == nil {

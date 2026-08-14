@@ -121,6 +121,12 @@ type policyObservationProjection struct {
 	tracker *operator.Tracker
 }
 
+type unavailablePolicyObservationProjection struct{}
+
+func (unavailablePolicyObservationProjection) Apply(context.Context, *session.Record) error {
+	return errors.New("broadcast_policy_unconfigured")
+}
+
 func newPolicyObservationProjection(runtime *broadcastRuntime, tracker *operator.Tracker) liveprojection.Projection {
 	return policyObservationProjection{runtime: runtime, tracker: tracker}
 }

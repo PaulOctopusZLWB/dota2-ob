@@ -236,14 +236,20 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 				f.nextProjection = index + 1
 			}
 		}
-		if record.ProjectionResult == ProjectionConsumedNoOutput || next.ProjectionRejectionActive != f.currentRejectionActive() {
+		rejectionChanged := next.ProjectionRejectionActive != f.currentRejectionActive()
+		if record.ProjectionResult == ProjectionConsumedNoOutput {
 			if err := f.emitRejectionTransition(ctx, next); err != nil {
 				return err
 			}
 		}
-		f.restoreRejectionSummary(next)
 		if err := f.writeCursor(next); err != nil {
 			return err
+		}
+		f.restoreRejectionSummary(next)
+		if record.ProjectionResult == ProjectionProduced && rejectionChanged {
+			if err := f.emitRejectionTransition(ctx, next); err != nil {
+				return err
+			}
 		}
 		f.cachedSequence = record.Sequence
 		f.nextOffset = nextOffset

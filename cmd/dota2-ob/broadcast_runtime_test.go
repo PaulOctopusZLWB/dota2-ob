@@ -46,6 +46,33 @@ func TestBroadcastRuntimeStartsWithAuthoritativeEmptyOperatorAndHiddenOverlay(t 
 	}
 }
 
+func TestBroadcastRuntimeRejectsCommandsUntilProjectionRestoreCompletes(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	const sessionID = "restore-command-gate"
+	runtime, err := newBroadcastRuntime(broadcastConfig{
+		DataRoot: t.TempDir(), SessionID: sessionID, RawPath: filepath.Join(t.TempDir(), "raw.jsonl"),
+		Lineage: testLineage(sessionID), Now: func() time.Time { return now }, ProjectionRestoreRequired: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "restore-hide", SessionID: sessionID, Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: 0, PolicyTimeMS: now.UnixMilli()}
+	if _, err := runtime.execute(context.Background(), command); err == nil {
+		t.Fatal("command was admitted before projection restore completed")
+	}
+	if state, _ := runtime.operatorState(context.Background()); state.PolicyRevision != 0 {
+		t.Fatalf("restore-time command mutated policy: %#v", state)
+	}
+	assertOverlayHealth(t, runtime, "projection_restoring", "hidden")
+	if err := runtime.CompleteRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.execute(context.Background(), command); err != nil || result.Status != contracts.CommandAccepted {
+		t.Fatalf("post-restore command=%#v err=%v", result, err)
+	}
+}
+
 func TestBroadcastRuntimeCommandsMutateOnlyPolicyAndPublishCommittedOverlay(t *testing.T) {
 	now := time.UnixMilli(10_000).UTC()
 	sessionID := "product-session"
@@ -151,16 +178,17 @@ func TestBroadcastRuntimeRejectsSubstitutedLocalLineageArtifact(t *testing.T) {
 
 func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 	files := map[string]string{
-		"../../internal/contracts/contracts.go":  contractsSourceSHA256,
-		"../../internal/presentation/catalog.go": presentationCatalogSHA256,
-		"main.go":                                productMainSourceSHA256,
-		"broadcast_ports.go":                     productPortsSourceSHA256,
-		"broadcast_recovery.go":                  productRecoverySourceSHA256,
-		"broadcast_runtime.go":                   productRuntimeSourceSHA256,
-		"broadcast_lineage.go":                   productLineageSourceSHA256,
-		"../../internal/insight/engine.go":       insightEngineSourceSHA256,
-		"../../internal/policy/engine.go":        policyEngineSourceSHA256,
-		"../../internal/policy/application.go":   policyApplicationSourceSHA256,
+		"../../internal/contracts/contracts.go":      contractsSourceSHA256,
+		"../../internal/capture/live_observation.go": liveMappingSourceSHA256,
+		"../../internal/presentation/catalog.go":     presentationCatalogSHA256,
+		"main.go":                                    productMainSourceSHA256,
+		"broadcast_ports.go":                         productPortsSourceSHA256,
+		"broadcast_recovery.go":                      productRecoverySourceSHA256,
+		"broadcast_runtime.go":                       productRuntimeSourceSHA256,
+		"broadcast_lineage.go":                       productLineageSourceSHA256,
+		"../../internal/insight/engine.go":           insightEngineSourceSHA256,
+		"../../internal/policy/engine.go":            policyEngineSourceSHA256,
+		"../../internal/policy/application.go":       policyApplicationSourceSHA256,
 	}
 	for path, want := range files {
 		payload, err := os.ReadFile(path)
@@ -184,12 +212,15 @@ func TestProductLineageUsesAcceptedCaptureV3Identities(t *testing.T) {
 		"raw record schema":  {artifacts.rawRecordSchema, "raw_record.v3", session.RawRecordSchemaV3Identity},
 		"raw record framing": {artifacts.rawRecordFraming, "raw_record_framing.v3", session.RawRecordFramingV3Identity},
 		"raw payload schema": {artifacts.rawPayloadSchema, "dota2_gsi.v3", session.RawPayloadSchemaV3Identity},
-		"projection mapping": {artifacts.projectionMapping, "gsi_projection.v3", session.GSIProjectionMappingV3Identity},
 	}
 	for name, want := range wants {
 		if want.got.Version != want.version || "sha256:"+want.got.ContentSHA256 != want.identity {
 			t.Errorf("%s identity=%#v want version=%q identity=%q", name, want.got, want.version, want.identity)
 		}
+	}
+	wantProjection := sourceArtifact("gsi_projection.v3+live_observation.v1", strings.TrimPrefix(session.GSIProjectionMappingV3Identity, "sha256:"), liveMappingSourceSHA256)
+	if artifacts.projectionMapping != wantProjection {
+		t.Errorf("projection mapping identity=%#v want=%#v", artifacts.projectionMapping, wantProjection)
 	}
 }
 
