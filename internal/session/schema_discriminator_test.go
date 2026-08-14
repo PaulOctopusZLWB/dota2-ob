@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"io"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,39 @@ func TestSchemaDiscriminatorUsesEncodingJSONMemberSemantics(t *testing.T) {
 			}
 			if version != tc.version {
 				t.Fatalf("version=%d want=%d", version, tc.version)
+			}
+		})
+	}
+}
+
+func TestSchemaDiscriminatorPreservesNextJSONLRecord(t *testing.T) {
+	v1 := `{"received_at":"2026-08-14T00:00:00Z","payload":{},"raw":{}}`
+	v2 := `{"schema_version":2,"session_id":"continuation","sequence":1,"received_at":"2026-08-14T00:00:00Z","source":"gsi","payload":{},"raw":{}}`
+	const next = `{"distinct_second_record":true}` + "\n"
+	for _, tc := range []struct {
+		name, first string
+		version     int
+	}{
+		{"v1-decoder-prefetch", v1, 1},
+		{"v2-decoder-prefetch", v2, 2},
+		{"v1-json-whitespace", v1 + " \t\r", 1},
+		{"v2-json-whitespace", v2 + " \t\r", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := bufio.NewReaderSize(strings.NewReader(tc.first+"\n"+next), 64*1024)
+			version, err := detectSchemaVersion(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if version != tc.version {
+				t.Fatalf("version=%d want=%d", version, tc.version)
+			}
+			remainder, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(remainder) != next {
+				t.Fatalf("remainder=%q want=%q", remainder, next)
 			}
 		})
 	}

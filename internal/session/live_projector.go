@@ -737,7 +737,7 @@ func detectRawSchemaVersion(path string) (int, error) {
 // a complete supported V1/V2 object opts into legacy framing; every unresolved
 // result remains V3-bounded when the caller reads the record.
 func detectSchemaVersion(reader *bufio.Reader) (int, error) {
-	limited := &io.LimitedReader{R: reader, N: int64(maxLegacyFrameBytes) + 1}
+	limited := &io.LimitedReader{R: &newlineBoundedReader{reader: reader}, N: int64(maxLegacyFrameBytes) + 1}
 	decoder := json.NewDecoder(limited)
 	decoder.UseNumber()
 	first, err := decoder.Token()
@@ -840,28 +840,61 @@ func detectSchemaVersion(reader *bufio.Reader) (int, error) {
 	return 3, nil
 }
 
-func persistedFrameHasSingleValue(decoder *json.Decoder, limited *io.LimitedReader) (bool, error) {
-	tail := bufio.NewReaderSize(io.MultiReader(decoder.Buffered(), limited), 64*1024)
-	for {
-		value, err := tail.ReadByte()
-		if err == io.EOF {
-			if limited.N == 0 {
-				return false, io.ErrUnexpectedEOF
-			}
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		switch value {
-		case '\n':
-			return true, nil
-		case ' ', '\t', '\r':
-			continue
-		default:
-			return false, nil
+type newlineBoundedReader struct {
+	reader *bufio.Reader
+}
+
+func (bounded *newlineBoundedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if bounded.reader.Buffered() == 0 {
+		if _, err := bounded.reader.Peek(1); err != nil {
+			return 0, err
 		}
 	}
+	available := min(len(p), bounded.reader.Buffered())
+	peeked, err := bounded.reader.Peek(available)
+	if err != nil {
+		return 0, err
+	}
+	if newline := bytes.IndexByte(peeked, '\n'); newline >= 0 {
+		available = newline + 1
+	}
+	copy(p, peeked[:available])
+	if _, err := bounded.reader.Discard(available); err != nil {
+		return 0, err
+	}
+	return available, nil
+}
+
+func persistedFrameHasSingleValue(decoder *json.Decoder, limited *io.LimitedReader) (bool, error) {
+	buffer := make([]byte, 64*1024)
+	for _, tail := range []io.Reader{decoder.Buffered(), limited} {
+		for {
+			read, err := tail.Read(buffer)
+			for _, value := range buffer[:read] {
+				switch value {
+				case '\n':
+					return true, nil
+				case ' ', '\t', '\r':
+					continue
+				default:
+					return false, nil
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+	if limited.N == 0 {
+		return false, io.ErrUnexpectedEOF
+	}
+	return true, nil
 }
 
 func schemaProbeFailure(limited *io.LimitedReader) (int, error) {
