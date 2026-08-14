@@ -26,7 +26,7 @@ The sanitized fixture is
 `internal/integration/m4/testdata/captured_gsi_schedule.json`:
 
 - fixture SHA-256: `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`
-- canonical production-composition golden SHA-256: `1d5b62da1e9f2ef61ec99f9de61a1614a22b832fb9b70647378e7bcd50c525ca`
+- canonical production-composition golden SHA-256: `538264076c4e5f05b0d97485e3a35c8d41b3bd27369544666de9534bec16e3bf`
 - no account ID, Steam ID, player handle, token, or other private identifier is present
 
 The test starts the real product composition through `runWithDependencies`,
@@ -58,7 +58,7 @@ Clocks are separate and fixture-owned:
 - map `clock_time` and `game_time` remain source game clocks;
 - `policy_time_ms` drives policy causality;
 - command times drive approval and stale-revision rejection;
-- display/publication time has an independent injected clock;
+- display/publication and gateway receipt have independently injected clocks;
 - overlay publication time is at least the corresponding decision time;
 - DotaTV delay is not synthesized and authorizes no claim.
 
@@ -75,10 +75,16 @@ states. The product path covers exact 10 MiB capture, malformed and oversize
 input, missing/substituted binding with healthy raw capture, partial-tail and
 cache recovery, cursor loss, duplicate and stale-revision commands, real
 browser/OBS asset reload, capacity-one high-water coalescing, and capacity-64
-saturation. Saturation hides inside two seconds and three further raw updates
-prove no transient republication. Component boundary tests retain the exact 1
-MiB observation and 64 KiB candidate/overlay contract proofs and delayed
-gateway ordering; the product harness freezes their port and health outcomes.
+saturation. The same production composition serializes and strictly decodes an
+exact 1 MiB observation request before policy admission, then consumes a
+1 MiB-plus-one request as a hidden `observation_contract_exceeded` outcome
+without rejecting raw capture. It admits an exact 64 KiB canonical candidate
+and overlay response, suppresses a 64 KiB-plus-one candidate, and makes the
+oversize overlay unavailable. Three later raw updates prove no transient
+republication within the two-second bound. Finally, independent publication
+and gateway clocks inject a newer unsafe state followed by a delayed older
+state; the gateway returns `overlay_unsafe` and then `overlay_out_of_order`
+without changing the operator revision or republishing the older overlay.
 
 ## Verification
 

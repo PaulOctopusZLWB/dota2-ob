@@ -19,19 +19,20 @@ import (
 const observationIndexEntryBytes = 16
 
 type observationResolver struct {
-	rawPath   string
-	sessionID string
-	lineage   contracts.PolicyLineageManifestV2
-	previous  *contracts.LiveObservationV1
-	data      *os.File
-	index     *os.File
-	indexPath string
-	dataPath  string
-	maximum   uint64
+	rawPath        string
+	sessionID      string
+	lineage        contracts.PolicyLineageManifestV2
+	previous       *contracts.LiveObservationV1
+	data           *os.File
+	index          *os.File
+	indexPath      string
+	dataPath       string
+	maximum        uint64
+	mapObservation func(*session.Record) (contracts.LiveObservationV1, error)
 }
 
 func newObservationResolver(rawPath, sessionID string, lineage contracts.PolicyLineageManifestV2) *observationResolver {
-	return &observationResolver{rawPath: rawPath, sessionID: sessionID, lineage: lineage}
+	return &observationResolver{rawPath: rawPath, sessionID: sessionID, lineage: lineage, mapObservation: capture.MapLiveObservationV1}
 }
 
 func (r *observationResolver) Close() error {
@@ -202,16 +203,15 @@ func (r *observationResolver) ensureIndex() (resultErr error) {
 	err = session.StreamRecords(r.rawPath, r.sessionID, func(record *session.Record) error {
 		var payload []byte
 		if record.ProjectionResult == session.ProjectionProduced {
-			observation, mapErr := capture.MapLiveObservationV1(record)
+			observation, mapErr := r.mapObservation(record)
 			if mapErr != nil {
 				return mapErr
 			}
-			payload, mapErr = contracts.MarshalCanonical(observation)
-			if mapErr != nil {
-				return mapErr
-			}
-			if len(payload) > contracts.MaxLiveObservationBytes {
-				return errors.New("persisted observation exceeds contract bound")
+			if observation.Validate() == nil {
+				payload, mapErr = contracts.MarshalCanonical(observation)
+				if mapErr != nil {
+					return mapErr
+				}
 			}
 		}
 		var entry [observationIndexEntryBytes]byte

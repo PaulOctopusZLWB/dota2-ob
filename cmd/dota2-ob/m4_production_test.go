@@ -18,8 +18,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/delivery"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
@@ -61,6 +63,22 @@ type m4ProductionOutput struct {
 	HighWaterOne    bool                                `json:"high_water_capacity_one"`
 	FaultStates     []contracts.OverlayStateV1          `json:"fault_overlay_states"`
 	GatewayFailures []string                            `json:"gateway_failures"`
+	Boundaries      []m4BoundaryEvidence                `json:"boundaries"`
+}
+
+type m4BoundaryEvidence struct {
+	Name                string `json:"name"`
+	RawSequence         uint64 `json:"raw_sequence"`
+	CanonicalBytes      int    `json:"canonical_bytes"`
+	RawAccepted         bool   `json:"raw_accepted"`
+	PolicySequence      uint64 `json:"policy_sequence"`
+	CandidateBytes      int    `json:"candidate_bytes,omitempty"`
+	OverlayBytes        int    `json:"overlay_bytes,omitempty"`
+	Visibility          string `json:"visibility"`
+	HealthCode          string `json:"health_code"`
+	GatewayOutcome      string `json:"gateway_outcome"`
+	OperatorRevision    uint64 `json:"operator_revision"`
+	NoTransientReappear bool   `json:"no_transient_reappearance"`
 }
 
 type m4ReplayBaseline struct {
@@ -181,11 +199,20 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 	receiptClock := &lockedClock{value: time.UnixMilli(fixture.Updates[0].PolicyTime).UTC()}
 	policyClock := &lockedClock{value: time.UnixMilli(fixture.Updates[0].PolicyTime).UTC()}
 	displayClock := &lockedClock{value: time.UnixMilli(fixture.Updates[0].PolicyTime + 100).UTC()}
+	gatewayClock := &lockedClock{value: displayClock.Now()}
 	var active *broadcastRuntimeV3
 	var activeRaw *session.Store
 	var faultMu sync.Mutex
 	presentationFailures := 0
 	auditFailure := false
+	candidateBoundaryBytes := 0
+	overlayBoundaryBytes := 0
+	observationBoundaryBytes := 0
+	lastCandidateBytes := 0
+	lastOverlayBytes := 0
+	lastObservationBytes := 0
+	observationTargets := make(map[uint64]int)
+	candidateTargets := make(map[uint64]int)
 	var output m4ProductionOutput
 	args := []string{"--addr", "127.0.0.1:43210", "--delivery-addr", "127.0.0.1:43211", "--data-dir", root, "--session-id", fixture.SessionID, "--policy-mode", "v3-live-only", "--history-binding-file", history, "--live-only-lineage-file", lineage, "--live-only-release-file", release}
 
@@ -194,6 +221,7 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 		deps.now = receiptClock.Now
 		deps.policyNow = policyClock.Now
 		deps.displayNow = displayClock.Now
+		deps.gatewayNow = gatewayClock.Now
 		deps.newStore = func(dir, id string) (*session.Store, error) {
 			store, err := session.NewStore(dir, session.WithSessionID(id), session.WithClock(receiptClock.Now))
 			activeRaw = store
@@ -201,6 +229,22 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 		}
 		deps.newTokenFile = func(string) (string, string, func(), error) { return m4Token, "", func() {}, nil }
 		deps.listen = func(_, _ string) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+		deps.mapPolicyObservation = func(record *session.Record) (contracts.LiveObservationV1, error) {
+			observation, err := capture.MapLiveObservationV1(record)
+			faultMu.Lock()
+			defer faultMu.Unlock()
+			target := observationTargets[record.Sequence]
+			if target == 0 && observationBoundaryBytes != 0 {
+				target = observationBoundaryBytes
+				observationTargets[record.Sequence] = target
+			}
+			if err != nil || target == 0 {
+				return observation, err
+			}
+			observation = exactM4Observation(t, observation, target)
+			lastObservationBytes = len(mustCanonicalTest(t, observation))
+			return observation, nil
+		}
 		deps.newBroadcastV3 = func(config broadcastConfigV3) (*broadcastRuntimeV3, error) {
 			policyConfig := policy.DefaultConfig()
 			policyConfig.CooldownMS = 1
@@ -212,7 +256,29 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 					presentationFailures--
 					return contracts.OverlayStateV1{}, errors.New("injected production presentation failure")
 				}
-				return presentation.Build(input)
+				state, err := presentation.Build(input)
+				if err != nil || overlayBoundaryBytes == 0 {
+					return state, err
+				}
+				state = exactM4OverlayState(t, state, overlayBoundaryBytes)
+				lastOverlayBytes = len(mustCanonicalTest(t, state))
+				return state, nil
+			}
+			config.EvaluateLiveOnly = func(input insight.LiveOnlyInput, cfg insight.Config) []contracts.InsightCandidateV1 {
+				candidates := insight.EvaluateLiveOnly(input, cfg)
+				faultMu.Lock()
+				defer faultMu.Unlock()
+				target := candidateTargets[input.Observation.Evidence.Sequence]
+				if target == 0 && candidateBoundaryBytes != 0 {
+					target = candidateBoundaryBytes
+					candidateTargets[input.Observation.Evidence.Sequence] = target
+				}
+				if target == 0 || len(candidates) == 0 {
+					return candidates
+				}
+				candidates[0] = exactM4Candidate(t, candidates[0], target)
+				lastCandidateBytes = len(mustCanonicalTest(t, candidates[0]))
+				return candidates
 			}
 			config.StoreOptions = append(config.StoreOptions, commitlog.WithV3Hooks(commitlog.Hooks{SyncFile: func(file *os.File) error {
 				faultMu.Lock()
@@ -251,7 +317,7 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 					auditFailure = true
 					faultMu.Unlock()
 					postM4AuditFailure(t, paired.capture.Handler, paired.delivery.Handler, fixture.Updates[3].Body, receiptClock, policyClock, &output)
-					collectM4OrderedEvidence(t, active, fixture, root, &output)
+					collectM4OrderedEvidence(t, active, activeRaw, fixture, root, &output)
 				}
 			} else {
 				highWater, unsubscribe := activeRaw.HighWater().Subscribe()
@@ -268,6 +334,7 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 					receiptClock.Set(received)
 					policyClock.Set(time.UnixMilli(update.PolicyTime).UTC())
 					displayClock.Set(time.UnixMilli(fixture.Updates[0].PolicyTime + 100 + int64(i)).UTC())
+					gatewayClock.Set(displayClock.Now())
 					response := httptest.NewRecorder()
 					paired.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", bytes.NewReader(update.Body)))
 					if response.Code != http.StatusOK {
@@ -302,13 +369,15 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 				}
 				output.Commands = append(output.Commands, output.Command, duplicate, conflictResult)
 				displayClock.Set(time.UnixMilli(command.PolicyTimeMS + 1).UTC())
+				gatewayClock.Set(displayClock.Now())
 				output.Visible = getM4Overlay(t, paired.delivery.Handler)
 				output.OverlayStates = append(output.OverlayStates, output.Visible)
 				output.OperatorStates = append(output.OperatorStates, getM4Operator(t, paired.delivery.Handler))
+				exerciseM4ProductionBoundaries(t, paired, active, activeRaw, fixture, receiptClock, policyClock, displayClock, gatewayClock, &faultMu, &observationBoundaryBytes, &candidateBoundaryBytes, &overlayBoundaryBytes, &lastObservationBytes, &lastCandidateBytes, &lastOverlayBytes, &output)
 				faultMu.Lock()
 				presentationFailures = 1
 				faultMu.Unlock()
-				exerciseM4ProjectionAndSaturation(t, paired, active, fixture, root, receiptClock, policyClock, &output)
+				exerciseM4ProjectionAndSaturation(t, paired, active, activeRaw, fixture, root, receiptClock, policyClock, &output)
 			}
 			shutdown := make(chan os.Signal, 1)
 			shutdown <- os.Interrupt
@@ -410,14 +479,291 @@ func postM4NextNewerBoundary(t *testing.T, handler http.Handler, active *broadca
 	if response.Code != http.StatusOK {
 		t.Fatalf("next-newer delayed/older boundary=%d %s", response.Code, response.Body.String())
 	}
-	waitObservation(t, active, 76)
+	lastBefore, _ := m4RuntimeBaseline(active)
+	expected := lastBefore + 1
+	waitObservation(t, active, expected)
 	last, previous := m4RuntimeBaseline(active)
-	if last != 76 || previous != 76 {
+	if last != expected || previous != expected {
 		t.Fatalf("next-newer observation not accepted after replay: last=%d previous=%d", last, previous)
 	}
 }
 
-func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, active *broadcastRuntimeV3, fixture m4Schedule, root string, clock, policyClock *lockedClock, output *m4ProductionOutput) {
+func exerciseM4ProductionBoundaries(t *testing.T, paired *pairedHTTPServer, active *broadcastRuntimeV3, raw *session.Store, fixture m4Schedule, receiptClock, policyClock, displayClock, gatewayClock *lockedClock, faultMu *sync.Mutex, observationBoundaryBytes, candidateBoundaryBytes, overlayBoundaryBytes, lastObservationBytes, lastCandidateBytes, lastOverlayBytes *int, output *m4ProductionOutput) {
+	t.Helper()
+
+	faultMu.Lock()
+	*observationBoundaryBytes = contracts.MaxLiveObservationBytes
+	faultMu.Unlock()
+	receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+	policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+	displayClock.Set(displayClock.Now().Add(3 * time.Millisecond))
+	gatewayClock.Set(displayClock.Now())
+	exactSequence := raw.HighWater().Current().Sequence + 1
+	postM4Raw(t, paired.capture.Handler, fixture.Updates[3].Body)
+	waitObservation(t, active, exactSequence)
+	faultMu.Lock()
+	exactBytes := *lastObservationBytes
+	faultMu.Unlock()
+	if exactBytes != contracts.MaxLiveObservationBytes {
+		t.Fatalf("exact observation request/response bytes=%d", exactBytes)
+	}
+	exactOperator := getM4Operator(t, paired.delivery.Handler)
+	exactOverlay := getM4Overlay(t, paired.delivery.Handler)
+	output.OperatorStates = append(output.OperatorStates, exactOperator)
+	output.OverlayStates = append(output.OverlayStates, exactOverlay)
+	output.Boundaries = append(output.Boundaries, m4BoundaryEvidence{Name: "live_observation_exact_1_mib", RawSequence: exactSequence, CanonicalBytes: exactBytes, RawAccepted: true, PolicySequence: exactSequence, Visibility: exactOverlay.Visibility, HealthCode: exactOverlay.HealthCode, GatewayOutcome: "accepted", OperatorRevision: exactOperator.PolicyRevision})
+
+	faultMu.Lock()
+	*observationBoundaryBytes = contracts.MaxLiveObservationBytes + 1
+	faultMu.Unlock()
+	overSequence := raw.HighWater().Current().Sequence + 1
+	receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+	policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+	displayClock.Set(displayClock.Now().Add(3 * time.Millisecond))
+	gatewayClock.Set(displayClock.Now())
+	postM4Raw(t, paired.capture.Handler, fixture.Updates[3].Body)
+	waitObservationHealth(t, paired.delivery.Handler, "observation_contract_exceeded")
+	faultMu.Lock()
+	overBytes := *lastObservationBytes
+	*observationBoundaryBytes = 0
+	faultMu.Unlock()
+	overOverlay := getM4Overlay(t, paired.delivery.Handler)
+	overOperator := getM4Operator(t, paired.delivery.Handler)
+	if last, _ := m4RuntimeBaseline(active); overBytes != contracts.MaxLiveObservationBytes+1 || last != exactSequence || overOverlay.Visibility != "hidden" || overOverlay.HealthCode != "observation_contract_exceeded" {
+		t.Fatalf("over-limit observation was not fail-closed: last=%d overlay=%#v", last, overOverlay)
+	}
+	output.OperatorStates = append(output.OperatorStates, overOperator)
+	output.OverlayStates = append(output.OverlayStates, overOverlay)
+	output.Boundaries = append(output.Boundaries, m4BoundaryEvidence{Name: "live_observation_over_1_mib", RawSequence: overSequence, CanonicalBytes: overBytes, RawAccepted: true, PolicySequence: exactSequence, Visibility: overOverlay.Visibility, HealthCode: overOverlay.HealthCode, GatewayOutcome: "suppressed", OperatorRevision: overOperator.PolicyRevision})
+
+	boundaryBody := m4NetWorthBody(t, fixture.Updates[2].Body, 31_000)
+	faultMu.Lock()
+	*candidateBoundaryBytes = contracts.MaxInsightCandidateBytes
+	*overlayBoundaryBytes = contracts.MaxOverlayBytes
+	faultMu.Unlock()
+	receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+	policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+	displayClock.Set(displayClock.Now().Add(3 * time.Millisecond))
+	gatewayClock.Set(displayClock.Now())
+	exactCandidateSequence := raw.HighWater().Current().Sequence + 1
+	postM4Raw(t, paired.capture.Handler, boundaryBody)
+	waitObservation(t, active, exactCandidateSequence)
+	exactCandidateCommit := m4ObservationCommit(t, active, exactCandidateSequence)
+	if len(exactCandidateCommit.AuditEvents) == 0 || exactCandidateCommit.AuditEvents[0].EventType != "candidate_queued" || exactCandidateCommit.AuditEvents[0].Reason != "approval_required" {
+		t.Fatalf("exact candidate was not admitted through production policy: %#v", exactCandidateCommit.AuditEvents)
+	}
+	exactBoundaryOverlay, exactOverlayBody := getM4OverlayBody(t, paired.delivery.Handler)
+	exactBoundaryOperator := getM4Operator(t, paired.delivery.Handler)
+	faultMu.Lock()
+	exactCandidateBytes, exactOverlayBytes := *lastCandidateBytes, *lastOverlayBytes
+	faultMu.Unlock()
+	if exactCandidateBytes != contracts.MaxInsightCandidateBytes || exactOverlayBytes != contracts.MaxOverlayBytes || len(exactOverlayBody) != contracts.MaxOverlayBytes {
+		t.Fatalf("exact 64 KiB production boundary candidate=%d overlay=%d response=%d", exactCandidateBytes, exactOverlayBytes, len(exactOverlayBody))
+	}
+	output.OperatorStates = append(output.OperatorStates, exactBoundaryOperator)
+	output.OverlayStates = append(output.OverlayStates, exactBoundaryOverlay)
+	output.Boundaries = append(output.Boundaries, m4BoundaryEvidence{Name: "candidate_overlay_exact_64_kib", RawSequence: exactCandidateSequence, CanonicalBytes: exactOverlayBytes, RawAccepted: true, PolicySequence: exactCandidateSequence, CandidateBytes: exactCandidateBytes, OverlayBytes: exactOverlayBytes, Visibility: exactBoundaryOverlay.Visibility, HealthCode: exactBoundaryOverlay.HealthCode, GatewayOutcome: "accepted", OperatorRevision: exactBoundaryOperator.PolicyRevision})
+
+	faultMu.Lock()
+	*candidateBoundaryBytes = contracts.MaxInsightCandidateBytes + 1
+	*overlayBoundaryBytes = contracts.MaxOverlayBytes + 1
+	faultMu.Unlock()
+	unsafeBody := m4NetWorthBody(t, fixture.Updates[2].Body, 42_000)
+	receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+	policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+	displayClock.Set(displayClock.Now().Add(3 * time.Millisecond))
+	gatewayClock.Set(displayClock.Now())
+	unsafeDisplayMS := displayClock.Now().UnixMilli()
+	unsafeSequence := raw.HighWater().Current().Sequence + 1
+	postM4Raw(t, paired.capture.Handler, unsafeBody)
+	waitObservation(t, active, unsafeSequence)
+	unsafeCandidateCommit := m4ObservationCommit(t, active, unsafeSequence)
+	if len(unsafeCandidateCommit.AuditEvents) == 0 || unsafeCandidateCommit.AuditEvents[0].EventType != "candidate_suppressed" || unsafeCandidateCommit.AuditEvents[0].Reason != "candidate_evidence_mismatch" {
+		t.Fatalf("oversize candidate was not suppressed through production policy: %#v", unsafeCandidateCommit.AuditEvents)
+	}
+	gatewayFailure := getM4OverlayFailure(t, paired.delivery.Handler)
+	unsafeOperator := getM4Operator(t, paired.delivery.Handler)
+	faultMu.Lock()
+	unsafeCandidateBytes, unsafeOverlayBytes := *lastCandidateBytes, *lastOverlayBytes
+	faultMu.Unlock()
+	if gatewayFailure != "overlay_unavailable" || unsafeCandidateBytes != contracts.MaxInsightCandidateBytes+1 || unsafeOverlayBytes != contracts.MaxOverlayBytes+1 {
+		t.Fatalf("oversize candidate/overlay boundary candidate=%d overlay=%d gateway=%s", unsafeCandidateBytes, unsafeOverlayBytes, gatewayFailure)
+	}
+	noReappearance := true
+	for i := 0; i < 3; i++ {
+		receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+		policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+		displayClock.Set(displayClock.Now().Add(3 * time.Millisecond))
+		gatewayClock.Set(displayClock.Now())
+		sequence := raw.HighWater().Current().Sequence + 1
+		postM4Raw(t, paired.capture.Handler, unsafeBody)
+		waitObservation(t, active, sequence)
+		if reason := getM4OverlayFailure(t, paired.delivery.Handler); reason != "overlay_unavailable" {
+			noReappearance = false
+		}
+	}
+	if !noReappearance || displayClock.Now().UnixMilli()-unsafeDisplayMS > 2_000 {
+		t.Fatalf("unsafe output reappeared or exceeded hide bound: no_reappearance=%t elapsed=%d", noReappearance, displayClock.Now().UnixMilli()-unsafeDisplayMS)
+	}
+	output.OperatorStates = append(output.OperatorStates, unsafeOperator)
+	output.GatewayFailures = append(output.GatewayFailures, gatewayFailure)
+	output.Boundaries = append(output.Boundaries, m4BoundaryEvidence{Name: "candidate_overlay_over_64_kib", RawSequence: unsafeSequence, CanonicalBytes: unsafeOverlayBytes, RawAccepted: true, PolicySequence: unsafeSequence, CandidateBytes: unsafeCandidateBytes, OverlayBytes: unsafeOverlayBytes, Visibility: "hidden", HealthCode: "overlay_unavailable", GatewayOutcome: gatewayFailure, OperatorRevision: unsafeOperator.PolicyRevision, NoTransientReappear: noReappearance})
+
+	// A newer valid state is unsafe to the independently controlled gateway
+	// clock. A subsequent delayed state older than the last accepted publication
+	// must not rewind either delivery surface.
+	faultMu.Lock()
+	*candidateBoundaryBytes = 0
+	*overlayBoundaryBytes = 0
+	faultMu.Unlock()
+	operatorBefore := getM4Operator(t, paired.delivery.Handler)
+	displayClock.Set(time.UnixMilli(unsafeDisplayMS + 20).UTC())
+	gatewayClock.Set(time.UnixMilli(unsafeDisplayMS + 10).UTC())
+	receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+	policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+	newerUnsafeSequence := raw.HighWater().Current().Sequence + 1
+	postM4Raw(t, paired.capture.Handler, unsafeBody)
+	waitObservation(t, active, newerUnsafeSequence)
+	newerUnsafeFailure := getM4OverlayFailure(t, paired.delivery.Handler)
+	if newerUnsafeFailure != "overlay_unsafe" {
+		t.Fatalf("newer gateway state was not unsafe: %s", newerUnsafeFailure)
+	}
+	output.GatewayFailures = append(output.GatewayFailures, newerUnsafeFailure)
+	displayClock.Set(time.UnixMilli(exactBoundaryOverlay.PublicationTimeMS - 1).UTC())
+	gatewayClock.Set(time.UnixMilli(unsafeDisplayMS + 30).UTC())
+	receiptClock.Set(receiptClock.Now().Add(time.Millisecond))
+	policyClock.Set(policyClock.Now().Add(2 * time.Millisecond))
+	delayedSequence := raw.HighWater().Current().Sequence + 1
+	postM4Raw(t, paired.capture.Handler, unsafeBody)
+	waitObservation(t, active, delayedSequence)
+	reorderFailure := getM4OverlayFailure(t, paired.delivery.Handler)
+	operatorAfter := getM4Operator(t, paired.delivery.Handler)
+	if reorderFailure != "overlay_out_of_order" || !bytes.Equal(mustCanonicalTest(t, operatorBefore), mustCanonicalTest(t, operatorAfter)) {
+		t.Fatalf("delayed gateway state rewound publication/operator: reason=%s before=%#v after=%#v", reorderFailure, operatorBefore, operatorAfter)
+	}
+	output.OperatorStates = append(output.OperatorStates, operatorBefore, operatorAfter)
+	output.GatewayFailures = append(output.GatewayFailures, reorderFailure)
+	output.Boundaries = append(output.Boundaries, m4BoundaryEvidence{Name: "delayed_gateway_reorder", RawSequence: delayedSequence, RawAccepted: true, PolicySequence: delayedSequence, Visibility: "hidden", HealthCode: "overlay_out_of_order", GatewayOutcome: reorderFailure, OperatorRevision: operatorAfter.PolicyRevision, NoTransientReappear: true})
+
+	displayClock.Set(time.UnixMilli(unsafeDisplayMS + 40).UTC())
+	gatewayClock.Set(displayClock.Now())
+}
+
+func postM4Raw(t *testing.T, handler http.Handler, body []byte) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", bytes.NewReader(body)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("production raw capture=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func m4ObservationCommit(t *testing.T, active *broadcastRuntimeV3, sequence uint64) contracts.PolicyCommitV3 {
+	t.Helper()
+	var found contracts.PolicyCommitV3
+	if err := active.store.VisitAll(func(value commitlog.CommittedV3) error {
+		if value.Commit.ObservationSequence == sequence {
+			found = value.Commit
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if found.ObservationSequence != sequence {
+		t.Fatalf("missing terminal commit for observation %d", sequence)
+	}
+	return found
+}
+
+func exactM4Observation(t *testing.T, observation contracts.LiveObservationV1, target int) contracts.LiveObservationV1 {
+	t.Helper()
+	observation.Quality.Flags = append(observation.Quality.Flags, "")
+	for attempts := 0; attempts < 4; attempts++ {
+		encoded := mustCanonicalTest(t, observation)
+		if len(encoded) == target {
+			if target <= contracts.MaxLiveObservationBytes && observation.Validate() != nil {
+				t.Fatal("exact-at-limit live observation did not validate")
+			}
+			if target > contracts.MaxLiveObservationBytes && observation.Validate() == nil {
+				t.Fatal("over-limit live observation unexpectedly validated")
+			}
+			return observation
+		}
+		delta := target - len(encoded)
+		if delta < 0 {
+			t.Fatal("live observation fixture exceeds target")
+		}
+		observation.Quality.Flags[len(observation.Quality.Flags)-1] += strings.Repeat("x", delta)
+	}
+	t.Fatalf("could not construct exact live observation size %d", target)
+	return contracts.LiveObservationV1{}
+}
+
+func exactM4Candidate(t *testing.T, candidate contracts.InsightCandidateV1, target int) contracts.InsightCandidateV1 {
+	t.Helper()
+	padding := ""
+	candidate.Parameters = append(candidate.Parameters, contracts.TypedParameterV1{Name: "boundary_padding", Type: "string", StringValue: &padding})
+	for attempts := 0; attempts < 4; attempts++ {
+		candidate.CandidateID = ""
+		id, err := contracts.InsightCandidateContentID(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate.CandidateID = id
+		encoded := mustCanonicalTest(t, candidate)
+		if len(encoded) == target {
+			if target <= contracts.MaxInsightCandidateBytes && candidate.Validate() != nil {
+				t.Fatal("exact-at-limit candidate did not validate")
+			}
+			if target > contracts.MaxInsightCandidateBytes && candidate.Validate() == nil {
+				t.Fatal("over-limit candidate unexpectedly validated")
+			}
+			return candidate
+		}
+		padding += strings.Repeat("x", target-len(encoded))
+		candidate.Parameters[len(candidate.Parameters)-1].StringValue = &padding
+	}
+	t.Fatalf("could not construct exact candidate size %d", target)
+	return contracts.InsightCandidateV1{}
+}
+
+func exactM4OverlayState(t *testing.T, state contracts.OverlayStateV1, target int) contracts.OverlayStateV1 {
+	t.Helper()
+	if len(state.Evidence) == 0 {
+		t.Fatal("cannot size overlay without production evidence")
+	}
+	for attempts := 0; attempts < 4; attempts++ {
+		encoded := mustCanonicalTest(t, state)
+		if len(encoded) == target {
+			if target <= contracts.MaxOverlayBytes && state.Validate() != nil {
+				t.Fatal("exact-at-limit overlay did not validate")
+			}
+			if target > contracts.MaxOverlayBytes && state.Validate() == nil {
+				t.Fatal("over-limit overlay unexpectedly validated")
+			}
+			return state
+		}
+		state.Evidence[0].Source += strings.Repeat("x", target-len(encoded))
+	}
+	t.Fatalf("could not construct exact overlay size %d", target)
+	return contracts.OverlayStateV1{}
+}
+
+func m4NetWorthBody(t *testing.T, source json.RawMessage, netWorth int) []byte {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(source, &body); err != nil {
+		t.Fatal(err)
+	}
+	body["player"].(map[string]any)["team2"].(map[string]any)["player0"].(map[string]any)["net_worth"] = netWorth
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, active *broadcastRuntimeV3, raw *session.Store, fixture m4Schedule, root string, clock, policyClock *lockedClock, output *m4ProductionOutput) {
 	t.Helper()
 	malformed := httptest.NewRecorder()
 	paired.capture.Handler.ServeHTTP(malformed, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader("{")))
@@ -432,7 +778,7 @@ func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, a
 	if exact.Code != http.StatusOK {
 		t.Fatalf("exact 10 MiB gsi=%d %s", exact.Code, exact.Body.String())
 	}
-	waitObservation(t, active, 5)
+	waitObservation(t, active, raw.HighWater().Current().Sequence)
 	presentationFault := getM4Overlay(t, paired.delivery.Handler)
 	if presentationFault.Visibility != "hidden" || presentationFault.HealthCode != "presentation_invalid" {
 		t.Fatalf("production presentation failure=%#v", presentationFault)
@@ -493,7 +839,7 @@ func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, a
 		if response.Code != http.StatusOK {
 			t.Fatalf("saturation gsi[%d]=%d %s", i, response.Code, response.Body.String())
 		}
-		waitObservation(t, active, uint64(len(fixture.Updates)+3+i+1))
+		waitObservation(t, active, raw.HighWater().Current().Sequence)
 	}
 	active.mu.Lock()
 	saturated := active.candidateSaturated
@@ -515,7 +861,7 @@ func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, a
 		if response.Code != http.StatusOK {
 			t.Fatalf("post-saturation raw[%d]=%d", i, response.Code)
 		}
-		waitObservation(t, active, uint64(73+i))
+		waitObservation(t, active, raw.HighWater().Current().Sequence)
 		state := getM4Overlay(t, paired.delivery.Handler)
 		if state.Visibility != "hidden" || state.HealthCode != "candidate_queue_saturated" {
 			t.Fatalf("post-saturation claim reappeared[%d]=%#v", i, state)
@@ -525,9 +871,9 @@ func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, a
 	output.FixtureSHA256 = m4FixtureSHA256
 }
 
-func collectM4OrderedEvidence(t *testing.T, active *broadcastRuntimeV3, fixture m4Schedule, root string, output *m4ProductionOutput) {
+func collectM4OrderedEvidence(t *testing.T, active *broadcastRuntimeV3, raw *session.Store, fixture m4Schedule, root string, output *m4ProductionOutput) {
 	t.Helper()
-	resolver := newLiveOnlyObservationResolver(filepath.Join(root, fixture.SessionID, "raw.jsonl"), fixture.SessionID, active.artifacts)
+	resolver := newLiveOnlyObservationResolver(filepath.Join(root, fixture.SessionID, "raw.jsonl"), fixture.SessionID, active.artifacts, active.mapObservation, active.evaluateLiveOnly)
 	defer resolver.Close()
 	if err := active.store.VisitAll(func(value commitlog.CommittedV3) error {
 		output.Commits = append(output.Commits, value.Commit)
@@ -550,7 +896,7 @@ func collectM4OrderedEvidence(t *testing.T, active *broadcastRuntimeV3, fixture 
 		rawCount++
 		return nil
 	})
-	if err != nil || rawCount != len(fixture.Updates)+3+65+3+1+1 {
+	if err != nil || rawCount != int(raw.HighWater().Current().Sequence) {
 		t.Fatalf("raw replay count=%d err=%v", rawCount, err)
 	}
 }
@@ -585,6 +931,22 @@ func getM4OperatorFailure(t *testing.T, handler http.Handler) string {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("operator failure=%d %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result.Reason
+}
+
+func getM4OverlayFailure(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("overlay failure=%d %s", response.Code, response.Body.String())
 	}
 	var result struct {
 		Reason string `json:"reason"`
@@ -651,6 +1013,23 @@ func waitProjectionRejection(t *testing.T, runtimeV3 *broadcastRuntimeV3, code s
 	t.Fatalf("projection rejection did not reach %s", code)
 }
 
+func waitObservationHealth(t *testing.T, handler http.Handler, code string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+		if response.Code == http.StatusOK {
+			var state contracts.OverlayStateV1
+			if contracts.DecodeStrict(response.Body.Bytes(), &state) == nil && state.Visibility == "hidden" && state.HealthCode == code {
+				return
+			}
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("observation boundary did not reach health %s", code)
+}
+
 func waitRestoreComplete(t *testing.T, runtimeV3 *broadcastRuntimeV3) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -682,7 +1061,10 @@ func waitObservation(t *testing.T, runtimeV3 *broadcastRuntimeV3, sequence uint6
 		}
 		runtime.Gosched()
 	}
-	t.Fatalf("policy projection did not reach observation %d", sequence)
+	runtimeV3.mu.Lock()
+	last, health, visibility := runtimeV3.app.State().LastObservationSequence, runtimeV3.overlay.HealthCode, runtimeV3.overlay.Visibility
+	runtimeV3.mu.Unlock()
+	t.Fatalf("policy projection did not reach observation %d: last=%d overlay=%s/%s", sequence, last, visibility, health)
 }
 
 func postM4Command(t *testing.T, handler http.Handler, command contracts.OperatorCommandV1) contracts.OperatorCommandResultV1 {
@@ -733,4 +1115,18 @@ func getM4Overlay(t *testing.T, handler http.Handler) contracts.OverlayStateV1 {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func getM4OverlayBody(t *testing.T, handler http.Handler) (contracts.OverlayStateV1, []byte) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("overlay=%d %s", response.Code, response.Body.String())
+	}
+	var value contracts.OverlayStateV1
+	if err := contracts.DecodeStrict(response.Body.Bytes(), &value); err != nil {
+		t.Fatal(err)
+	}
+	return value, response.Body.Bytes()
 }

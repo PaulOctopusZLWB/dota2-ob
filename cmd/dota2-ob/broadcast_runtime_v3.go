@@ -28,6 +28,8 @@ type broadcastConfigV3 struct {
 	ProjectionRestoreRequired bool
 	PolicyConfig              *policy.Config
 	BuildOverlay              func(presentation.BuildInput) (contracts.OverlayStateV1, error)
+	EvaluateLiveOnly          func(insight.LiveOnlyInput, insight.Config) []contracts.InsightCandidateV1
+	MapObservation            func(*session.Record) (contracts.LiveObservationV1, error)
 }
 
 // broadcastRuntimeV3 is intentionally separate from broadcastRuntime. This
@@ -46,6 +48,8 @@ type broadcastRuntimeV3 struct {
 	projectionHealthCode string
 	candidateSaturated   bool
 	buildOverlay         func(presentation.BuildInput) (contracts.OverlayStateV1, error)
+	evaluateLiveOnly     func(insight.LiveOnlyInput, insight.Config) []contracts.InsightCandidateV1
+	mapObservation       func(*session.Record) (contracts.LiveObservationV1, error)
 }
 
 func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error) {
@@ -61,6 +65,9 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 	if config.BuildOverlay == nil {
 		config.BuildOverlay = presentation.Build
 	}
+	if config.EvaluateLiveOnly == nil {
+		config.EvaluateLiveOnly = insight.EvaluateLiveOnly
+	}
 	if config.Artifacts.Release.ValidateAgainst(config.Artifacts.History, config.Artifacts.Lineage) != nil ||
 		config.Artifacts.Release.SourceCommit != acceptedLiveOnlyScopeCommit ||
 		!matchesProductLineageV3(config.Artifacts.Lineage, config.Artifacts.History, config.SessionID) {
@@ -74,7 +81,7 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 	policyConfig.CandidateConfigVersion = config.Artifacts.Lineage.Config.Version
 	policyConfig.CandidateConfigArtifact = config.Artifacts.Lineage.Config
 	policyConfig.CandidateRulesArtifact = config.Artifacts.Lineage.Rules
-	resolver := newLiveOnlyObservationResolver(config.RawPath, config.SessionID, config.Artifacts)
+	resolver := newLiveOnlyObservationResolver(config.RawPath, config.SessionID, config.Artifacts, config.MapObservation, config.EvaluateLiveOnly)
 	storeOptions := append([]commitlog.V3Option(nil), config.StoreOptions...)
 	storeOptions = append(storeOptions, commitlog.WithV3ReplayVerifier(newProductionReplayVerifierV3(resolver, config.SessionID, policyConfig)))
 	store, _, err := commitlog.OpenV3(config.DataRoot, config.SessionID, config.Artifacts.History, config.Artifacts.Lineage, storeOptions...)
@@ -118,7 +125,8 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 	}
 	return &broadcastRuntimeV3{
 		app: app, store: store, policyNow: config.PolicyNow, displayNow: config.DisplayNow, artifacts: config.Artifacts,
-		previous: previous, overlay: hidden, restoringProjection: config.ProjectionRestoreRequired, candidateSaturated: saturated, buildOverlay: config.BuildOverlay,
+		previous: previous, overlay: hidden, restoringProjection: config.ProjectionRestoreRequired, candidateSaturated: saturated,
+		buildOverlay: config.BuildOverlay, evaluateLiveOnly: config.EvaluateLiveOnly, mapObservation: config.MapObservation,
 	}, nil
 }
 
@@ -135,11 +143,15 @@ func (r *broadcastRuntimeV3) applyObservation(ctx context.Context, observation c
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := observation.Validate(); err != nil {
+		r.hideLocked("observation_contract_exceeded")
+		return nil
+	}
 	if observation.Evidence.Sequence <= r.app.State().LastObservationSequence {
 		return nil
 	}
 	policyTimeMS := r.policyNow().UTC().UnixMilli()
-	candidates := insight.EvaluateLiveOnly(insight.LiveOnlyInput{
+	candidates := r.evaluateLiveOnly(insight.LiveOnlyInput{
 		Observation: observation, Previous: r.previous, History: r.artifacts.History,
 		Lineage: r.artifacts.Lineage, PolicyTimeMS: policyTimeMS,
 	}, insight.DefaultConfig())

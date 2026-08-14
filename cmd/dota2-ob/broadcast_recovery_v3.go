@@ -8,6 +8,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policyapp"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
 type liveOnlyObservationResolver struct {
@@ -15,12 +16,20 @@ type liveOnlyObservationResolver struct {
 	history  contracts.HistoryAvailabilityBindingV1
 	lineage  contracts.PolicyLineageManifestV3
 	previous *contracts.LiveObservationV1
+	evaluate func(insight.LiveOnlyInput, insight.Config) []contracts.InsightCandidateV1
 }
 
-func newLiveOnlyObservationResolver(rawPath, sessionID string, artifacts liveOnlyPolicyArtifacts) *liveOnlyObservationResolver {
+func newLiveOnlyObservationResolver(rawPath, sessionID string, artifacts liveOnlyPolicyArtifacts, mapObservation func(*session.Record) (contracts.LiveObservationV1, error), evaluate func(insight.LiveOnlyInput, insight.Config) []contracts.InsightCandidateV1) *liveOnlyObservationResolver {
+	raw := newObservationResolver(rawPath, sessionID, contracts.PolicyLineageManifestV2{})
+	if mapObservation != nil {
+		raw.mapObservation = mapObservation
+	}
+	if evaluate == nil {
+		evaluate = insight.EvaluateLiveOnly
+	}
 	return &liveOnlyObservationResolver{
-		raw:     newObservationResolver(rawPath, sessionID, contracts.PolicyLineageManifestV2{}),
-		history: artifacts.History, lineage: artifacts.Lineage,
+		raw:     raw,
+		history: artifacts.History, lineage: artifacts.Lineage, evaluate: evaluate,
 	}
 }
 
@@ -43,7 +52,7 @@ func (r *liveOnlyObservationResolver) resolve(commit contracts.PolicyCommitV3) (
 	if len(commit.AuditEvents) > 0 {
 		policyTimeMS = commit.AuditEvents[0].PolicyTimeMS
 	}
-	candidates := insight.EvaluateLiveOnly(insight.LiveOnlyInput{
+	candidates := r.evaluate(insight.LiveOnlyInput{
 		Observation: *observation, Previous: r.previous, History: r.history,
 		Lineage: r.lineage, PolicyTimeMS: policyTimeMS,
 	}, insight.DefaultConfig())

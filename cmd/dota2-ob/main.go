@@ -38,15 +38,17 @@ const operatorTokenFilename = "operator.token"
 func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
 
 type runDependencies struct {
-	newStore       func(string, string) (*session.Store, error)
-	newTokenFile   func(string) (string, string, func(), error)
-	listen         func(string, string) (net.Listener, error)
-	runLifecycle   func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
-	runDoctor      func(preflight.DoctorConfig) preflight.Result
-	now            func() time.Time
-	policyNow      func() time.Time
-	displayNow     func() time.Time
-	newBroadcastV3 func(broadcastConfigV3) (*broadcastRuntimeV3, error)
+	newStore             func(string, string) (*session.Store, error)
+	newTokenFile         func(string) (string, string, func(), error)
+	listen               func(string, string) (net.Listener, error)
+	runLifecycle         func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
+	runDoctor            func(preflight.DoctorConfig) preflight.Result
+	now                  func() time.Time
+	policyNow            func() time.Time
+	displayNow           func() time.Time
+	gatewayNow           func() time.Time
+	newBroadcastV3       func(broadcastConfigV3) (*broadcastRuntimeV3, error)
+	mapPolicyObservation func(*session.Record) (contracts.LiveObservationV1, error)
 }
 
 func defaultRunDependencies() runDependencies {
@@ -57,14 +59,16 @@ func defaultRunDependencies() runDependencies {
 			}
 			return session.NewStore(root, session.WithSessionID(sessionID))
 		},
-		newTokenFile:   createEphemeralTokenFile,
-		listen:         net.Listen,
-		runLifecycle:   lifecycle.Run,
-		runDoctor:      preflight.NewDoctor(preflight.Dependencies{}).Run,
-		now:            time.Now,
-		policyNow:      time.Now,
-		displayNow:     time.Now,
-		newBroadcastV3: newBroadcastRuntimeV3,
+		newTokenFile:         createEphemeralTokenFile,
+		listen:               net.Listen,
+		runLifecycle:         lifecycle.Run,
+		runDoctor:            preflight.NewDoctor(preflight.Dependencies{}).Run,
+		now:                  time.Now,
+		policyNow:            time.Now,
+		displayNow:           time.Now,
+		gatewayNow:           time.Now,
+		newBroadcastV3:       newBroadcastRuntimeV3,
+		mapPolicyObservation: capture.MapLiveObservationV1,
 	}
 }
 
@@ -82,8 +86,14 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	if deps.displayNow == nil {
 		deps.displayNow = deps.now
 	}
+	if deps.gatewayNow == nil {
+		deps.gatewayNow = deps.displayNow
+	}
 	if deps.newBroadcastV3 == nil {
 		deps.newBroadcastV3 = newBroadcastRuntimeV3
+	}
+	if deps.mapPolicyObservation == nil {
+		deps.mapPolicyObservation = capture.MapLiveObservationV1
 	}
 	flags := flag.NewFlagSet("dota2-ob", flag.ContinueOnError)
 	flags.SetOutput(output)
@@ -198,7 +208,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 				var runtimeV3 *broadcastRuntimeV3
 				runtimeV3, lineageErr = deps.newBroadcastV3(broadcastConfigV3{
 					DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Artifacts: artifacts,
-					Now: deps.now, PolicyNow: deps.policyNow, DisplayNow: deps.displayNow, ProjectionRestoreRequired: true,
+					Now: deps.now, PolicyNow: deps.policyNow, DisplayNow: deps.displayNow, ProjectionRestoreRequired: true, MapObservation: deps.mapPolicyObservation,
 				})
 				if lineageErr == nil {
 					broadcast = runtimeV3
@@ -239,7 +249,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	handler := gsi.NewServer(store, captureOptions...)
 	var waiter lifecycle.Waiter = handler
 	if broadcast != nil {
-		waiter = productWaiter{capture: handler, policy: newPolicyProjectionRunner(store, broadcast, tracker)}
+		waiter = productWaiter{capture: handler, policy: newPolicyProjectionRunner(store, broadcast, tracker, deps.mapPolicyObservation)}
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	var deliveryServer *http.Server
@@ -255,7 +265,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		if gatewayErr == nil {
 			gateway, gatewayErr = delivery.NewGateway(delivery.Config{
 				BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
-				Commands: broadcastCommandPort{ports}, Operator: broadcastOperatorPort{ports}, Overlay: broadcastOverlayPort{ports}, ReadAsset: webassets.ReadAsset, Now: deps.displayNow,
+				Commands: broadcastCommandPort{ports}, Operator: broadcastOperatorPort{ports}, Overlay: broadcastOverlayPort{ports}, ReadAsset: webassets.ReadAsset, Now: deps.gatewayNow,
 			})
 		}
 		if gatewayErr != nil {

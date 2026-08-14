@@ -133,18 +133,31 @@ func (p trackedCaptureProjection) Apply(ctx context.Context, record *session.Rec
 }
 
 type policyObservationProjection struct {
-	runtime productBroadcastRuntime
-	tracker *operator.Tracker
+	runtime        productBroadcastRuntime
+	tracker        *operator.Tracker
+	mapObservation func(*session.Record) (contracts.LiveObservationV1, error)
 }
 
-func newPolicyObservationProjection(runtime productBroadcastRuntime, tracker *operator.Tracker) liveprojection.Projection {
-	return policyObservationProjection{runtime: runtime, tracker: tracker}
+func newPolicyObservationProjection(runtime productBroadcastRuntime, tracker *operator.Tracker, mapObservation func(*session.Record) (contracts.LiveObservationV1, error)) liveprojection.Projection {
+	return policyObservationProjection{runtime: runtime, tracker: tracker, mapObservation: mapObservation}
 }
 
 func (p policyObservationProjection) Apply(ctx context.Context, record *session.Record) error {
-	observation, err := capture.MapLiveObservationV1(record)
+	observation, err := p.mapObservation(record)
 	if err == nil {
-		err = p.runtime.applyObservation(ctx, observation)
+		request, marshalErr := contracts.MarshalCanonical(observation)
+		if marshalErr != nil {
+			err = marshalErr
+		} else if len(request) > contracts.MaxLiveObservationBytes {
+			err = p.runtime.applyObservation(ctx, observation)
+		} else {
+			var decoded contracts.LiveObservationV1
+			if decodeErr := contracts.DecodeStrict(request, &decoded); decodeErr != nil {
+				err = decodeErr
+			} else {
+				err = p.runtime.applyObservation(ctx, decoded)
+			}
+		}
 	}
 	if err != nil {
 		p.tracker.Failure(policyProjectionSubsystem, "broadcast_policy_failed", "broadcast policy projection failed")
@@ -180,13 +193,13 @@ type policyProjectionRunner struct {
 	once        sync.Once
 }
 
-func newPolicyProjectionRunner(store *session.Store, runtime productBroadcastRuntime, tracker *operator.Tracker) *policyProjectionRunner {
+func newPolicyProjectionRunner(store *session.Store, runtime productBroadcastRuntime, tracker *operator.Tracker, mapObservation func(*session.Record) (contracts.LiveObservationV1, error)) *policyProjectionRunner {
 	updates, unsubscribe := store.HighWater().Subscribe()
 	follower := session.NewLiveFollower(
 		store.SessionID(),
 		store.RawPath(),
 		filepath.Join(store.SessionDir(), "broadcast_policy_projection_cursor.json"),
-		[]session.LiveProjection{newPolicyObservationProjection(runtime, tracker)},
+		[]session.LiveProjection{newPolicyObservationProjection(runtime, tracker, mapObservation)},
 		session.WithFollowerHighWater(store.HighWater()),
 		session.WithStartupBarrier(runtime),
 		session.WithRejectionHealthSink(runtime),
