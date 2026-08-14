@@ -279,6 +279,58 @@ func TestSchemaAtOrAfterFormulaBoundaryCannotGrantLegacyAllowance(t *testing.T) 
 	}
 }
 
+func TestLegacyPrefixCannotHideSecondJSONValue(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		first := validLegacyObject(version, "two-values")
+		for _, tc := range []struct {
+			name      string
+			frame     string
+			wantError string
+		}{
+			{
+				name:      "exact-boundary-second-before",
+				frame:     first + strings.Repeat(" ", session.MaxEncodedRecordBytes()-len(first)-2) + "{}\n",
+				wantError: "after top-level value",
+			},
+			{
+				name:      "plus-one-second-before",
+				frame:     first + "{}" + strings.Repeat(" ", session.MaxEncodedRecordBytes()+1-len(first)-2) + "\n",
+				wantError: "V3 frame exceeds encoded limit",
+			},
+			{
+				name:      "reviewer-second-after-formula",
+				frame:     first + strings.Repeat(" ", session.MaxEncodedRecordBytes()+1-len(first)) + "{}\n",
+				wantError: "V3 frame exceeds encoded limit",
+			},
+		} {
+			t.Run(fmt.Sprintf("v%d/%s", version, tc.name), func(t *testing.T) {
+				root := t.TempDir()
+				dir := filepath.Join(root, "two-values")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, "raw.jsonl")
+				if err := os.WriteFile(path, []byte(tc.frame), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := session.StreamRecords(path, "two-values", func(*session.Record) error { return nil }); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("stream error=%v want %q", err, tc.wantError)
+				}
+				if _, err := session.NewStore(root, session.WithSessionID("two-values")); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("store error=%v want %q", err, tc.wantError)
+				}
+			})
+		}
+	}
+}
+
+func validLegacyObject(version int, sessionID string) string {
+	if version == 2 {
+		return fmt.Sprintf(`{"schema_version":2,"session_id":%q,"sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{},"raw":{}}`, sessionID)
+	}
+	return `{"received_at":"2026-08-05T12:00:00Z","payload":{},"raw":{}}`
+}
+
 func largeLegacyFrame(t *testing.T, version int, sessionID string, target int) []byte {
 	t.Helper()
 	payloadPrefix, payloadSuffix := `{"padding":"`, `","slash":"/"}`

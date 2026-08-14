@@ -821,6 +821,13 @@ func detectSchemaVersion(reader *bufio.Reader) (int, error) {
 	if delim, ok := last.(json.Delim); !ok || delim != '}' {
 		return 3, nil
 	}
+	singleValue, err := persistedFrameHasSingleValue(decoder, limited)
+	if err != nil {
+		return schemaProbeFailure(limited)
+	}
+	if !singleValue {
+		return 3, nil
+	}
 	if !schemaSeen {
 		if receivedAt && payload && raw && receivedAtBefore && payloadBefore && rawBefore {
 			return 1, nil
@@ -831,6 +838,30 @@ func detectSchemaVersion(reader *bufio.Reader) (int, error) {
 		return 2, nil
 	}
 	return 3, nil
+}
+
+func persistedFrameHasSingleValue(decoder *json.Decoder, limited *io.LimitedReader) (bool, error) {
+	tail := bufio.NewReaderSize(io.MultiReader(decoder.Buffered(), limited), 64*1024)
+	for {
+		value, err := tail.ReadByte()
+		if err == io.EOF {
+			if limited.N == 0 {
+				return false, io.ErrUnexpectedEOF
+			}
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		switch value {
+		case '\n':
+			return true, nil
+		case ' ', '\t', '\r':
+			continue
+		default:
+			return false, nil
+		}
+	}
 }
 
 func schemaProbeFailure(limited *io.LimitedReader) (int, error) {
