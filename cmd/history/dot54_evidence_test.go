@@ -214,13 +214,31 @@ func TestReconcileDOT54DiscoveryRejectsCandidateOutsideResolvedAllowSet(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved := make([]dot54ResolvedTeam, 0, len(provider.OpenDota.Explorer.TeamIDs)-1)
-	for _, id := range provider.OpenDota.Explorer.TeamIDs[1:] {
+	resolved := make([]dot54ResolvedTeam, 0, len(provider.OpenDota.Explorer.TeamIDs))
+	for _, id := range provider.OpenDota.Explorer.TeamIDs {
 		resolved = append(resolved, dot54ResolvedTeam{TeamID: fmt.Sprintf("valve-team:%d", id)})
 	}
-	if err := reconcileDOT54Discovery(source, explorer, provider, checkpoints, resolved, 1786492800); err == nil || !strings.Contains(err.Error(), "conflict-resolved allow-set") {
-		t.Fatalf("error=%v, want conflict-resolved allow-set rejection", err)
-	}
+	t.Run("Explorer provider injection", func(t *testing.T) {
+		injectedProvider := provider
+		injectedProvider.OpenDota.Explorer.TeamIDs = append([]int64(nil), provider.OpenDota.Explorer.TeamIDs...)
+		injectedProvider.OpenDota.Explorer.TeamIDs[0] = 7554697
+		injectedProvider.OpenDota.Explorer.Query = dot54ExplorerQuery(injectedProvider.OpenDota.Explorer.TeamIDs)
+		injectedProvider.OpenDota.Explorer.QuerySHA256 = sha256Text(injectedProvider.OpenDota.Explorer.Query)
+		injectedExplorer := explorer
+		injectedExplorer.Rows = append([]dot54ExplorerMatch(nil), explorer.Rows...)
+		injectedExplorer.Rows[0].RadiantTeamID = 7554697
+		if err := reconcileDOT54Discovery(source, injectedExplorer, injectedProvider, checkpoints, resolved, 1786492800); err == nil || !strings.Contains(err.Error(), "outside the conflict-resolved allow-set") {
+			t.Fatalf("error=%v, want rejected Explorer candidate rejection", err)
+		}
+	})
+	t.Run("team page injection", func(t *testing.T) {
+		injectedCheckpoints := append([]dot54PageCheckpoint(nil), checkpoints...)
+		injectedCheckpoints[0].TeamID = "7554697"
+		injectedCheckpoints[0].URL = "https://api.opendota.com/api/teams/7554697/players"
+		if err := reconcileDOT54Discovery(source, explorer, provider, injectedCheckpoints, resolved, 1786492800); err == nil || !strings.Contains(err.Error(), "unexpected or duplicate team-page checkpoint") {
+			t.Fatalf("error=%v, want rejected team-page candidate rejection", err)
+		}
+	})
 }
 
 func TestUnresolvedScopeDoesNotEmitHistoricalNoGoCandidate(t *testing.T) {
@@ -282,6 +300,21 @@ func TestDOT54ReportIsDerivedFromSealedReadiness(t *testing.T) {
 	}
 	if strings.Contains(report, "do not prove roster effective intervals") || strings.Contains(report, "blocked upstream of download") {
 		t.Fatalf("report retained rejected evidence statement:\n%s", report)
+	}
+}
+
+func TestSourceProvenanceDerivesProviderPageByteCount(t *testing.T) {
+	source := writeDOT54TestSource(t)
+	wantFiles, wantBytes, err := dot54TreeStats(filepath.Join(source, "pages"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenance, err := buildDOT54Provenance(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provenance.ProviderPageFiles != wantFiles || provenance.ProviderPageBytes != wantBytes || wantFiles == 0 || wantBytes == 0 {
+		t.Fatalf("provider pages=%d/%d bytes=%d/%d", provenance.ProviderPageFiles, wantFiles, provenance.ProviderPageBytes, wantBytes)
 	}
 }
 

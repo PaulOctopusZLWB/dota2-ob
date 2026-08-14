@@ -256,10 +256,12 @@ type dot54SourceFile struct {
 }
 
 type dot54SourceProvenance struct {
-	SchemaVersion string            `json:"schema_version"`
-	ContentSHA256 string            `json:"content_sha256"`
-	Policy        map[string]string `json:"policy"`
-	Files         []dot54SourceFile `json:"files"`
+	SchemaVersion     string            `json:"schema_version"`
+	ContentSHA256     string            `json:"content_sha256"`
+	ProviderPageFiles uint32            `json:"provider_page_files"`
+	ProviderPageBytes int64             `json:"provider_page_bytes"`
+	Policy            map[string]string `json:"policy"`
+	Files             []dot54SourceFile `json:"files"`
 }
 
 type dot54IndexEntry struct {
@@ -309,19 +311,37 @@ type dot54ReplayTerminalCheckpoint struct {
 }
 
 type dot54ReplayGateAudit struct {
-	SchemaVersion            string            `json:"schema_version"`
-	ContentSHA256            string            `json:"content_sha256"`
-	SelectionSHA256          string            `json:"selection_sha256"`
-	SelectedTotal            uint32            `json:"selected_total"`
-	ReplayAccessibleTotal    uint32            `json:"replay_accessible_total"`
-	DeterministicParserTotal uint32            `json:"deterministic_parser_total"`
-	IdentityVerifiedTotal    uint32            `json:"identity_verified_total"`
-	CompressedBytes          int64             `json:"compressed_bytes"`
-	ReplayBytes              int64             `json:"replay_bytes"`
-	ParserComparisonSHA256   string            `json:"parser_comparison_sha256"`
-	TeamMatchCount           map[string]uint32 `json:"team_match_count"`
-	Outcome                  string            `json:"outcome"`
-	Reason                   string            `json:"reason"`
+	SchemaVersion            string                     `json:"schema_version"`
+	ContentSHA256            string                     `json:"content_sha256"`
+	SelectionSHA256          string                     `json:"selection_sha256"`
+	SelectedTotal            uint32                     `json:"selected_total"`
+	ReplayAccessibleTotal    uint32                     `json:"replay_accessible_total"`
+	DeterministicParserTotal uint32                     `json:"deterministic_parser_total"`
+	IdentityVerifiedTotal    uint32                     `json:"identity_verified_total"`
+	CompressedBytes          int64                      `json:"compressed_bytes"`
+	ReplayBytes              int64                      `json:"replay_bytes"`
+	ParserComparisonSHA256   string                     `json:"parser_comparison_sha256"`
+	TeamMatchCount           map[string]uint32          `json:"team_match_count"`
+	FamilyEligibleCounts     map[string]uint32          `json:"family_eligible_counts"`
+	FamilyMinimums           map[string]uint64          `json:"family_minimums"`
+	Correlations             []dot54IdentityCorrelation `json:"identity_correlations"`
+	Outcome                  string                     `json:"outcome"`
+	Reason                   string                     `json:"reason"`
+}
+
+type dot54IdentityCorrelation struct {
+	MatchID                  string   `json:"match_id"`
+	ExplorerRowSHA256        string   `json:"explorer_row_sha256"`
+	ReplaySHA256             string   `json:"replay_sha256"`
+	ParserFactsSHA256        string   `json:"parser_facts_sha256"`
+	NormalizedFactsSHA256    string   `json:"normalized_facts_sha256"`
+	PublicParticipantTotal   uint32   `json:"public_participant_total"`
+	ParsedHeroTotal          uint32   `json:"parsed_hero_total"`
+	ParsedGameBuild          uint32   `json:"parsed_game_build"`
+	PublicGameBuild          uint32   `json:"public_game_build"`
+	ParticipantMappingTotal  uint32   `json:"participant_mapping_total"`
+	IdentityStatus           string   `json:"identity_status"`
+	MissingCorrelationInputs []string `json:"missing_correlation_inputs"`
 }
 
 func runDOT54EvidenceCommand(args []string) error {
@@ -482,7 +502,7 @@ func runDOT54EvidenceWithReplay(sourceRoot, outputRoot, replayRoot string) (*dot
 		if scopeBlocked {
 			return nil, errors.New("replay evidence cannot be evaluated before tournament scope materialization")
 		}
-		replayAudit, err = auditDOT54ReplayGate(replayRoot, resolved)
+		replayAudit, err = auditDOT54ReplayGate(replayRoot, resolved, explorer.Rows, headByID, patchStart.Unix(), cutoff.Unix())
 		if err != nil {
 			return nil, err
 		}
@@ -527,7 +547,7 @@ func runDOT54EvidenceWithReplay(sourceRoot, outputRoot, replayRoot string) (*dot
 		reason = "cutoff roster prerequisite remains unresolved: " + scopeErr.Error() + "; no governing per-family numerical readiness outcome was evaluated; HEAD-only Valve objects are not accepted replay evidence"
 	}
 	if replayAudit != nil {
-		outcome = "historical_no_go_candidate"
+		outcome = replayAudit.Outcome
 		reason = replayAudit.Reason
 	}
 	readiness := dot54ReadinessEvidence{SchemaVersion: "dot54.readiness-candidate.v1", Outcome: outcome, DiscoveredTotal: uint32(len(terminal)), ReplayPresentProbeTotal: counts[dot54StateReplayPresentUnverified] + counts[dot54StateScopeIdentityUnverifiable], ParserRequired: "github.com/dotabuff/manta v1.5.0", ParserExecutionTotal: 0, TerminalCounts: counts, DisabledTeams: disabled, DisabledFamilies: []string{"hero", "item", "lane", "patch", "player", "player_hero", "role", "team"}, Reason: reason}
@@ -1066,7 +1086,7 @@ func dot54AliasesExcluding(handle string, values []string) []string {
 	return sortedDOT54Strings(out...)
 }
 
-func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam) (*dot54ReplayGateAudit, error) {
+func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam, explorer []dot54ExplorerMatch, heads map[int64]dot54ValveHead, patchStart, cutoff int64) (*dot54ReplayGateAudit, error) {
 	selectionPath := filepath.Join(root, "replay-selection-100.json")
 	var selection dot54ReplaySelection
 	if err := readDOT54JSON(selectionPath, &selection); err != nil {
@@ -1083,17 +1103,32 @@ func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam) (*dot54Repl
 		}
 		allow[id] = true
 	}
+	selectedTeamSet := map[int64]bool{}
 	for _, id := range selection.SelectedTeamIDs {
-		if !allow[id] {
+		if !allow[id] || selectedTeamSet[id] {
 			return nil, fmt.Errorf("replay selection team %d outside resolved allow-set", id)
 		}
+		selectedTeamSet[id] = true
 	}
-	audit := &dot54ReplayGateAudit{SchemaVersion: "dot54.replay-gate-audit.v1", SelectedTotal: 100, TeamMatchCount: map[string]uint32{}, Outcome: "historical_no_go_candidate"}
+	if len(selectedTeamSet) != len(allow) {
+		return nil, errors.New("replay selection does not contain the exact resolved team allow-set")
+	}
+	explorerByID := make(map[int64]dot54ExplorerMatch, len(explorer))
+	for _, row := range explorer {
+		if explorerByID[row.MatchID].MatchID != 0 {
+			return nil, fmt.Errorf("duplicate corrected Explorer row %d", row.MatchID)
+		}
+		explorerByID[row.MatchID] = row
+	}
+	audit := &dot54ReplayGateAudit{SchemaVersion: "dot54.replay-gate-audit.v1", SelectedTotal: 100, TeamMatchCount: map[string]uint32{}, FamilyEligibleCounts: map[string]uint32{"draft": 0, "distribution": 0, "team_comparative": 0}, FamilyMinimums: map[string]uint64{"draft": history.MinDraftCell, "distribution": history.MinLaneItemCell, "team_comparative": history.MinTeamCompCell}}
 	audit.SelectionSHA256, _ = fileSHA(selectionPath)
 	seen := map[int64]bool{}
 	replaySHAByMatch := map[int64]string{}
+	rowByMatch := map[int64]dot54ExplorerMatch{}
 	for _, match := range selection.Matches {
-		if match.MatchID <= 0 || seen[match.MatchID] || (!allow[match.RadiantTeamID] && !allow[match.DireTeamID]) {
+		row, rowOK := explorerByID[match.MatchID]
+		head, headOK := heads[match.MatchID]
+		if match.MatchID <= 0 || seen[match.MatchID] || !rowOK || row.StartTime < patchStart || row.StartTime > cutoff || row.ReplaySalt == nil || row.Version == nil || !headOK || head.HTTPStatus != 200 || head.URL == "" || len(head.HeaderSHA256) != 64 || match.RadiantTeamID != row.RadiantTeamID || match.DireTeamID != row.DireTeamID || (!allow[row.RadiantTeamID] && !allow[row.DireTeamID]) {
 			return nil, fmt.Errorf("invalid replay gate match %d", match.MatchID)
 		}
 		seen[match.MatchID] = true
@@ -1146,6 +1181,7 @@ func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam) (*dot54Repl
 		audit.ReplayBytes += replayInfo.Size()
 		audit.ReplayAccessibleTotal++
 		replaySHAByMatch[match.MatchID] = replaySHA
+		rowByMatch[match.MatchID] = row
 	}
 	for team := range allow {
 		key := fmt.Sprintf("valve-team:%d", team)
@@ -1165,6 +1201,7 @@ func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam) (*dot54Repl
 		return nil, errors.New("independent parser comparisons differ")
 	}
 	var comparisons []struct {
+		Attempts      int    `json:"attempts"`
 		MatchID       string `json:"match_id"`
 		Status        string `json:"status"`
 		ContentSHA256 string `json:"content_sha256"`
@@ -1176,11 +1213,13 @@ func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam) (*dot54Repl
 	if len(comparisons) != 100 {
 		return nil, errors.New("independent parser comparison cardinality mismatch")
 	}
+	comparisonSeen := map[int64]bool{}
 	for _, comparison := range comparisons {
 		id, err := strconv.ParseInt(comparison.MatchID, 10, 64)
-		if err != nil || !seen[id] || comparison.Status != "succeeded" || comparison.ContentSHA256 != replaySHAByMatch[id] || len(comparison.FactsHash) != 64 {
+		if err != nil || !seen[id] || comparisonSeen[id] || comparison.Attempts != 1 || comparison.Status != "succeeded" || comparison.ContentSHA256 != replaySHAByMatch[id] || len(comparison.FactsHash) != 64 {
 			return nil, fmt.Errorf("invalid independent parser result %q", comparison.MatchID)
 		}
+		comparisonSeen[id] = true
 		factsName := comparison.ContentSHA256 + ".facts.json"
 		aFacts, err := os.ReadFile(filepath.Join(root, "parser-run-a", "replay-facts", factsName))
 		if err != nil {
@@ -1201,10 +1240,33 @@ func auditDOT54ReplayGate(root string, resolved []dot54ResolvedTeam) (*dot54Repl
 		if err != nil || factsHash != comparison.FactsHash || facts.Provenance.ParserName != "dotabuff/manta" || facts.Provenance.ParserVersion != "v1.5.0" {
 			return nil, fmt.Errorf("parser fact provenance/hash mismatch for %s", comparison.MatchID)
 		}
+		row := rowByMatch[id]
+		duration := row.Duration
+		normalized, err := replaypkg.Normalize(&facts, replaypkg.NormalizeMeta{MatchID: comparison.MatchID, ReplaySHA256: comparison.ContentSHA256, SourceEventTime: time.Unix(row.StartTime, 0).UTC(), PatchID: "60", RadiantTeamID: fmt.Sprintf("valve-team:%d", row.RadiantTeamID), DireTeamID: fmt.Sprintf("valve-team:%d", row.DireTeamID), GameBuild: 0, DurationSeconds: &duration}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("normalize parser facts %s: %w", comparison.MatchID, err)
+		}
+		rowBytes, err := contracts.MarshalCanonical(row)
+		if err != nil {
+			return nil, err
+		}
+		missing := []string{"public_metadata_game_build", "public_metadata_hero_to_participant_mapping"}
+		correlation := dot54IdentityCorrelation{MatchID: comparison.MatchID, ExplorerRowSHA256: shaBytes(rowBytes), ReplaySHA256: comparison.ContentSHA256, ParserFactsSHA256: comparison.FactsHash, NormalizedFactsSHA256: normalized.ContentSHA256, PublicParticipantTotal: uint32(len(row.Players)), ParsedHeroTotal: uint32(len(facts.Heroes)), ParsedGameBuild: facts.Meta.GameBuild, PublicGameBuild: 0, ParticipantMappingTotal: 0, IdentityStatus: normalized.IdentityStatus, MissingCorrelationInputs: missing}
+		audit.Correlations = append(audit.Correlations, correlation)
+		if normalized.IdentityStatus == contracts.IdentityVerified {
+			audit.IdentityVerifiedTotal++
+		}
 	}
+	if len(comparisonSeen) != len(seen) || len(audit.Correlations) != 100 {
+		return nil, errors.New("independent parser results are not an exhaustive one-to-one selection binding")
+	}
+	sort.Slice(audit.Correlations, func(i, j int) bool { return audit.Correlations[i].MatchID < audit.Correlations[j].MatchID })
 	audit.ParserComparisonSHA256 = shaBytes(aBytes)
 	audit.DeterministicParserTotal = 100
-	audit.IdentityVerifiedTotal = 0
+	if audit.IdentityVerifiedTotal != 0 {
+		return nil, fmt.Errorf("identity verification produced %d eligible replays; full readiness evaluation required", audit.IdentityVerifiedTotal)
+	}
+	audit.Outcome = "historical_no_go_candidate"
 	audit.Reason = "100/100 selected replay objects are byte-verified and independently deterministic under manta v1.5.0, with every selected team represented at least five times; 0/100 can satisfy the accepted full metadata-to-parser participant/build identity correlation, so no normalized replay or aggregate cell is publishable"
 	if err := sealDOT54(&audit.ContentSHA256, *audit); err != nil {
 		return nil, err
@@ -1321,6 +1383,11 @@ func sortedDOT54Strings(values ...string) []string {
 
 func buildDOT54Provenance(root string) (dot54SourceProvenance, error) {
 	p := dot54SourceProvenance{SchemaVersion: "dot54.source-provenance.v1", Policy: map[string]string{"official_tournament": "primary field/handles only", "liquipedia": "community-contributed dated tournament roster/roles only; not independent Valve stable-ID corroboration", "opendota": "supplemental public metadata; Valve-derived, not independent corroboration", "valve_cdn": "public replay-object presence probe only; no authenticity claim", "datdota": "not used"}}
+	pageFiles, pageBytes, err := dot54TreeStats(filepath.Join(root, "pages"))
+	if err != nil {
+		return p, err
+	}
+	p.ProviderPageFiles, p.ProviderPageBytes = pageFiles, pageBytes
 	paths := []string{"official-roster-extracted.json", "pages/official/ti2026.html", "pages/official/index-46b931ab.js", "pages/liquipedia/ti2026-revision-2413904.json", "pages/opendota/teams.json", "pages/opendota/team-pages.checkpoint.jsonl", "pages/opendota/explorer-frozen-identity.json", "pages/opendota/constants-patch.json", "pages/opendota/provider-source.json", "pages/valve-head/jobs.tsv", "pages/valve-head/manifest.json"}
 	checkpoints, err := readDOT54PageCheckpoints(filepath.Join(root, "pages/opendota/team-pages.checkpoint.jsonl"))
 	if err != nil {
@@ -1346,6 +1413,26 @@ func buildDOT54Provenance(root string) (dot54SourceProvenance, error) {
 		p.Files = append(p.Files, dot54SourceFile{Path: rel, Bytes: info.Size(), SHA256: sha})
 	}
 	return p, nil
+}
+
+func dot54TreeStats(root string) (uint32, int64, error) {
+	var files uint32
+	var bytes int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			files++
+			bytes += info.Size()
+		}
+		return nil
+	})
+	return files, bytes, err
 }
 
 func dot54Report(scope dot54ScopeCandidate, discovery dot54DiscoveryEvidence, readiness dot54ReadinessEvidence) string {
