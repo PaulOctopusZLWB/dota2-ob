@@ -2,12 +2,12 @@
 
 Date: 2026-08-12
 
-Amended: 2026-08-13
+Amended: 2026-08-14
 
 Decision owner: Paul
 
-Status: M0 integration base accepted; M1 and M3 active; M2 blocked on the
-recovery-contract V2 gate
+Status: M0 and M2 accepted; M1 real-data evidence active; M3 blocked on the
+raw-record V3 migration gate
 
 ## Objective
 
@@ -253,6 +253,86 @@ source/game time regresses outside an explicit pause/reset transition; team or
 participant identity conflicts with the bound live manifest; or mutually
 exclusive source-presence/value invariants fail. Each condition has a stable
 health/suppression code and fails live claims closed.
+
+### Raw-record V3 correction
+
+M3 composition evidence proved that the accepted version 2 raw JSONL envelope
+cannot satisfy the program's exact-evidence and bounded-recovery requirements
+for every already accepted GSI request body. The V2 record persists both a
+decoded payload and a JSON `raw` value. Encoding that envelope can transform
+the request's lexical bytes and can expand adversarial valid JSON near the
+existing 10 MiB request limit far beyond the P4 memory budget. A later policy
+recovery therefore cannot reconstruct and verify the exact bytes named by
+`EvidenceRefV1.RawPayloadSHA256` for every accepted request. Reducing the
+request limit or raising the resource gates is not accepted by this correction.
+
+New production sessions use integer `schema_version: 3` records in the existing
+newline-terminated `raw.jsonl` log. `RawRecordV3` has exactly these members in
+writer order: `schema_version`, `session_id`, `sequence`, `received_at`,
+`source`, `raw_encoding`, `raw_byte_length`, `raw_base64`, and
+`raw_payload_sha256`. The session ID is 1–128 ASCII bytes from
+`[A-Za-z0-9._-]`; sequence is a nonzero unsigned 64-bit integer; receive time
+is canonical UTC RFC 3339 nanosecond form; source is `gsi`; encoding is
+`base64_std`; and `raw_base64` is standard padded base64 of the exact accepted
+HTTP body. The hash is lowercase SHA-256 of those exact bytes. V3 does not
+persist a second decoded `payload` value. The fixed writer order and bounded
+metadata make one encoded line no larger than
+`4 * ceil(raw_byte_length / 3) + 4096` bytes, including its newline, and
+`raw_byte_length` remains at most 10 MiB. Unknown, duplicate, missing, or
+out-of-order members; noncanonical base64; length/hash disagreement; an invalid
+JSON body after exact-byte reconstruction; or a terminated invalid frame fails
+closed. An unterminated tail alone is rolled back under the existing raw
+failure model.
+
+The capture pipeline retains the exact accepted request bytes and only bounded
+source-specific projection state; it does not retain a generic duplicate JSON
+tree. It preserves the existing one-value JSON acceptance language by validating
+the body with a bounded streaming decoder, then derives accepted GSI fields from
+the same bytes without materializing unknown subtrees. The writer computes
+length and SHA-256 directly from the accepted body and streams the base64 into
+the transactional append; it does not build a second encoded copy of the whole
+line. Every reader decodes one bounded frame to owned raw bytes, recomputes the
+SHA-256, compares it with the record, and validates exactly one JSON value from
+those same bytes before projection. The decoded raw body is released after that
+record completes. `LiveObservationV1` evidence uses the recomputed exact-byte
+hash. A colocated record hash is corruption detection, not authentication:
+policy recovery must also match the independently synchronized
+`PolicyCommitV2` evidence and the lineage-bound mapping before accepting a
+commit.
+
+Capture startup, live projection, policy evidence resolution, and offline
+rebuild stream V3 one record at a time through an encoded-frame limit derived
+from the formula above. They may not read the complete raw log into memory,
+materialize an unbounded record slice, use an unbounded scanner token, or retain
+a decoded raw body after the downstream record operation completes. A bounded
+offset/cursor cache is allowed only as a non-authoritative accelerator: every
+resolved sequence, offset, length, and recomputed raw hash is validated against
+the log. Missing, stale, or corrupt cache state falls back to one linear
+forward scan; it never causes per-commit rescans from sequence one.
+
+V1 and V2 raw records remain immutable read-only compatibility inputs for
+existing accepted sessions and byte-compatible legacy rebuild outputs. They
+are not rewritten, mixed with V3 in one session, or appended by the production
+writer. Resuming an old session for new capture fails closed and requires a new
+V3 session. A V3 session starts a new `PolicyLineageManifestV2` that binds the
+V3 schema/framing identity; an earlier policy lineage cannot silently continue
+across this migration. The five primary cross-track contracts remain V1 and
+byte-compatible.
+
+The migration gate requires an exact capture-owned implementation commit and
+independent review before M3 composition resumes. It must retain the accepted
+10 MiB input limit and OS-buffered acknowledgement boundary; preserve raw
+acknowledgement independence; keep V1/V2 offline compatibility; and add fixed
+goldens plus adversarial round trips for lexical whitespace, escapes, duplicate
+keys, exponent numbers, HTML-sensitive characters, U+2028/U+2029, and bodies at
+and around the limit. Tests inject short writes, rollback failure, partial and
+terminated-invalid tails, length/hash/base64 corruption, mixed versions,
+cache loss/corruption, and downstream failure. On PaulPC4090, isolated
+worst-case V3 append and full no-cache recovery each stay at or below 192 MiB
+peak RSS, while the unchanged combined P4 ceiling remains 384 MiB. Commands,
+raw/encoded byte counts, peak RSS, CPU, duration, fixture hashes, exact branch/
+commit/PR, and a clean-worktree audit are review evidence; synthetic or
+below-limit-only fixtures cannot pass the gate.
 
 ## Stable Boundaries
 
@@ -854,6 +934,11 @@ sidebar while keeping presentation independent of capture and analytics.
 
 Acceptance:
 
+- The independently reviewed raw-record V3 migration above is accepted at an
+  exact immutable capture-owned commit before composed product work resumes;
+  the five primary V1 contracts and the exact accepted M2/M3 commits remain
+  ancestors of the final candidate.
+
 - `zh-CN` covers 100% of audience-facing keys; `en-US` is the development
   fallback, and CI fails on missing/unused keys or incompatible parameters.
 - Hero, item, ability, team, role, metric, and broadcast terminology is
@@ -947,10 +1032,13 @@ Acceptance:
   notification capacity one; candidate queue capacity 64; accepted GSI request
   bodies at most the existing 10 MiB limit, other API request/response bodies at
   most 1 MiB, and `OverlayStateV1` at most 64 KiB; combined live
-  projection/policy/gateway RSS at most 384 MiB; post-warmup RSS growth at most
-  64 MiB; goroutine delta at most ten; open FDs at most 128 and at most 16 above
-  post-warmup baseline; raw file count exactly matches the schedule manifest and
-  raw bytes stay within expected fixture bytes plus the larger of 1% or 16 MiB;
+  projection/policy/gateway RSS at most 384 MiB, with isolated full no-cache raw
+  recovery at most 192 MiB; post-warmup RSS growth at most 64 MiB; goroutine
+  delta at most ten; open FDs at most 128 and at most 16 above post-warmup
+  baseline; raw file count exactly matches the schedule manifest, accepted
+  request-body bytes equal the schedule, and persisted raw-log bytes equal the
+  deterministic V3 encoding expectation while never exceeding the per-record
+  formula above;
   policy commits use at most 1 GiB and 104 segments; total non-raw live files
   under the isolated run data root number at most 192 and use at most 1.6 GiB;
   rotated operational logs use at most ten files/100 MiB; no temporary file
@@ -1074,8 +1162,9 @@ and excluded samples are reported, never silently removed.
 
 - Replay a fixed content-addressed multi-match GSI corpus for 12 wall-clock
   hours at 10 accepted records/second. Its checked-in deterministic schedule
-  freezes session count, record count, exact input/raw byte expectation, pause,
-  burst, stale, out-of-order, audit failure, and overlay-disconnect intervals.
+  freezes session count, record count, exact accepted request-body bytes,
+  deterministic V3 persisted-byte expectation, pause, burst, stale,
+  out-of-order, audit failure, and overlay-disconnect intervals.
 - Execute 12 orderly restarts, 12 `SIGKILL` process restarts on the same running
   host, and 12 injected incomplete raw tails/cursor/checkpoint/policy frames at
   deterministic sequence numbers. Recovery must preserve every record whose
