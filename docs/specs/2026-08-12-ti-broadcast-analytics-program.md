@@ -217,7 +217,11 @@ The live projector follows the committed session log by
   Notifications may coalesce or disappear on restart, but accepted records
   never do;
 - one projector reads every missing sequence in order and advances a cursor
-  cache only after all projections for that sequence succeed;
+  cache only after that sequence reaches one of the terminal capture-owned
+  projection results defined below: produced output with every adapter
+  successful, or an explicit consumed-without-output result. A parsing,
+  integrity, adapter, persistence, cancellation, or other operational error is
+  not terminal and does not advance the cursor;
 - saturation is represented as sequence lag and age. It never drops or rewrites
   raw records and never extends the raw HTTP acknowledgement path;
 - on restart, a valid cursor resumes at `cursor + 1`; a missing/corrupt cursor
@@ -300,9 +304,10 @@ the same bytes without materializing unknown subtrees. Raw acceptance remains
 the exact accepted M0 `encoding/json.Decoder` behavior with `UseNumber`, one
 value followed only by whitespace and EOF, object duplicate-key last-wins
 semantics, and Go replacement semantics for malformed UTF-8 and unpaired UTF-16
-surrogates. A valid top-level scalar or `null` is committed raw and then follows
-the existing deterministic non-object projection failure; it is not rejected at
-the raw boundary.
+surrogates. A valid top-level value other than an object—including `null`, a
+boolean, number, string, or array—is committed raw but produces the terminal
+consumed-without-output result with health code `gsi_projection_non_object` and
+reason `top_level_non_object`; it is not rejected at the raw boundary.
 
 The final last-wins source-specific projection is a deliberately bounded domain:
 
@@ -334,6 +339,48 @@ projection domain; outside it the explicit no-output result replaces the
 previous accidental unbounded behavior. This is a projection safety boundary,
 not a reduction of the raw JSON acceptance language or the 10 MiB request
 limit.
+
+Projection of one raw-valid record has exactly two successful, capture-owned
+terminal results. `produced` means a complete `LiveObservationV1` was mapped and
+every configured projection adapter for that sequence completed successfully.
+`consumed_no_output` is allowed only for `gsi_projection_non_object` or
+`gsi_projection_bounds_exceeded`; capture determines it before invoking or
+mutating any `LiveObservationV1`, legacy-tick, candidate, policy, delivery, or
+presentation adapter. It emits no derived value or policy commit and is not
+returned to the follower as an error. This narrow result belongs to capture and
+is not a sixth cross-track data contract or a generic event envelope.
+
+The follower treats both results as terminal consumption: it writes the cursor,
+sets `projected_sequence` to the consumed raw sequence, recomputes lag, and
+continues with the next committed sequence in order. For compatibility,
+`projected_sequence` therefore means the highest terminally processed raw
+sequence, whether or not that sequence produced an observation. A
+consumed-without-output sequence is never retried, and later evidence and policy
+records retain their own raw sequence; the resulting source-sequence gap is an
+intentional no-output fact, not a missing record and never a fabricated policy
+commit. Any nonterminal parsing, integrity, adapter, persistence, cancellation,
+or other operational error retains the accepted behavior: no cursor advance,
+visible lag/degradation, no later-sequence processing, and deterministic retry
+from the failed adapter for that same sequence while already successful adapters
+retain their accepted idempotent state.
+
+A consumed-without-output result immediately sets active projection degradation
+to its stable code and bounded reason and causes delivery to suppress/hide any
+previous state within the existing two-second fail-closed bound. Health adds the
+bounded fields `projection_rejection_active`, `projection_rejection_count`,
+`last_projection_rejection_sequence`, `last_projection_rejection_code`, and
+`last_projection_rejection_reason`; it never retains an unbounded event list.
+The counter increments once per distinct consumed-without-output raw sequence.
+The active flag/code/reason clear only after a later `produced` sequence
+completes successfully, while the count and last-rejection tuple remain for
+diagnosis; other active lag or operational errors still keep health degraded.
+The live-projector cursor cache is versioned by this migration and carries that
+bounded summary, so a valid cache restores it without replay. A missing, stale,
+old-version, or corrupt cache is rejected and one authoritative forward scan
+deterministically reconstructs the same cursor, count, last rejection, active
+state, output gaps, and later produced values. Process startup publishes no
+prior overlay state before that restore/rebuild is complete, so cache loss
+cannot transiently re-expose a claim.
 
 The writer computes length and SHA-256 directly from the accepted body and
 streams the base64 into the transactional append; it does not build a second
@@ -373,7 +420,7 @@ independent review before M3 composition resumes. It must retain the accepted
 acknowledgement independence; keep V1/V2 offline compatibility; and add fixed
 goldens plus adversarial round trips for lexical whitespace, escapes, duplicate
 keys at every projected object level, exponent numbers, HTML-sensitive
-characters, U+2028/U+2029, top-level scalar and `null`, malformed UTF-8,
+characters, U+2028/U+2029, every top-level non-object type, malformed UTF-8,
 unpaired surrogate escapes, every canonical/noncanonical `received_at` edge,
 and bodies at and around the limit. Projection tests cover every bound and prove
 final duplicate replacement, the exact health/reason codes, raw acknowledgement,
@@ -383,9 +430,16 @@ abilities per participant, 64 buildings, and maximum-length retained
 identifiers/strings/numbers—with the remaining bytes filled by a skipped unknown
 subtree. Tests inject short writes, rollback failure, partial and
 terminated-invalid tails, length/hash/base64 corruption, mixed versions, cache
-loss/corruption, and downstream failure. On PaulPC4090, isolated worst-case V3
-append and full no-cache recovery of that exact 10 MiB fixture each stay at or
-below 192 MiB peak RSS, while the unchanged combined P4 ceiling remains 384 MiB.
+loss/corruption, and downstream failure. Ordered tests include
+valid→bounds-exceeded→valid and valid→non-object→valid sequences, consecutive
+no-output records, and restart with valid, missing, stale, old-version, and
+corrupt cursors. They prove exact cursor and `projected_sequence` advancement,
+high-water/lag accounting, bounded rejection-summary restore/rebuild, active
+degradation and later clearing, zero adapter mutation or policy commit for each
+rejected sequence, deterministic source-sequence gaps, and continued output from
+the later valid sequence. On PaulPC4090, isolated worst-case V3 append and full
+no-cache recovery of that exact 10 MiB fixture each stay at or below 192 MiB peak
+RSS, while the unchanged combined P4 ceiling remains 384 MiB.
 Commands, raw/encoded byte counts, peak RSS, CPU, duration, fixture hashes,
 exact branch/commit/PR, and a clean-worktree audit are review evidence;
 synthetic, below-limit-only, or less-than-maximum-projection fixtures cannot pass
