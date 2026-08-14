@@ -1,8 +1,7 @@
-// Package snapshotv2 owns the immutable semantic reference for the accepted
-// snapshot-backed V2 product. The reference sources are embedded in the binary
-// and are used at runtime to derive the accepted catalog and EngineBuild
-// identities. Current V3 implementation sources are deliberately not part of
-// this artifact.
+// Package snapshotv2 owns the immutable semantic source for the accepted
+// snapshot-backed V2 product. The reference artifacts mechanically generate
+// the isolated implementation selected at runtime. Artifact identities come
+// back from that compiled package, rather than from a second archival copy.
 package snapshotv2
 
 import (
@@ -13,6 +12,7 @@ import (
 	"sort"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
+	snapshotproduct "github.com/PaulOctopusZLWB/dota2-ob/internal/snapshotv2/compiled/product"
 )
 
 const (
@@ -55,15 +55,14 @@ func ReferenceDigests() (map[string]string, error) {
 	return result, nil
 }
 
-// Artifacts derives the accepted V2 identities from the immutable semantic
-// reference. The legacy source_sha256 field name is retained solely because it
-// is part of the accepted canonical identity algorithm.
+// Artifacts derives the accepted V2 identities from the semantic digests built
+// into the selected implementation. The legacy source_sha256 field name is
+// retained solely because it is part of the accepted canonical algorithm.
 func Artifacts(rulesSHA256 string) (catalog, terminology, localization, engine contracts.PolicyArtifactIdentityV2, err error) {
-	digests, err := ReferenceDigests()
-	if err != nil {
-		return catalog, terminology, localization, engine, err
+	if rulesSHA256 != snapshotproduct.RulesArtifact().ContentSHA256 {
+		return catalog, terminology, localization, engine, fmt.Errorf("snapshot V2 rules artifact mismatch")
 	}
-	return artifactsFromDigests(digests, rulesSHA256)
+	return artifactsFromDigests(snapshotproduct.SemanticDigests(), rulesSHA256)
 }
 
 func artifactsFromDigests(digests map[string]string, rulesSHA256 string) (catalog, terminology, localization, engine contracts.PolicyArtifactIdentityV2, err error) {

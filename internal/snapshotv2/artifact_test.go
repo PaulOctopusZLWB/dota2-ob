@@ -64,6 +64,12 @@ func TestEmbeddedReferenceSubstitutionChangesRuntimeIdentity(t *testing.T) {
 	}
 }
 
+func TestCurrentRulesSubstitutionCannotEnterCompiledV2Identity(t *testing.T) {
+	if _, _, _, _, err := Artifacts("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err == nil {
+		t.Fatal("substituted current rules identity entered compiled V2 lineage")
+	}
+}
+
 func assertArtifact(t *testing.T, got, want string) {
 	t.Helper()
 	if got != want {

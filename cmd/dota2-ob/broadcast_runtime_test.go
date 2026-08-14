@@ -179,22 +179,22 @@ func TestBroadcastRuntimeRejectsSubstitutedLocalLineageArtifact(t *testing.T) {
 
 func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 	files := map[string]string{
-		"../../internal/contracts/contracts.go":      contractsSourceSHA256,
-		"../../internal/capture/live_observation.go": liveMappingSourceSHA256,
-		"../../internal/presentation/catalog.go":     presentationCatalogSHA256,
-		"main.go":                                    productMainSourceSHA256,
-		"broadcast_ports.go":                         productPortsSourceSHA256,
-		"broadcast_recovery.go":                      productRecoverySourceSHA256,
-		"broadcast_runtime.go":                       productRuntimeSourceSHA256,
-		"broadcast_lineage.go":                       productLineageSourceSHA256,
-		"broadcast_live_only.go":                     productLiveOnlySourceSHA256,
-		"broadcast_recovery_v3.go":                   productRecoveryV3SourceSHA256,
-		"broadcast_runtime_v3.go":                    productRuntimeV3SourceSHA256,
-		"../../internal/session/highwater.go":        sessionHighWaterSourceSHA256,
-		"../../internal/session/live_projector.go":   sessionFollowerSourceSHA256,
-		"../../internal/insight/engine.go":           insightEngineSourceSHA256,
-		"../../internal/policy/engine.go":            policyEngineSourceSHA256,
-		"../../internal/policy/application.go":       policyApplicationSourceSHA256,
+		"../../internal/contracts/contracts.go":                      contractsSourceSHA256,
+		"../../internal/capture/live_observation.go":                 liveMappingSourceSHA256,
+		"../../internal/presentation/catalog.go":                     presentationCatalogSHA256,
+		"main.go":                                                    productMainSourceSHA256,
+		"broadcast_ports.go":                                         productPortsSourceSHA256,
+		"broadcast_recovery.go":                                      productRecoverySourceSHA256,
+		"../../internal/snapshotv2/reference/product_runtime.go.src": productRuntimeSourceSHA256,
+		"broadcast_lineage.go":                                       productLineageSourceSHA256,
+		"broadcast_live_only.go":                                     productLiveOnlySourceSHA256,
+		"broadcast_recovery_v3.go":                                   productRecoveryV3SourceSHA256,
+		"broadcast_runtime_v3.go":                                    productRuntimeV3SourceSHA256,
+		"../../internal/session/highwater.go":                        sessionHighWaterSourceSHA256,
+		"../../internal/session/live_projector.go":                   sessionFollowerSourceSHA256,
+		"../../internal/insight/engine.go":                           insightEngineSourceSHA256,
+		"../../internal/policy/engine.go":                            policyEngineSourceSHA256,
+		"../../internal/policy/application.go":                       policyApplicationSourceSHA256,
 	}
 	for path, want := range files {
 		payload, err := os.ReadFile(path)
@@ -244,14 +244,14 @@ func TestSnapshotV2AcceptedCanonicalBytesAndLineageRemainPinned(t *testing.T) {
 	if err := runtime.commitCandidates(observation, []contracts.InsightCandidateV1{candidate}, now.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	state := runtime.app.State()
+	state := runtime.state()
 	command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "v2-regression-approve", SessionID: sessionID, Action: contracts.ActionApprove, TargetCandidateID: candidate.CandidateID, ExpectedPolicyRevision: state.PolicyRevision, PolicyTimeMS: now.UnixMilli() + 1}
 	result, err := runtime.execute(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
 	commitHashes := []string{}
-	if err := runtime.store.VisitAll(func(value commitlog.CommittedV2) error { commitHashes = append(commitHashes, value.Hash); return nil }); err != nil {
+	if err := runtime.visitAll(func(value commitlog.CommittedV2) error { commitHashes = append(commitHashes, value.Hash); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	candidateHash, _ := contracts.CanonicalSHA256(candidate)
@@ -418,7 +418,7 @@ func TestBroadcastRuntimeRecoversLineageBoundObservationFromRawSession(t *testin
 	if err := first.commitCandidates(observation, candidates, now.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	wantHash := first.app.StateHash()
+	wantHash := first.stateHash()
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -428,8 +428,8 @@ func TestBroadcastRuntimeRecoversLineageBoundObservationFromRawSession(t *testin
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if state := restarted.app.State(); state.LastObservationSequence != 1 || restarted.app.StateHash() != wantHash {
-		t.Fatalf("recovered observation state=%#v hash=%s want=%s", state, restarted.app.StateHash(), wantHash)
+	if state := restarted.state(); state.LastObservationSequence != 1 || restarted.stateHash() != wantHash {
+		t.Fatalf("recovered observation state=%#v hash=%s want=%s", state, restarted.stateHash(), wantHash)
 	}
 	before := policyLogBytes(t, filepath.Join(root, sessionID))
 	if err := restarted.applyObservation(context.Background(), observation); err != nil {
@@ -559,23 +559,22 @@ func TestBroadcastRuntimeRecoversDeltaObservationAfterValidCheckpoint(t *testing
 		t.Fatal(err)
 	}
 	firstCandidates := insight.Evaluate(insight.Input{Observation: firstObservation, Lineage: &lineage, PolicyTimeMS: firstObservation.Evidence.ReceiveTime.UnixMilli()}, insight.DefaultConfig())
-	firstLiveHash, _ := contracts.CanonicalSHA256(firstObservation)
-	firstCommit, err := runtime.app.EvaluateObservation(firstObservation.Evidence.Sequence, firstObservation.Evidence.RawPayloadSHA256, firstLiveHash, firstObservation.Evidence, firstCandidates, firstObservation.Evidence.ReceiveTime.UnixMilli())
+	firstCommit, err := runtime.evaluateObservation(firstObservation, firstCandidates, firstObservation.Evidence.ReceiveTime.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := runtime.app.State()
+	state := runtime.state()
 	commitHash, _ := contracts.CanonicalSHA256(firstCommit)
 	checkpoint := contracts.PolicyCheckpointV2{
 		SchemaVersion: contracts.PolicyCheckpointSchemaV2, LineageManifestID: lineage.MustContentID(), LineageManifestSHA256: lineage.MustContentID(),
 		SessionID: sessionID, CommitSequence: firstCommit.CommitSequence, ReferencedCommitSHA256: commitHash,
 		LastObservationSequence: state.LastObservationSequence, PolicyRevision: state.PolicyRevision, LastPolicyTimeMS: state.LastPolicyTimeMS,
-		StateHash: runtime.app.StateHash(), CreatedTimeMS: state.LastPolicyTimeMS,
+		StateHash: runtime.stateHash(), CreatedTimeMS: state.LastPolicyTimeMS,
 		Preview: state.Preview, DisabledRuleIDs: state.DisabledRuleIDs, Cooldowns: state.Cooldowns, Pins: state.Pins,
 		EmergencyHide: state.EmergencyHide, ActivePrimary: state.ActivePrimary, CommandResults: state.CommandResults,
 		CommandLocators: []contracts.PolicyCommandLocatorV2{}, CandidateTombstones: state.CandidateTombstones,
 	}
-	if err := runtime.store.WriteCheckpoint(checkpoint); err != nil {
+	if err := runtime.writeCheckpoint(checkpoint); err != nil {
 		t.Fatal(err)
 	}
 	secondObservation, err := capture.MapLiveObservationV1(secondRecord)
@@ -586,7 +585,7 @@ func TestBroadcastRuntimeRecoversDeltaObservationAfterValidCheckpoint(t *testing
 	if err := runtime.commitCandidates(secondObservation, secondCandidates, secondObservation.Evidence.ReceiveTime.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	wantHash := runtime.app.StateHash()
+	wantHash := runtime.stateHash()
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -595,8 +594,8 @@ func TestBroadcastRuntimeRecoversDeltaObservationAfterValidCheckpoint(t *testing
 		t.Fatalf("valid checkpoint continuation failed recovery: %v", err)
 	}
 	defer restarted.Close()
-	if restarted.app.StateHash() != wantHash {
-		t.Fatalf("checkpoint continuation hash=%s want=%s", restarted.app.StateHash(), wantHash)
+	if restarted.stateHash() != wantHash {
+		t.Fatalf("checkpoint continuation hash=%s want=%s", restarted.stateHash(), wantHash)
 	}
 }
 
