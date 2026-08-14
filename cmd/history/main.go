@@ -45,6 +45,8 @@ func run(args []string) error {
 		return runReport(args[1:])
 	case "real-replay":
 		return runRealReplay(args[1:])
+	case "dot54-evidence":
+		return runDOT54EvidenceCommand(args[1:])
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return nil
@@ -55,10 +57,11 @@ func run(args []string) error {
 }
 
 func printUsage(w *os.File) {
-	fmt.Fprintln(w, "usage: history <corpus|report|real-replay> [flags]")
+	fmt.Fprintln(w, "usage: history <corpus|report|real-replay|dot54-evidence> [flags]")
 	fmt.Fprintln(w, "  corpus  run the deterministic representative corpus twice and print hashes, ids, and resource measurements")
 	fmt.Fprintln(w, "  report  emit the M1 readiness/no-go evidence report for the representative corpus")
 	fmt.Fprintln(w, "  real-replay  run one genuine PBDEMS2 replay twice through internal/replay+manta into independent durable artifacts")
+	fmt.Fprintln(w, "  dot54-evidence  seal the DOT-54 real-source terminal evidence package from checkpointed provider pages")
 }
 
 func runRealReplay(args []string) error {
