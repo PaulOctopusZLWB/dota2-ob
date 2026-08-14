@@ -271,12 +271,20 @@ newline-terminated `raw.jsonl` log. `RawRecordV3` has exactly these members in
 writer order: `schema_version`, `session_id`, `sequence`, `received_at`,
 `source`, `raw_encoding`, `raw_byte_length`, `raw_base64`, and
 `raw_payload_sha256`. The session ID is 1–128 ASCII bytes from
-`[A-Za-z0-9._-]`; sequence is a nonzero unsigned 64-bit integer; receive time
-is canonical UTC RFC 3339 nanosecond form; source is `gsi`; encoding is
-`base64_std`; and `raw_base64` is standard padded base64 of the exact accepted
-HTTP body. The hash is lowercase SHA-256 of those exact bytes. V3 does not
-persist a second decoded `payload` value. The fixed writer order and bounded
-metadata make one encoded line no larger than
+`[A-Za-z0-9._-]`; sequence is a nonzero unsigned 64-bit integer; and source is
+`gsi`. Receive time is exactly
+`receivedAt.UTC().Format(time.RFC3339Nano)`: an uppercase `T`, UTC `Z`, and
+either no fractional part when nanoseconds are zero or 1–9 fractional digits
+with trailing zeroes removed. For example, the canonical spellings are
+`2026-08-14T00:20:26Z`, `2026-08-14T00:20:26.000000001Z`, and
+`2026-08-14T00:20:26.1234Z`. A reader parses with `time.RFC3339Nano` and rejects
+the value unless `parsed.UTC().Format(time.RFC3339Nano)` is byte-for-byte equal
+to the input; offsets such as `+00:00`, redundant fractional zeroes, and every
+other alternate spelling are invalid. Encoding is `base64_std`, and
+`raw_base64` is standard padded base64 of the exact accepted HTTP body. The
+hash is lowercase SHA-256 of those exact bytes. V3 does not persist a second
+decoded `payload` value. The fixed writer order and bounded metadata make one
+encoded line no larger than
 `4 * ceil(raw_byte_length / 3) + 4096` bytes, including its newline, and
 `raw_byte_length` remains at most 10 MiB. Unknown, duplicate, missing, or
 out-of-order members; noncanonical base64; length/hash disagreement; an invalid
@@ -288,17 +296,55 @@ The capture pipeline retains the exact accepted request bytes and only bounded
 source-specific projection state; it does not retain a generic duplicate JSON
 tree. It preserves the existing one-value JSON acceptance language by validating
 the body with a bounded streaming decoder, then derives accepted GSI fields from
-the same bytes without materializing unknown subtrees. The writer computes
-length and SHA-256 directly from the accepted body and streams the base64 into
-the transactional append; it does not build a second encoded copy of the whole
-line. Every reader decodes one bounded frame to owned raw bytes, recomputes the
-SHA-256, compares it with the record, and validates exactly one JSON value from
-those same bytes before projection. The decoded raw body is released after that
-record completes. `LiveObservationV1` evidence uses the recomputed exact-byte
-hash. A colocated record hash is corruption detection, not authentication:
-policy recovery must also match the independently synchronized
-`PolicyCommitV2` evidence and the lineage-bound mapping before accepting a
-commit.
+the same bytes without materializing unknown subtrees. Raw acceptance remains
+the exact accepted M0 `encoding/json.Decoder` behavior with `UseNumber`, one
+value followed only by whitespace and EOF, object duplicate-key last-wins
+semantics, and Go replacement semantics for malformed UTF-8 and unpaired UTF-16
+surrogates. A valid top-level scalar or `null` is committed raw and then follows
+the existing deterministic non-object projection failure; it is not rejected at
+the raw boundary.
+
+The final last-wins source-specific projection is a deliberately bounded domain:
+
+- at most 10 distinct `(team key, participant-slot key)` pairs across the final
+  `player`, `hero`, `items`, and `abilities` objects;
+- at most 32 item entries and 32 ability entries for each projected participant,
+  and at most 64 building entries across the final `buildings` object;
+- at most 128 decoded UTF-8 bytes, after the accepted Go replacement behavior,
+  for every retained team, participant-slot, item-slot, ability-slot, or
+  building identifier; at most 256 such bytes for every retained source string
+  value; and at most 128 lexical bytes for every retained `json.Number` token;
+  and
+- only the fixed GSI paths and fields already mapped into `LiveObservationV1`
+  and its capture-owned legacy adapter. Unknown members and subtrees are
+  validated and skipped without retaining their keys, values, or shape.
+
+These limits apply after duplicate-key replacement at every object level. An
+over-limit earlier duplicate that is replaced by an in-limit final value does
+not fail projection. If the final value exceeds any limit, capture still
+commits and acknowledges the exact raw V3 record, but emits no partial
+`LiveObservationV1`, legacy tick, candidate, or policy effect. Downstream fails
+closed with health code `gsi_projection_bounds_exceeded` and exactly one bounded
+reason from `participant_count`, `item_count`, `ability_count`,
+`building_count`, `identifier_bytes`, `string_bytes`, or `number_bytes`.
+If more than one limit fails, that list is the fixed precedence order; JSON
+member order cannot change the emitted reason.
+Byte-compatible V1/V2 legacy derived output is required only inside this bounded
+projection domain; outside it the explicit no-output result replaces the
+previous accidental unbounded behavior. This is a projection safety boundary,
+not a reduction of the raw JSON acceptance language or the 10 MiB request
+limit.
+
+The writer computes length and SHA-256 directly from the accepted body and
+streams the base64 into the transactional append; it does not build a second
+encoded copy of the whole line. Every reader decodes one bounded frame to owned
+raw bytes, recomputes the SHA-256, compares it with the record, and validates
+exactly one JSON value from those same bytes before projection. The decoded raw
+body is released after that record completes. `LiveObservationV1` evidence uses
+the recomputed exact-byte hash. A colocated record hash is corruption detection,
+not authentication: policy recovery must also match the independently
+synchronized `PolicyCommitV2` evidence and the lineage-bound mapping before
+accepting a commit.
 
 Capture startup, live projection, policy evidence resolution, and offline
 rebuild stream V3 one record at a time through an encoded-frame limit derived
@@ -311,28 +357,39 @@ the log. Missing, stale, or corrupt cache state falls back to one linear
 forward scan; it never causes per-commit rescans from sequence one.
 
 V1 and V2 raw records remain immutable read-only compatibility inputs for
-existing accepted sessions and byte-compatible legacy rebuild outputs. They
+existing accepted sessions. Their legacy rebuild outputs remain byte-compatible
+inside the bounded projection domain above; an out-of-domain record remains
+immutable and now produces the same explicit fail-closed no-output result. They
 are not rewritten, mixed with V3 in one session, or appended by the production
 writer. Resuming an old session for new capture fails closed and requires a new
 V3 session. A V3 session starts a new `PolicyLineageManifestV2` that binds the
 V3 schema/framing identity; an earlier policy lineage cannot silently continue
 across this migration. The five primary cross-track contracts remain V1 and
-byte-compatible.
+byte-compatible for every produced value.
 
 The migration gate requires an exact capture-owned implementation commit and
 independent review before M3 composition resumes. It must retain the accepted
 10 MiB input limit and OS-buffered acknowledgement boundary; preserve raw
 acknowledgement independence; keep V1/V2 offline compatibility; and add fixed
 goldens plus adversarial round trips for lexical whitespace, escapes, duplicate
-keys, exponent numbers, HTML-sensitive characters, U+2028/U+2029, and bodies at
-and around the limit. Tests inject short writes, rollback failure, partial and
-terminated-invalid tails, length/hash/base64 corruption, mixed versions,
-cache loss/corruption, and downstream failure. On PaulPC4090, isolated
-worst-case V3 append and full no-cache recovery each stay at or below 192 MiB
-peak RSS, while the unchanged combined P4 ceiling remains 384 MiB. Commands,
-raw/encoded byte counts, peak RSS, CPU, duration, fixture hashes, exact branch/
-commit/PR, and a clean-worktree audit are review evidence; synthetic or
-below-limit-only fixtures cannot pass the gate.
+keys at every projected object level, exponent numbers, HTML-sensitive
+characters, U+2028/U+2029, top-level scalar and `null`, malformed UTF-8,
+unpaired surrogate escapes, every canonical/noncanonical `received_at` edge,
+and bodies at and around the limit. Projection tests cover every bound and prove
+final duplicate replacement, the exact health/reason codes, raw acknowledgement,
+and zero partial downstream output. The exact-limit resource fixture contains
+the maximum allowed relevant projection—10 participants, 32 items and 32
+abilities per participant, 64 buildings, and maximum-length retained
+identifiers/strings/numbers—with the remaining bytes filled by a skipped unknown
+subtree. Tests inject short writes, rollback failure, partial and
+terminated-invalid tails, length/hash/base64 corruption, mixed versions, cache
+loss/corruption, and downstream failure. On PaulPC4090, isolated worst-case V3
+append and full no-cache recovery of that exact 10 MiB fixture each stay at or
+below 192 MiB peak RSS, while the unchanged combined P4 ceiling remains 384 MiB.
+Commands, raw/encoded byte counts, peak RSS, CPU, duration, fixture hashes,
+exact branch/commit/PR, and a clean-worktree audit are review evidence;
+synthetic, below-limit-only, or less-than-maximum-projection fixtures cannot pass
+the gate.
 
 ## Stable Boundaries
 
