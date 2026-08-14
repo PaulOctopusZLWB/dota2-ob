@@ -1,6 +1,7 @@
 package v3fixture
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -9,6 +10,31 @@ import (
 const RawLimit = 10 << 20
 
 var maxNumber = json.RawMessage(strings.Repeat("9", 128))
+
+const RecognizedUnknownSHA256 = "d05e2a7de6af088a47092549aaa749292fdd661351c349c8c2cac0795705ec55"
+
+// RecognizedUnknownBody is the reviewer's exact 10 MiB adversarial body.
+func RecognizedUnknownBody() ([]byte, error) {
+	prefix, suffix := []byte(`{"provider":{"junk":[`), []byte(`0]}}`)
+	body := append([]byte(nil), prefix...)
+	remaining := RawLimit - len(prefix) - len(suffix)
+	for remaining >= 2 {
+		body = append(body, '0', ',')
+		remaining -= 2
+	}
+	body = append(body, suffix...)
+	for ; remaining > 0; remaining-- {
+		body = append(body, ' ')
+	}
+	if len(body) != RawLimit {
+		return nil, fmt.Errorf("adversarial fixture size %d, want %d", len(body), RawLimit)
+	}
+	sum := fmt.Sprintf("%x", sha256.Sum256(body))
+	if sum != RecognizedUnknownSHA256 {
+		return nil, fmt.Errorf("adversarial fixture hash %s, want %s", sum, RecognizedUnknownSHA256)
+	}
+	return body, nil
+}
 
 // MaximumRelevantBody returns the exact 10 MiB migration-gate fixture. Every
 // retained identifier/string/number reaches its lexical bound; the relevant

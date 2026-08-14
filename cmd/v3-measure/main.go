@@ -27,12 +27,17 @@ func (p *counter) Apply(context.Context, *session.Record) error { p.calls++; ret
 
 func main() {
 	if len(os.Args) != 4 {
-		fatal("usage: v3-measure fixture|append|recover INPUT OUTPUT")
+		fatal("usage: v3-measure fixture|fixture-adversarial|append|recover INPUT OUTPUT")
 	}
 	mode, input, output := os.Args[1], os.Args[2], os.Args[3]
 	switch mode {
 	case "fixture":
 		body, err := v3fixture.MaximumRelevantBody()
+		check(err)
+		check(os.WriteFile(output, body, 0o600))
+		emit(mode, body, 0, 0)
+	case "fixture-adversarial":
+		body, err := v3fixture.RecognizedUnknownBody()
 		check(err)
 		check(os.WriteFile(output, body, 0o600))
 		emit(mode, body, 0, 0)

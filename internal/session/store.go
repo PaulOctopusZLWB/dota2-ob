@@ -114,15 +114,18 @@ func NewStore(root string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("create session dir: %w", err)
 	}
 
+	sequence, version, err := recoverRawFile(store.RawPath(), store.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sequence > 0 && version != 3 {
+		return nil, errors.New("legacy raw session is read-only; start a new V3 session")
+	}
+	store.sequence = sequence
+	if err := ensureCaptureLineageV3(store.SessionDir(), store.sequence); err != nil {
+		return nil, err
+	}
 	if store.openFile == nil {
-		sequence, version, err := recoverRawFile(store.RawPath(), store.sessionID)
-		if err != nil {
-			return nil, err
-		}
-		if sequence > 0 && version != 3 {
-			return nil, errors.New("legacy raw session is read-only; start a new V3 session")
-		}
-		store.sequence = sequence
 		store.openFile = func(path string) (RawFile, error) {
 			return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 		}

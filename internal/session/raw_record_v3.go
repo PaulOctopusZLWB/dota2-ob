@@ -99,6 +99,10 @@ func DecodeRecordV3(line []byte, sessionID string, sequence uint64) (*Record, er
 	if !bytes.Equal(sum[:], hashBytes) {
 		return nil, errors.New("V3 integrity mismatch")
 	}
+	canonical := fmt.Sprintf(`{"schema_version":3,"session_id":%q,"sequence":%d,"received_at":%q,"source":"gsi","raw_encoding":"base64_std","raw_byte_length":%d,"raw_base64":%q,"raw_payload_sha256":%q}`, sid, seq, receivedText, len(raw), encoded, hashText)
+	if !bytes.Equal(line, []byte(canonical)) {
+		return nil, errors.New("noncanonical V3 framing")
+	}
 	payload, result, code, reason, err := decodeBoundedGSI(raw)
 	if err != nil {
 		return nil, err

@@ -40,6 +40,7 @@ func TestProjectionBoundsUseFinalDuplicateValuesAndFixedPrecedence(t *testing.T)
 
 func TestProjectionBoundsAllStableReasons(t *testing.T) {
 	cases := []struct{ name, body, reason string }{
+		{"structural-teams", `{"player":{` + manyEntries("t", 12, `{}`) + `}}`, "participant_count"},
 		{"items", `{"items":{"t":{"p":{` + manyEntries("i", 33, `{"name":"x"}`) + `}}}}`, "item_count"},
 		{"abilities", `{"abilities":{"t":{"p":{` + manyEntries("a", 33, `{"name":"x"}`) + `}}}}`, "ability_count"},
 		{"buildings", `{"buildings":{"t":{` + manyEntries("b", 65, `{"health":1}`) + `}}}`, "building_count"},

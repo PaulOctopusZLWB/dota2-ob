@@ -20,6 +20,27 @@ var ErrOutOfOrderHighWater = errors.New("out-of-order high-water mark")
 type LiveProjection interface {
 	Apply(context.Context, *Record) error
 }
+
+// StartupPublicationBarrier is a capture-owned dependency-inversion seam. A
+// delivery implementation keeps publication closed between these calls while
+// raw cursor authority is restored; this package does not import delivery,
+// presentation, or policy.
+type StartupPublicationBarrier interface {
+	BeginRestore(context.Context) error
+	CompleteRestore(context.Context) error
+}
+
+type RejectionTransition struct {
+	Active   bool
+	Sequence uint64
+	Count    uint64
+	Code     string
+	Reason   string
+}
+
+type RejectionHealthSink interface {
+	ProjectionHealth(context.Context, RejectionTransition) error
+}
 type LiveProjectionHealth struct {
 	HighWater                       uint64        `json:"high_water"`
 	ProjectedSequence               uint64        `json:"projected_sequence"`
@@ -74,6 +95,12 @@ func WithCursorIO(ops CursorIO) LiveFollowerOption {
 func WithFollowerHighWater(highWater *HighWater) LiveFollowerOption {
 	return func(f *LiveFollower) { f.highWater = highWater }
 }
+func WithStartupBarrier(barrier StartupPublicationBarrier) LiveFollowerOption {
+	return func(f *LiveFollower) { f.startupBarrier = barrier }
+}
+func WithRejectionHealthSink(sink RejectionHealthSink) LiveFollowerOption {
+	return func(f *LiveFollower) { f.rejectionSink = sink }
+}
 
 type LiveFollower struct {
 	sessionID, rawPath, cursorPath string
@@ -88,6 +115,9 @@ type LiveFollower struct {
 	cachedSequence                 uint64
 	highWater                      *HighWater
 	cursorIO                       CursorIO
+	startupBarrier                 StartupPublicationBarrier
+	rejectionSink                  RejectionHealthSink
+	restoring                      bool
 }
 
 func NewLiveFollower(sessionID, rawPath, cursorPath string, projections []LiveProjection, opts ...LiveFollowerOption) *LiveFollower {
@@ -125,19 +155,33 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 		return f.fail(ErrOutOfOrderHighWater)
 	}
 	if !f.loaded {
-		// Cursor is a cache of completed work, not a durable adapter checkpoint.
-		// Rebuild fresh process-local adapters through it from authoritative raw,
-		// then resume durable cursor replacement at cached sequence + 1.
+		if f.startupBarrier != nil {
+			if err := f.startupBarrier.BeginRestore(ctx); err != nil {
+				return f.fail(fmt.Errorf("begin startup barrier: %w", err))
+			}
+		}
+		f.restoring = true
 		cached, valid := f.loadCursor(highWater)
 		if valid {
-			f.cachedSequence = cached.Sequence
-			f.healthMu.Lock()
-			f.health.ProjectionRejectionActive = cached.ProjectionRejectionActive
-			f.health.ProjectionRejectionCount = cached.ProjectionRejectionCount
-			f.health.LastProjectionRejectionSequence = cached.LastProjectionRejectionSequence
-			f.health.LastProjectionRejectionCode = cached.LastProjectionRejectionCode
-			f.health.LastProjectionRejectionReason = cached.LastProjectionRejectionReason
-			f.healthMu.Unlock()
+			authoritative, err := f.summarizeThrough(cached.Sequence)
+			if err != nil {
+				return f.fail(err)
+			}
+			valid = cursorSummariesEqual(cached, authoritative)
+			if valid {
+				f.restoreCursor(authoritative)
+				if authoritative.ProjectionRejectionActive {
+					if err := f.emitRejectionTransition(ctx, authoritative); err != nil {
+						return f.fail(err)
+					}
+				}
+				if err := f.completeStartupBarrier(ctx); err != nil {
+					return f.fail(err)
+				}
+			}
+		}
+		if !valid {
+			f.resetProjectionState()
 		}
 		f.loaded = true
 	}
@@ -150,7 +194,7 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 	projected := f.health.ProjectedSequence
 	f.healthMu.Unlock()
 	if projected >= highWater {
-		return nil
+		return f.completeStartupBarrier(ctx)
 	}
 	err := f.forEachRange(projected+1, highWater, func(record *Record) error {
 		f.healthMu.Lock()
@@ -176,28 +220,20 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 				f.nextProjection = index + 1
 			}
 		}
-		rebuildingCached := record.Sequence <= f.cachedSequence
-		if !rebuildingCached {
-			f.healthMu.Lock()
-			if record.ProjectionResult == ProjectionConsumedNoOutput {
-				f.health.ProjectionRejectionActive = true
-				if f.health.LastProjectionRejectionSequence != record.Sequence {
-					f.health.ProjectionRejectionCount++
-					f.health.LastProjectionRejectionSequence = record.Sequence
-					f.health.LastProjectionRejectionCode = record.ProjectionCode
-					f.health.LastProjectionRejectionReason = record.ProjectionReason
-				}
-			} else {
-				f.health.ProjectionRejectionActive = false
-			}
-			f.healthMu.Unlock()
-		}
-		if record.Sequence > f.cachedSequence {
-			if err := f.writeCursor(record.Sequence); err != nil {
+		f.healthMu.Lock()
+		next := cursorFromHealth(f.sessionID, record.Sequence, f.health)
+		applyCursorResult(&next, record)
+		f.healthMu.Unlock()
+		if record.ProjectionResult == ProjectionConsumedNoOutput || next.ProjectionRejectionActive != f.currentRejectionActive() {
+			if err := f.emitRejectionTransition(ctx, next); err != nil {
 				return err
 			}
-			f.cachedSequence = record.Sequence
 		}
+		f.restoreRejectionSummary(next)
+		if err := f.writeCursor(record.Sequence); err != nil {
+			return err
+		}
+		f.cachedSequence = record.Sequence
 		f.healthMu.Lock()
 		f.health.ProjectedSequence = record.Sequence
 		f.pendingSequence = 0
@@ -217,6 +253,94 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 	if err != nil {
 		return f.fail(err)
 	}
+	return f.completeStartupBarrier(ctx)
+}
+
+func cursorFromHealth(sessionID string, sequence uint64, h LiveProjectionHealth) liveCursor {
+	return liveCursor{SchemaVersion: 2, SessionID: sessionID, Sequence: sequence, ProjectionRejectionActive: h.ProjectionRejectionActive, ProjectionRejectionCount: h.ProjectionRejectionCount, LastProjectionRejectionSequence: h.LastProjectionRejectionSequence, LastProjectionRejectionCode: h.LastProjectionRejectionCode, LastProjectionRejectionReason: h.LastProjectionRejectionReason}
+}
+func applyCursorResult(c *liveCursor, record *Record) {
+	c.Sequence = record.Sequence
+	if record.ProjectionResult == ProjectionConsumedNoOutput {
+		c.ProjectionRejectionActive = true
+		if c.LastProjectionRejectionSequence != record.Sequence {
+			c.ProjectionRejectionCount++
+			c.LastProjectionRejectionSequence = record.Sequence
+			c.LastProjectionRejectionCode = record.ProjectionCode
+			c.LastProjectionRejectionReason = record.ProjectionReason
+		}
+	} else {
+		c.ProjectionRejectionActive = false
+	}
+}
+func (f *LiveFollower) summarizeThrough(sequence uint64) (liveCursor, error) {
+	summary := liveCursor{SchemaVersion: 2, SessionID: f.sessionID}
+	if sequence == 0 {
+		return summary, nil
+	}
+	err := f.forEachRange(1, sequence, func(record *Record) error { applyCursorResult(&summary, record); return nil })
+	return summary, err
+}
+func cursorSummariesEqual(a, b liveCursor) bool { return a == b }
+func (f *LiveFollower) restoreCursor(c liveCursor) {
+	f.cachedSequence = c.Sequence
+	f.healthMu.Lock()
+	f.health.ProjectedSequence = c.Sequence
+	f.health.ProjectionRejectionActive = c.ProjectionRejectionActive
+	f.health.ProjectionRejectionCount = c.ProjectionRejectionCount
+	f.health.LastProjectionRejectionSequence = c.LastProjectionRejectionSequence
+	f.health.LastProjectionRejectionCode = c.LastProjectionRejectionCode
+	f.health.LastProjectionRejectionReason = c.LastProjectionRejectionReason
+	f.updateLagLocked()
+	f.healthMu.Unlock()
+}
+func (f *LiveFollower) restoreRejectionSummary(c liveCursor) {
+	f.healthMu.Lock()
+	f.health.ProjectionRejectionActive = c.ProjectionRejectionActive
+	f.health.ProjectionRejectionCount = c.ProjectionRejectionCount
+	f.health.LastProjectionRejectionSequence = c.LastProjectionRejectionSequence
+	f.health.LastProjectionRejectionCode = c.LastProjectionRejectionCode
+	f.health.LastProjectionRejectionReason = c.LastProjectionRejectionReason
+	f.healthMu.Unlock()
+}
+func (f *LiveFollower) resetProjectionState() {
+	f.cachedSequence = 0
+	f.healthMu.Lock()
+	f.health.ProjectedSequence = 0
+	f.health.ProjectionRejectionActive = false
+	f.health.ProjectionRejectionCount = 0
+	f.health.LastProjectionRejectionSequence = 0
+	f.health.LastProjectionRejectionCode = ""
+	f.health.LastProjectionRejectionReason = ""
+	f.healthMu.Unlock()
+}
+func (f *LiveFollower) currentRejectionActive() bool {
+	f.healthMu.Lock()
+	defer f.healthMu.Unlock()
+	return f.health.ProjectionRejectionActive
+}
+func (f *LiveFollower) emitRejectionTransition(ctx context.Context, c liveCursor) error {
+	if f.rejectionSink == nil {
+		return nil
+	}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	err := f.rejectionSink.ProjectionHealth(bounded, RejectionTransition{Active: c.ProjectionRejectionActive, Sequence: c.LastProjectionRejectionSequence, Count: c.ProjectionRejectionCount, Code: c.LastProjectionRejectionCode, Reason: c.LastProjectionRejectionReason})
+	if err != nil {
+		return fmt.Errorf("projection health transition: %w", err)
+	}
+	return nil
+}
+func (f *LiveFollower) completeStartupBarrier(ctx context.Context) error {
+	if !f.restoring {
+		return nil
+	}
+	if f.startupBarrier != nil {
+		if err := f.startupBarrier.CompleteRestore(ctx); err != nil {
+			return fmt.Errorf("complete startup barrier: %w", err)
+		}
+	}
+	f.restoring = false
 	return nil
 }
 func (f *LiveFollower) Run(ctx context.Context, updates <-chan HighWaterMark) error {
@@ -503,7 +627,7 @@ func (f *LiveFollower) writeCursor(sequence uint64) error {
 		return err
 	}
 	f.healthMu.Lock()
-	cursor := liveCursor{SchemaVersion: 2, SessionID: f.sessionID, Sequence: sequence, ProjectionRejectionActive: f.health.ProjectionRejectionActive, ProjectionRejectionCount: f.health.ProjectionRejectionCount, LastProjectionRejectionSequence: f.health.LastProjectionRejectionSequence, LastProjectionRejectionCode: f.health.LastProjectionRejectionCode, LastProjectionRejectionReason: f.health.LastProjectionRejectionReason}
+	cursor := cursorFromHealth(f.sessionID, sequence, f.health)
 	f.healthMu.Unlock()
 	data, err := json.Marshal(cursor)
 	if err == nil {

@@ -67,8 +67,7 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 		}
 		return first, ProjectionConsumedNoOutput, "gsi_projection_non_object", "top_level_non_object", nil
 	}
-	known := map[string]bool{"provider": true, "league": true, "map": true, "player": true, "hero": true, "items": true, "abilities": true, "buildings": true}
-	sections := map[string]json.RawMessage{}
+	root := map[string]any{}
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
@@ -78,15 +77,28 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 		if !ok {
 			return nil, "", "", "", fmt.Errorf("%w: invalid object key", ErrInvalidJSON)
 		}
-		if known[key] {
-			var value json.RawMessage
-			if err := dec.Decode(&value); err != nil {
-				return nil, "", "", "", fmt.Errorf("%w: malformed member", ErrInvalidJSON)
+		var value any
+		switch key {
+		case "provider", "league", "map":
+			value, err = projectFields(dec, simpleFields[key])
+		case "player", "hero":
+			value, err = projectNested(dec, 2, participantFields[key], 11)
+		case "items":
+			value, err = projectNested(dec, 3, itemFields, 33)
+		case "abilities":
+			value, err = projectNested(dec, 3, abilityFields, 33)
+		case "buildings":
+			value, err = projectNested(dec, 2, buildingFields, 65)
+		default:
+			err = skipValue(dec)
+			if err == nil {
+				continue
 			}
-			sections[key] = value
-		} else if err := skipValue(dec); err != nil {
+		}
+		if err != nil {
 			return nil, "", "", "", fmt.Errorf("%w: malformed member", ErrInvalidJSON)
 		}
+		root[key] = value // final duplicate key wins at every recognized section.
 	}
 	if closeToken, err := dec.Token(); err != nil || closeToken != json.Delim('}') {
 		return nil, "", "", "", fmt.Errorf("%w: malformed object", ErrInvalidJSON)
@@ -94,16 +106,139 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, "", "", "", fmt.Errorf("%w: trailing data", ErrInvalidJSON)
 	}
-	root := map[string]any{}
-	for key, value := range sections {
-		decoded, err := decodeJSON(value)
-		if err != nil {
-			return nil, "", "", "", err
-		}
-		root[key] = decoded
-	}
 	payload, result, code, reason := boundedGSIProjection(root)
 	return payload, result, code, reason, nil
+}
+
+// projectFields retains only recognized scalar leaves. Composite values at a
+// recognized scalar path are consumed but represented as nil, matching the
+// accepted projection. Unknown descendants are token-skipped in constant
+// nesting memory and are never decoded into RawMessage or an interface tree.
+func projectFields(dec *json.Decoder, fields map[string]bool) (any, error) {
+	open, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if open != json.Delim('{') {
+		if delim, ok := open.(json.Delim); ok {
+			if err := skipDelimited(dec, delim); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}
+	out := map[string]any{}
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, errors.New("invalid object key")
+		}
+		if !fields[key] {
+			if err := skipValue(dec); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		value, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		if delim, ok := value.(json.Delim); ok {
+			if err := skipDelimited(dec, delim); err != nil {
+				return nil, err
+			}
+			value = nil
+		}
+		out[key] = value
+	}
+	closeToken, err := dec.Token()
+	if err != nil || closeToken != json.Delim('}') {
+		return nil, errors.New("malformed object")
+	}
+	return out, nil
+}
+
+// projectNested walks one of the fixed GSI section shapes. It bounds every
+// retained object before descending; maxLeaf+1 is retained so the existing
+// fixed rejection precedence can classify an overflow exactly.
+func projectNested(dec *json.Decoder, depth int, fields map[string]bool, maxLeaf int) (any, error) {
+	open, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if open != json.Delim('{') {
+		if delim, ok := open.(json.Delim); ok {
+			if err := skipDelimited(dec, delim); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}
+	out := map[string]any{}
+	limit := 11
+	if depth == 1 {
+		limit = maxLeaf
+	}
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, errors.New("invalid object key")
+		}
+		if _, exists := out[key]; !exists && len(out) >= limit {
+			if err := skipValue(dec); err != nil {
+				return nil, err
+			}
+			// A bounded sentinel preserves the fact that the final object is over
+			// domain without retaining the skipped subtree's shape.
+			out["\x00overflow"] = projectionOverflowSentinel(depth, maxLeaf)
+			continue
+		}
+		var value any
+		if depth == 1 {
+			value, err = projectFields(dec, fields)
+		} else {
+			value, err = projectNested(dec, depth-1, fields, maxLeaf)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if value != nil || depth == 1 {
+			out[key] = value
+		}
+	}
+	closeToken, err := dec.Token()
+	if err != nil || closeToken != json.Delim('}') {
+		return nil, errors.New("malformed object")
+	}
+	return out, nil
+}
+
+func projectionOverflowSentinel(depth, maxLeaf int) any {
+	if depth == 1 {
+		return nil
+	}
+	count := 11
+	if maxLeaf == 65 {
+		count = 65
+	}
+	out := make(map[string]any, count)
+	for i := 0; i < count; i++ {
+		key := fmt.Sprintf("\x00overflow-%d", i)
+		if depth == 2 {
+			out[key] = nil
+		} else {
+			out[key] = map[string]any{}
+		}
+	}
+	return out
 }
 
 func skipValue(dec *json.Decoder) error {

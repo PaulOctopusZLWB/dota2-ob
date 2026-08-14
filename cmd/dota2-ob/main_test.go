@@ -327,11 +327,11 @@ func TestDeliveryServeFailureLeavesCapturePersistingGSI(t *testing.T) {
 	rebuilt := &retryingProjection{}
 	restarted := gsi.NewServer(reopened, gsi.WithLiveProjections(rebuilt))
 	deadline = time.Now().Add(time.Second)
-	for rebuilt.count() != 2 && time.Now().Before(deadline) {
+	for rebuilt.count() != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if rebuilt.count() != 2 {
-		t.Fatalf("restart reconstruction count=%d want=2", rebuilt.count())
+	if rebuilt.count() != 1 {
+		t.Fatalf("valid cursor must resume strictly after cached prefix: count=%d want=1", rebuilt.count())
 	}
 	restarted.Wait()
 	if err := reopened.Close(); err != nil {

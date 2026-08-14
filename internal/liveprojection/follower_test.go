@@ -54,6 +54,53 @@ func (p *recoverableProjection) successful() []uint64 {
 
 type blockingProjection struct{ entered, release chan struct{} }
 
+type controlSink struct {
+	mu        sync.Mutex
+	restoring bool
+	events    []string
+}
+
+func (s *controlSink) BeginRestore(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restoring = true
+	s.events = append(s.events, "begin")
+	return nil
+}
+func (s *controlSink) CompleteRestore(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, "complete")
+	s.restoring = false
+	return nil
+}
+func (s *controlSink) ProjectionHealth(_ context.Context, transition liveprojection.RejectionTransition) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if transition.Active {
+		s.events = append(s.events, "hide")
+	} else {
+		s.events = append(s.events, "clear")
+	}
+	return nil
+}
+
+type controlAwareProjection struct {
+	sink                   *controlSink
+	sequences              []uint64
+	calledWhileRestoreOpen bool
+}
+
+func (p *controlAwareProjection) Apply(_ context.Context, record *session.Record) error {
+	p.sink.mu.Lock()
+	defer p.sink.mu.Unlock()
+	p.sequences = append(p.sequences, record.Sequence)
+	if p.sink.restoring {
+		p.calledWhileRestoreOpen = true
+	}
+	return nil
+}
+
 func (p blockingProjection) Apply(ctx context.Context, _ *session.Record) error {
 	close(p.entered)
 	select {
@@ -547,16 +594,82 @@ func TestFollowerReconstructsThroughValidCursorWithoutReplacingIt(t *testing.T) 
 	}
 	projection := &recordingProjection{}
 	ops := &cursorFaultIO{fault: "create", target: cursorPath}
-	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithCursorIO(ops))
+	sink := &controlSink{}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithCursorIO(ops), liveprojection.WithStartupBarrier(sink))
 	if err := follower.CatchUp(context.Background(), 2); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2}) {
+	if len(projection.sequences) != 0 {
 		t.Fatalf("reconstruction=%v", projection.sequences)
 	}
 	data, err := os.ReadFile(cursorPath)
 	if err != nil || !reflect.DeepEqual(data, old) {
 		t.Fatalf("cursor data=%q err=%v", data, err)
+	}
+	sink.mu.Lock()
+	events := append([]string(nil), sink.events...)
+	sink.mu.Unlock()
+	if !reflect.DeepEqual(events, []string{"begin", "complete"}) {
+		t.Fatalf("startup publication events=%v", events)
+	}
+}
+
+func TestFollowerRejectsRawInconsistentCursorBehindPublicationBarrier(t *testing.T) {
+	root := t.TempDir()
+	store := appendRecords(t, root, "false-cache", 2)
+	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+	falseSummary := `{"schema_version":2,"session_id":"false-cache","sequence":1,"projection_rejection_active":true,"projection_rejection_count":1,"last_projection_rejection_sequence":1,"last_projection_rejection_code":"gsi_projection_non_object","last_projection_rejection_reason":"top_level_non_object"}`
+	if err := os.WriteFile(cursorPath, []byte(falseSummary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink := &controlSink{}
+	projection := &controlAwareProjection{sink: sink}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithStartupBarrier(sink), liveprojection.WithRejectionHealthSink(sink))
+	if err := follower.CatchUp(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2}) || !projection.calledWhileRestoreOpen {
+		t.Fatalf("rebuild=%v behind_barrier=%v", projection.sequences, projection.calledWhileRestoreOpen)
+	}
+	if h := follower.Health(); h.ProjectionRejectionCount != 0 || h.ProjectionRejectionActive {
+		t.Fatalf("false summary survived: %#v", h)
+	}
+}
+
+func TestFollowerValidCacheResumesAfterPrefixAndTransitionsHealth(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("valid-resume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{`null`, `{"map":{"game_time":2}}`} {
+		if _, err := store.Append([]byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+	valid := `{"schema_version":2,"session_id":"valid-resume","sequence":1,"projection_rejection_active":true,"projection_rejection_count":1,"last_projection_rejection_sequence":1,"last_projection_rejection_code":"gsi_projection_non_object","last_projection_rejection_reason":"top_level_non_object"}`
+	if err := os.WriteFile(cursorPath, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sink := &controlSink{}
+	projection := &controlAwareProjection{sink: sink}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithStartupBarrier(sink), liveprojection.WithRejectionHealthSink(sink))
+	started := time.Now()
+	if err := follower.CatchUp(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("health transition exceeded two seconds")
+	}
+	if !reflect.DeepEqual(projection.sequences, []uint64{2}) || projection.calledWhileRestoreOpen {
+		t.Fatalf("sequences=%v before_barrier=%v", projection.sequences, projection.calledWhileRestoreOpen)
+	}
+	sink.mu.Lock()
+	events := append([]string(nil), sink.events...)
+	sink.mu.Unlock()
+	if !reflect.DeepEqual(events, []string{"begin", "hide", "complete", "clear"}) {
+		t.Fatalf("events=%v", events)
 	}
 }
 

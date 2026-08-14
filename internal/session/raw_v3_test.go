@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture/v3fixture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
@@ -36,6 +37,81 @@ func TestStoreAppendWritesExactRawRecordV3Evidence(t *testing.T) {
 	want := `{"schema_version":3,"session_id":"v3.session-1","sequence":1,"received_at":"2026-08-13T16:20:26.1234Z","source":"gsi","raw_encoding":"base64_std","raw_byte_length":33,"raw_base64":"` + base64.StdEncoding.EncodeToString(raw) + `","raw_payload_sha256":"` + hex.EncodeToString(wantHash[:]) + `"}` + "\n"
 	if string(line) != want {
 		t.Fatalf("V3 line mismatch\nwant=%s\n got=%s", want, line)
+	}
+}
+
+func TestStoreRawAdmissionAtTenMiBBoundary(t *testing.T) {
+	for _, size := range []int{v3fixture.RawLimit - 1, v3fixture.RawLimit} {
+		body := sizedUnknownObject(size)
+		store, err := session.NewStore(t.TempDir(), session.WithSessionID(fmt.Sprintf("size-%d", size)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(body); err != nil {
+			t.Fatalf("size %d: %v", size, err)
+		}
+	}
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("plus-one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(sizedUnknownObject(v3fixture.RawLimit + 1)); err == nil {
+		t.Fatal("accepted 10 MiB plus one")
+	}
+}
+
+func sizedUnknownObject(size int) []byte {
+	prefix, suffix := []byte(`{"unknown":"`), []byte(`"}`)
+	body := append([]byte(nil), prefix...)
+	body = append(body, strings.Repeat("x", size-len(prefix)-len(suffix))...)
+	return append(body, suffix...)
+}
+
+func TestGSIProjectionAcceptedLexicalAndUnicodeMatrix(t *testing.T) {
+	cases := []struct{ name, raw, want string }{
+		{"escapes", `{"provider":{"name":"\"\\\/\b\f\n\r\t"}}`, "\"\\/\b\f\n\r\t"},
+		{"escaped-separators", `{"provider":{"name":"\u2028\u2029"}}`, "\u2028\u2029"},
+		{"literal-separators", "{\"provider\":{\"name\":\"\u2028\u2029\"}}", "\u2028\u2029"},
+		{"surrogate-pair", `{"provider":{"name":"\ud83d\ude00"}}`, "😀"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := session.NewStore(t.TempDir(), session.WithSessionID("lexical"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Append([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := record.Payload.(map[string]any)["provider"].(map[string]any)["name"]; got != tc.want {
+				t.Fatalf("got=%q want=%q", got, tc.want)
+			}
+		})
+	}
+	for _, raw := range []string{`{"provider":{"timestamp":0}}`, `{"provider":{"timestamp":-0}}`, `{"provider":{"timestamp":1e+09}}`, `{"provider":{"timestamp":1.25E-2}}`} {
+		store, _ := session.NewStore(t.TempDir(), session.WithSessionID("number"))
+		if _, err := store.Append([]byte(raw)); err != nil {
+			t.Fatalf("accepted number %s: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{`{"provider":{"timestamp":01}}`, `{"provider":{"name":"\x"}}`, `{} {}`, "{}\x00"} {
+		store, _ := session.NewStore(t.TempDir(), session.WithSessionID("invalid"))
+		if _, err := store.Append([]byte(raw)); err == nil {
+			t.Fatalf("accepted invalid lexical form %q", raw)
+		}
+	}
+}
+
+func TestV3CanonicalAndNoncanonicalFramingMatrix(t *testing.T) {
+	valid := rawV3Frame("frame", 1, "2026-08-14T00:20:26Z", []byte(`{}`))
+	if _, err := session.DecodeRecordV3([]byte(valid), "frame", 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, frame := range []string{" " + valid, valid + " ", strings.Replace(valid, `,"session_id"`, `, "session_id"`, 1), strings.Replace(valid, `"schema_version":3`, `"schema_version":3.0`, 1), strings.Replace(valid, `"source":"gsi"`, `"source":"gsi" `, 1)} {
+		if _, err := session.DecodeRecordV3([]byte(frame), "frame", 1); err == nil {
+			t.Fatalf("accepted noncanonical frame %q", frame[:min(len(frame), 80)])
+		}
 	}
 }
 
