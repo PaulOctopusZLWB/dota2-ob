@@ -18,33 +18,30 @@ import (
 )
 
 var (
-	commitMarkerV2  = [markerBytes]byte{'P', 'C', 'O', 'M', 'M', 'I', 'T', 2}
-	ErrMixedLineage = errors.New("policy_log_mixed_lineage_hidden")
-	ErrLineage      = errors.New("policy_lineage_invalid_hidden")
-	ErrCommandLimit = errors.New("session_command_limit")
+	commitMarkerV3 = [markerBytes]byte{'P', 'C', 'O', 'M', 'M', 'I', 'T', 3}
 )
 
-type V2Option func(*StoreV2)
+type V3Option func(*StoreV3)
 
-func WithV2Hooks(h Hooks) V2Option { return func(s *StoreV2) { s.hooks = mergeHooks(h) } }
+func WithV3Hooks(h Hooks) V3Option { return func(s *StoreV3) { s.hooks = mergeHooks(h) } }
 
-// WithV2ReplayVerifier is mandatory for OpenV2. It is an application-owned
+// WithV3ReplayVerifier is mandatory for OpenV3. It is an application-owned
 // composition boundary that binds recovered frames to immutable source inputs
 // and byte-equivalent pure semantic replay before the store becomes writable.
-func WithV2ReplayVerifier(verifier ReplayVerifierV2) V2Option {
-	return func(s *StoreV2) { s.verifier = &verifier }
+func WithV3ReplayVerifier(verifier ReplayVerifierV3) V3Option {
+	return func(s *StoreV3) { s.verifier = &verifier }
 }
 
-func WithV2SegmentLimit(n int64) V2Option {
-	return func(s *StoreV2) {
+func WithV3SegmentLimit(n int64) V3Option {
+	return func(s *StoreV3) {
 		if n > 0 {
 			s.segmentLimit = n
 		}
 	}
 }
 
-func WithV2SessionLimits(bytes int64, segments int) V2Option {
-	return func(s *StoreV2) {
+func WithV3SessionLimits(bytes int64, segments int) V3Option {
+	return func(s *StoreV3) {
 		if bytes > 0 {
 			s.maxSessionBytes = bytes
 		}
@@ -54,14 +51,14 @@ func WithV2SessionLimits(bytes int64, segments int) V2Option {
 	}
 }
 
-type CommittedV2 struct {
-	Commit  contracts.PolicyCommitV2
+type CommittedV3 struct {
+	Commit  contracts.PolicyCommitV3
 	Payload []byte
 	Hash    string
-	Locator contracts.PolicyCommandLocatorV2
+	Locator contracts.PolicyCommandLocatorV3
 }
 
-type StateV2 struct {
+type StateV3 struct {
 	SessionID               string
 	LineageManifestID       string
 	CommitSequence          uint64
@@ -70,17 +67,18 @@ type StateV2 struct {
 	LastObservationSequence uint64
 	LastPolicyTimeMS        int64
 	CommandResults          map[string]string
-	CommandLocators         map[string]contracts.PolicyCommandLocatorV2
+	CommandLocators         map[string]contracts.PolicyCommandLocatorV3
 	// Commits is retained for source compatibility and is always empty.
 	// Recovery verifies frames as a stream instead of retaining payloads.
-	Commits []CommittedV2
+	Commits []CommittedV3
 }
 
-type StoreV2 struct {
+type StoreV3 struct {
 	mu                 sync.Mutex
 	dir                string
 	sessionID          string
 	manifestID         string
+	bindingID          string
 	hooks              Hooks
 	segmentLimit       int64
 	maxSessionBytes    int64
@@ -89,83 +87,138 @@ type StoreV2 struct {
 	fileSize           int64
 	totalBytes         int64
 	segmentCount       int
-	state              StateV2
-	verifier           *ReplayVerifierV2
+	state              StateV3
+	verifier           *ReplayVerifierV3
 	sealed             bool
 	closed             bool
 }
 
-// OpenV2 seals or verifies the immutable lineage manifest before opening any
-// production V2 policy frames. A directory containing V1 frames is rejected.
-func OpenV2(root, sessionID string, manifest contracts.PolicyLineageManifestV2, opts ...V2Option) (*StoreV2, StateV2, error) {
+// OpenV3 seals or verifies the immutable lineage manifest before opening any
+// production V3 policy frames. A directory containing V1 frames is rejected.
+func OpenV3(root, sessionID string, binding contracts.HistoryAvailabilityBindingV1, manifest contracts.PolicyLineageManifestV3, opts ...V3Option) (*StoreV3, StateV3, error) {
 	if strings.TrimSpace(root) == "" || !safeID(sessionID) || manifest.SessionID != sessionID {
-		return nil, StateV2{}, fmt.Errorf("%w: root/session mismatch", ErrLineage)
+		return nil, StateV3{}, fmt.Errorf("%w: root/session mismatch", ErrLineage)
 	}
 	manifestID, err := manifest.ContentID()
 	if err != nil {
-		return nil, StateV2{}, fmt.Errorf("%w: %v", ErrLineage, err)
+		return nil, StateV3{}, fmt.Errorf("%w: %v", ErrLineage, err)
+	}
+	bindingID, err := binding.ContentID()
+	if err != nil || binding.Mode != contracts.HistoryModeNoGo || manifest.HistoryAvailabilityBindingID != bindingID || manifest.HistoryAvailabilityBindingSHA256 != bindingID {
+		return nil, StateV3{}, fmt.Errorf("%w: history binding mismatch", ErrLineage)
 	}
 	dir := filepath.Join(root, sessionID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, StateV2{}, fmt.Errorf("create policy log: %w", err)
+		return nil, StateV3{}, fmt.Errorf("create policy log: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, StateV2{}, fmt.Errorf("protect policy log: %w", err)
+		return nil, StateV3{}, fmt.Errorf("protect policy log: %w", err)
 	}
-	s := &StoreV2{
-		dir: dir, sessionID: sessionID, manifestID: manifestID, hooks: defaultHooks(),
+	s := &StoreV3{
+		dir: dir, sessionID: sessionID, manifestID: manifestID, bindingID: bindingID, hooks: defaultHooks(),
 		segmentLimit: MaxSegmentBytes, maxSessionBytes: MaxSessionBytes, maxSessionSegments: MaxSessionSegments,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	if s.verifier == nil || s.verifier.VerifyObservation == nil || s.verifier.VerifyCommand == nil || s.verifier.Reevaluate == nil {
-		return nil, StateV2{}, errors.New("v2 recovery verifier and re-evaluator required")
+		return nil, StateV3{}, errors.New("v2 recovery verifier and re-evaluator required")
 	}
-	if err := s.rejectV1Frames(); err != nil {
-		return nil, StateV2{}, err
+	if err := s.rejectMixedFrames(); err != nil {
+		return nil, StateV3{}, err
+	}
+	if err := s.sealArtifact("history-binding.v1.json", binding); err != nil {
+		return nil, StateV3{}, err
 	}
 	if err := s.sealManifest(manifest); err != nil {
-		return nil, StateV2{}, err
+		return nil, StateV3{}, err
 	}
 	state, err := s.recover()
 	if err != nil {
-		return nil, StateV2{}, err
+		return nil, StateV3{}, err
 	}
 	// A prior process may have renamed a segment and then lost the directory
 	// sync result. Re-syncing the parent after structural and semantic recovery
 	// proves every recovered segment entry durable before one is reopened.
 	if s.segmentCount > 0 {
 		if err := s.hooks.SyncDir(s.dir); err != nil {
-			return nil, StateV2{}, fmt.Errorf("%w: recovered segment directory sync: %v", ErrSealed, err)
+			return nil, StateV3{}, fmt.Errorf("%w: recovered segment directory sync: %v", ErrSealed, err)
 		}
 	}
 	s.state = state
 	if err := s.reopenLastSegment(); err != nil {
-		return nil, StateV2{}, err
+		return nil, StateV3{}, err
 	}
-	return s, cloneStateV2(state), nil
+	return s, cloneStateV3(state), nil
 }
 
-func (s *StoreV2) rejectV1Frames() error {
+func (s *StoreV3) rejectMixedFrames() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".pcl") || strings.HasSuffix(entry.Name(), ".pcl3")) {
+		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".pcl") || strings.HasSuffix(entry.Name(), ".pcl2")) {
 			return ErrMixedLineage
 		}
 	}
 	return nil
 }
 
-func (s *StoreV2) sealManifest(manifest contracts.PolicyLineageManifestV2) error {
+func (s *StoreV3) sealArtifact(name string, value any) error {
+	payload, err := contracts.MarshalCanonical(value)
+	if err != nil {
+		return fmt.Errorf("%w: canonical artifact", ErrLineage)
+	}
+	final := filepath.Join(s.dir, name)
+	if existing, readErr := os.ReadFile(final); readErr == nil {
+		if !bytes.Equal(existing, payload) {
+			return fmt.Errorf("%w: artifact substitution", ErrLineage)
+		}
+		return nil
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("%w: read artifact: %v", ErrLineage, readErr)
+	}
+	tmpPath := filepath.Join(s.dir, "."+name+".tmp")
+	tmp, err := s.hooks.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("%w: create artifact: %v", ErrLineage, err)
+	}
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if n, writeErr := s.hooks.Write(tmp, payload); writeErr != nil || n != len(payload) {
+		return fmt.Errorf("%w: write artifact", ErrLineage)
+	}
+	if err := s.hooks.SyncFile(tmp); err != nil {
+		return fmt.Errorf("%w: sync artifact: %v", ErrLineage, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("%w: close artifact: %v", ErrLineage, err)
+	}
+	if err := s.hooks.Rename(tmpPath, final); err != nil {
+		return fmt.Errorf("%w: rename artifact: %v", ErrLineage, err)
+	}
+	keep = true
+	if err := os.Chmod(final, 0o600); err != nil {
+		return fmt.Errorf("%w: protect artifact: %v", ErrLineage, err)
+	}
+	if err := s.hooks.SyncDir(s.dir); err != nil {
+		return fmt.Errorf("%w: sync artifact directory: %v", ErrLineage, err)
+	}
+	return nil
+}
+
+func (s *StoreV3) sealManifest(manifest contracts.PolicyLineageManifestV3) error {
 	payload, err := contracts.MarshalCanonical(manifest)
 	if err != nil {
 		return fmt.Errorf("%w: canonical manifest", ErrLineage)
 	}
-	final := filepath.Join(s.dir, "lineage.v2.json")
+	final := filepath.Join(s.dir, "lineage.v3.json")
 	existing, err := os.ReadFile(final)
 	if err == nil {
 		if !bytes.Equal(existing, payload) {
@@ -181,11 +234,11 @@ func (s *StoreV2) sealManifest(manifest contracts.PolicyLineageManifestV2) error
 		return fmt.Errorf("%w: inspect lineage: %v", ErrLineage, readErr)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl3") {
 			return fmt.Errorf("%w: manifest missing for existing frames", ErrLineage)
 		}
 	}
-	tmpPath := filepath.Join(s.dir, ".lineage.v2.json.tmp")
+	tmpPath := filepath.Join(s.dir, ".lineage.v3.json.tmp")
 	tmp, err := s.hooks.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("%w: create manifest: %v", ErrLineage, err)
@@ -219,93 +272,93 @@ func (s *StoreV2) sealManifest(manifest contracts.PolicyLineageManifestV2) error
 	return nil
 }
 
-func (s *StoreV2) Append(commit contracts.PolicyCommitV2) (CommittedV2, error) {
+func (s *StoreV3) Append(commit contracts.PolicyCommitV3) (CommittedV3, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sealed || s.closed {
-		return CommittedV2{}, ErrSealed
+		return CommittedV3{}, ErrSealed
 	}
 	if err := commit.Validate(); err != nil || commit.SessionID != s.sessionID || commit.LineageManifestID != s.manifestID || commit.LineageManifestSHA256 != s.manifestID {
-		return CommittedV2{}, fmt.Errorf("%w: v2 contract or lineage mismatch", ErrInvalidCommit)
+		return CommittedV3{}, fmt.Errorf("%w: v2 contract or lineage mismatch", ErrInvalidCommit)
 	}
 	if commit.CommandID != "" {
 		if locator, ok := s.state.CommandLocators[commit.CommandID]; ok {
 			stored, err := s.readLocator(locator, s.state.CommandResults[commit.CommandID])
 			if err != nil {
 				s.sealed = true
-				return CommittedV2{}, err
+				return CommittedV3{}, err
 			}
 			return stored, nil
 		}
 		if len(s.state.CommandResults) >= contracts.MaxCheckpointCommandResults {
-			return CommittedV2{}, ErrCommandLimit
+			return CommittedV3{}, ErrCommandLimit
 		}
 	}
-	if err := validateNextV2(s.state, commit); err != nil {
-		return CommittedV2{}, err
+	if err := validateNextV3(s.state, commit); err != nil {
+		return CommittedV3{}, err
 	}
 	payload, err := contracts.MarshalCanonical(commit)
 	if err != nil || len(payload) > contracts.MaxPolicyCommitBytes {
-		return CommittedV2{}, fmt.Errorf("%w: canonical payload", ErrInvalidCommit)
+		return CommittedV3{}, fmt.Errorf("%w: canonical payload", ErrInvalidCommit)
 	}
-	frame, sum := encodeFrameV2(payload)
+	frame, sum := encodeFrameV3(payload)
 	if err := s.ensureSegment(commit.CommitSequence, int64(len(frame))); err != nil {
 		s.sealed = true
-		return CommittedV2{}, fmt.Errorf("%w: segment: %w", ErrSealed, err)
+		return CommittedV3{}, fmt.Errorf("%w: segment: %w", ErrSealed, err)
 	}
 	prior := s.fileSize
 	if err := s.hooks.Interrupt("before_append"); err != nil {
-		return CommittedV2{}, s.rollback(prior, err)
+		return CommittedV3{}, s.rollback(prior, err)
 	}
 	n, writeErr := s.hooks.Write(s.file, frame)
 	if writeErr != nil || n != len(frame) {
 		if writeErr == nil {
 			writeErr = io.ErrShortWrite
 		}
-		return CommittedV2{}, s.rollback(prior, writeErr)
+		return CommittedV3{}, s.rollback(prior, writeErr)
 	}
 	if err := s.hooks.Interrupt("before_sync"); err != nil {
-		return CommittedV2{}, s.rollback(prior, err)
+		return CommittedV3{}, s.rollback(prior, err)
 	}
 	if err := s.hooks.SyncFile(s.file); err != nil {
-		return CommittedV2{}, s.rollback(prior, err)
+		return CommittedV3{}, s.rollback(prior, err)
 	}
 	s.fileSize += int64(len(frame))
 	s.totalBytes += int64(len(frame))
-	var stored contracts.PolicyCommitV2
+	var stored contracts.PolicyCommitV3
 	if err := contracts.DecodeStrict(payload, &stored); err != nil {
 		s.sealed = true
-		return CommittedV2{}, fmt.Errorf("%w: internal canonical decode", ErrSealed)
+		return CommittedV3{}, fmt.Errorf("%w: internal canonical decode", ErrSealed)
 	}
 	hash := hex.EncodeToString(sum[:])
-	locator := contracts.PolicyCommandLocatorV2{}
+	locator := contracts.PolicyCommandLocatorV3{}
 	if stored.CommandID != "" {
-		locator = contracts.PolicyCommandLocatorV2{
+		locator = contracts.PolicyCommandLocatorV3{
 			CommandID: stored.CommandID, SegmentID: filepath.Base(s.file.Name()), FrameOffset: prior,
 			CommitSequence: stored.CommitSequence, FrameSHA256: hash,
 		}
 	}
-	committed := CommittedV2{Commit: stored, Payload: append([]byte(nil), payload...), Hash: hash, Locator: locator}
-	applyV2(&s.state, committed)
-	return cloneCommittedV2(committed), nil
+	committed := CommittedV3{Commit: stored, Payload: append([]byte(nil), payload...), Hash: hash, Locator: locator}
+	applyV3(&s.state, committed)
+	return cloneCommittedV3(committed), nil
 }
 
-// AppendPolicyCommit adapts StoreV2 to policy.CommitAppender while preserving
+// AppendPolicyCommit adapts StoreV3 to policy.CommitAppender while preserving
 // Append's synchronous frame-and-sync durability boundary.
-func (s *StoreV2) AppendPolicyCommit(commit contracts.PolicyCommitV2) error {
+func (s *StoreV3) AppendPolicyCommit(commit contracts.PolicyCommitV3) error {
 	_, err := s.Append(commit)
 	return err
 }
 
 // LookupCommand resolves an admitted duplicate directly from its cache-only
 // locator and revalidates the complete frame against the semantic result hash.
-func (s *StoreV2) LookupCommand(commandID string) (contracts.OperatorCommandResultV1, bool, error) {
+func (s *StoreV3) LookupCommand(commandID string) (contracts.OperatorCommandResultV1, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sealed || s.closed {
 		return contracts.OperatorCommandResultV1{}, false, ErrSealed
 	}
-	if !contracts.ValidPolicyIdentifierV2(commandID) {
+	if !contracts.ValidPolicyIdentifierV3(commandID) {
 		return contracts.OperatorCommandResultV1{}, false, ErrInvalidCommit
 	}
 	resultHash, ok := s.state.CommandResults[commandID]
@@ -334,27 +387,27 @@ func (s *StoreV2) LookupCommand(commandID string) (contracts.OperatorCommandResu
 
 // LookupPolicyCommand resolves the complete original canonical command commit
 // for application-level idempotency after restart.
-func (s *StoreV2) LookupPolicyCommand(commandID string) (contracts.PolicyCommitV2, bool, error) {
+func (s *StoreV3) LookupPolicyCommand(commandID string) (contracts.PolicyCommitV3, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	resultHash, ok := s.state.CommandResults[commandID]
 	if !ok {
-		return contracts.PolicyCommitV2{}, false, nil
+		return contracts.PolicyCommitV3{}, false, nil
 	}
 	locator, ok := s.state.CommandLocators[commandID]
 	if !ok {
 		s.sealed = true
-		return contracts.PolicyCommitV2{}, false, ErrCorrupt
+		return contracts.PolicyCommitV3{}, false, ErrCorrupt
 	}
 	committed, err := s.readLocator(locator, resultHash)
 	if err != nil {
 		s.sealed = true
-		return contracts.PolicyCommitV2{}, false, err
+		return contracts.PolicyCommitV3{}, false, err
 	}
 	return committed.Commit, true, nil
 }
 
-func (s *StoreV2) rollback(prior int64, cause error) error {
+func (s *StoreV3) rollback(prior int64, cause error) error {
 	if err := s.hooks.Truncate(s.file, prior); err != nil {
 		s.sealed = true
 		return fmt.Errorf("%w: rollback_truncate", ErrSealed)
@@ -376,7 +429,7 @@ func (s *StoreV2) rollback(prior int64, cause error) error {
 	return fmt.Errorf("%w: %v", ErrAppendFailed, cause)
 }
 
-func (s *StoreV2) ensureSegment(sequence uint64, frameSize int64) error {
+func (s *StoreV3) ensureSegment(sequence uint64, frameSize int64) error {
 	if frameSize > s.segmentLimit {
 		return errors.New("frame exceeds segment bound")
 	}
@@ -395,7 +448,7 @@ func (s *StoreV2) ensureSegment(sequence uint64, frameSize int64) error {
 		}
 		s.file = nil
 	}
-	name := fmt.Sprintf("%020d.pcl2", sequence)
+	name := fmt.Sprintf("%020d.pcl3", sequence)
 	final := filepath.Join(s.dir, name)
 	tmp, err := s.hooks.OpenFile(filepath.Join(s.dir, "."+name+".tmp"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
@@ -436,7 +489,7 @@ func (s *StoreV2) ensureSegment(sequence uint64, frameSize int64) error {
 	return nil
 }
 
-func (s *StoreV2) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV2) error {
+func (s *StoreV3) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV3) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -453,8 +506,8 @@ func (s *StoreV2) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV2) error
 	if err != nil {
 		return fmt.Errorf("%w: canonical", ErrInvalidCheckpoint)
 	}
-	tmpPath := filepath.Join(s.dir, ".checkpoint.v2.json.tmp")
-	finalPath := filepath.Join(s.dir, "checkpoint.v2.json")
+	tmpPath := filepath.Join(s.dir, ".checkpoint.v3.json.tmp")
+	finalPath := filepath.Join(s.dir, "checkpoint.v3.json")
 	tmp, err := s.hooks.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("checkpoint create: %w", err)
@@ -493,20 +546,20 @@ func (s *StoreV2) WriteCheckpoint(checkpoint contracts.PolicyCheckpointV2) error
 // duplicated, substituted, or frame-mismatched fails closed. Later frames are
 // delivered one at a time so a stale checkpoint cannot materialize its entire
 // continuation in memory.
-func (s *StoreV2) LoadCheckpoint(visit func(CommittedV2) error) (*contracts.PolicyCheckpointV2, error) {
+func (s *StoreV3) LoadCheckpoint(visit func(CommittedV3) error) (*contracts.PolicyCheckpointV3, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if visit == nil {
 		return nil, errors.New("v2 checkpoint continuation visitor required")
 	}
-	payload, err := os.ReadFile(filepath.Join(s.dir, "checkpoint.v2.json"))
+	payload, err := os.ReadFile(filepath.Join(s.dir, "checkpoint.v3.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var checkpoint contracts.PolicyCheckpointV2
+	var checkpoint contracts.PolicyCheckpointV3
 	if contracts.DecodeStrict(payload, &checkpoint) != nil {
 		return nil, nil
 	}
@@ -514,7 +567,7 @@ func (s *StoreV2) LoadCheckpoint(visit func(CommittedV2) error) (*contracts.Poli
 	if err != nil || !bytes.Equal(canonical, payload) {
 		return nil, nil
 	}
-	if !locatorShapeMatches(checkpoint) {
+	if !locatorShapeMatchesV3(checkpoint) {
 		return nil, ErrInvalidCheckpoint
 	}
 	commit, ok, scanErr := s.commitAt(checkpoint.CommitSequence)
@@ -527,7 +580,7 @@ func (s *StoreV2) LoadCheckpoint(visit func(CommittedV2) error) (*contracts.Poli
 	if err := s.validateCheckpointLocators(checkpoint); err != nil {
 		return nil, ErrInvalidCheckpoint
 	}
-	if err := s.scanFrames(func(committed CommittedV2) error {
+	if err := s.scanFrames(func(committed CommittedV3) error {
 		if committed.Commit.CommitSequence <= checkpoint.CommitSequence {
 			return nil
 		}
@@ -535,13 +588,13 @@ func (s *StoreV2) LoadCheckpoint(visit func(CommittedV2) error) (*contracts.Poli
 	}); err != nil {
 		return nil, err
 	}
-	copyCheckpoint := cloneCheckpointV2(checkpoint)
+	copyCheckpoint := cloneCheckpointV3(checkpoint)
 	return &copyCheckpoint, nil
 }
 
 // VisitAll streams the complete committed history without retaining payloads.
 // It is used when the checkpoint cache is missing or corrupt.
-func (s *StoreV2) VisitAll(visit func(CommittedV2) error) error {
+func (s *StoreV3) VisitAll(visit func(CommittedV3) error) error {
 	if visit == nil {
 		return errors.New("v2 replay visitor required")
 	}
@@ -550,7 +603,7 @@ func (s *StoreV2) VisitAll(visit func(CommittedV2) error) error {
 	return s.scanFrames(visit)
 }
 
-func locatorShapeMatches(checkpoint contracts.PolicyCheckpointV2) bool {
+func locatorShapeMatchesV3(checkpoint contracts.PolicyCheckpointV3) bool {
 	if len(checkpoint.CommandResults) != len(checkpoint.CommandLocators) {
 		return false
 	}
@@ -564,12 +617,12 @@ func locatorShapeMatches(checkpoint contracts.PolicyCheckpointV2) bool {
 	return true
 }
 
-func (s *StoreV2) validateCheckpointLocators(checkpoint contracts.PolicyCheckpointV2) error {
-	if !locatorShapeMatches(checkpoint) {
+func (s *StoreV3) validateCheckpointLocators(checkpoint contracts.PolicyCheckpointV3) error {
+	if !locatorShapeMatchesV3(checkpoint) {
 		return ErrInvalidCheckpoint
 	}
-	expected := make([]contracts.PolicyCommandResultRefV2, 0, len(checkpoint.CommandResults))
-	err := s.scanFrames(func(committed CommittedV2) error {
+	expected := make([]contracts.PolicyCommandResultRefV3, 0, len(checkpoint.CommandResults))
+	err := s.scanFrames(func(committed CommittedV3) error {
 		if committed.Commit.CommitSequence > checkpoint.CommitSequence {
 			return io.EOF
 		}
@@ -578,7 +631,7 @@ func (s *StoreV2) validateCheckpointLocators(checkpoint contracts.PolicyCheckpoi
 			if err != nil {
 				return err
 			}
-			expected = append(expected, contracts.PolicyCommandResultRefV2{CommandID: committed.Commit.CommandID, ResultSHA256: hash})
+			expected = append(expected, contracts.PolicyCommandResultRefV3{CommandID: committed.Commit.CommandID, ResultSHA256: hash})
 		}
 		return nil
 	})
@@ -605,34 +658,34 @@ func (s *StoreV2) validateCheckpointLocators(checkpoint contracts.PolicyCheckpoi
 	return nil
 }
 
-func (s *StoreV2) readLocator(locator contracts.PolicyCommandLocatorV2, resultHash string) (CommittedV2, error) {
-	if filepath.Base(locator.SegmentID) != locator.SegmentID || !strings.HasSuffix(locator.SegmentID, ".pcl2") || locator.FrameOffset < 0 {
-		return CommittedV2{}, ErrCorrupt
+func (s *StoreV3) readLocator(locator contracts.PolicyCommandLocatorV3, resultHash string) (CommittedV3, error) {
+	if filepath.Base(locator.SegmentID) != locator.SegmentID || !strings.HasSuffix(locator.SegmentID, ".pcl3") || locator.FrameOffset < 0 {
+		return CommittedV3{}, ErrCorrupt
 	}
 	path := filepath.Join(s.dir, locator.SegmentID)
 	f, err := os.Open(path)
 	if err != nil {
-		return CommittedV2{}, fmt.Errorf("%w: locator open", ErrCorrupt)
+		return CommittedV3{}, fmt.Errorf("%w: locator open", ErrCorrupt)
 	}
 	defer f.Close()
 	if _, err := f.Seek(locator.FrameOffset, io.SeekStart); err != nil {
-		return CommittedV2{}, fmt.Errorf("%w: locator seek", ErrCorrupt)
+		return CommittedV3{}, fmt.Errorf("%w: locator seek", ErrCorrupt)
 	}
-	committed, _, err := readFrameV2(f, locator.SegmentID, locator.FrameOffset)
+	committed, _, err := readFrameV3(f, locator.SegmentID, locator.FrameOffset)
 	if err != nil || committed.Hash != locator.FrameSHA256 || committed.Commit.CommitSequence != locator.CommitSequence || committed.Commit.CommandID != locator.CommandID || committed.Commit.CommandResult == nil {
-		return CommittedV2{}, fmt.Errorf("%w: locator frame mismatch", ErrCorrupt)
+		return CommittedV3{}, fmt.Errorf("%w: locator frame mismatch", ErrCorrupt)
 	}
 	gotResultHash, err := contracts.CanonicalSHA256(*committed.Commit.CommandResult)
 	if err != nil || gotResultHash != resultHash {
-		return CommittedV2{}, fmt.Errorf("%w: locator semantic result mismatch", ErrCorrupt)
+		return CommittedV3{}, fmt.Errorf("%w: locator semantic result mismatch", ErrCorrupt)
 	}
 	committed.Locator = locator
 	return committed, nil
 }
 
-func (s *StoreV2) commitAt(sequence uint64) (CommittedV2, bool, error) {
-	var found CommittedV2
-	err := s.scanFrames(func(commit CommittedV2) error {
+func (s *StoreV3) commitAt(sequence uint64) (CommittedV3, bool, error) {
+	var found CommittedV3
+	err := s.scanFrames(func(commit CommittedV3) error {
 		if commit.Commit.CommitSequence == sequence {
 			found = commit
 			return io.EOF
@@ -640,15 +693,15 @@ func (s *StoreV2) commitAt(sequence uint64) (CommittedV2, bool, error) {
 		return nil
 	})
 	if err != nil && !errors.Is(err, io.EOF) {
-		return CommittedV2{}, false, err
+		return CommittedV3{}, false, err
 	}
 	return found, found.Commit.CommitSequence != 0, nil
 }
 
-func (s *StoreV2) recover() (StateV2, error) {
-	state := StateV2{
+func (s *StoreV3) recover() (StateV3, error) {
+	state := StateV3{
 		SessionID: s.sessionID, LineageManifestID: s.manifestID,
-		CommandResults: map[string]string{}, CommandLocators: map[string]contracts.PolicyCommandLocatorV2{},
+		CommandResults: map[string]string{}, CommandLocators: map[string]contracts.PolicyCommandLocatorV3{},
 	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -656,33 +709,33 @@ func (s *StoreV2) recover() (StateV2, error) {
 	}
 	var names []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl3") {
 			names = append(names, entry.Name())
 		}
 	}
 	sort.Strings(names)
 	if len(names) > s.maxSessionSegments {
-		return StateV2{}, capacityError("recovered_segment_count")
+		return StateV3{}, capacityError("recovered_segment_count")
 	}
 	s.segmentCount = len(names)
 	for index, name := range names {
 		path := filepath.Join(s.dir, name)
 		if err := s.recoverSegment(path, index == len(names)-1, &state); err != nil {
-			return StateV2{}, err
+			return StateV3{}, err
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			return StateV2{}, err
+			return StateV3{}, err
 		}
 		if info.Size() > s.maxSessionBytes-s.totalBytes {
-			return StateV2{}, capacityError("recovered_aggregate_bytes")
+			return StateV3{}, capacityError("recovered_aggregate_bytes")
 		}
 		s.totalBytes += info.Size()
 	}
 	return state, nil
 }
 
-func (s *StoreV2) recoverSegment(path string, last bool, state *StateV2) error {
+func (s *StoreV3) recoverSegment(path string, last bool, state *StateV3) error {
 	f, err := s.hooks.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		return err
@@ -714,72 +767,72 @@ func (s *StoreV2) recoverSegment(path string, last bool, state *StateV2) error {
 			return s.recoverTail(f, last, offset)
 		}
 		reader := io.NewSectionReader(f, offset, frameSize)
-		committed, consumed, err := readFrameV2(reader, filepath.Base(path), offset)
+		committed, consumed, err := readFrameV3(reader, filepath.Base(path), offset)
 		if err != nil || consumed != frameSize {
 			return fmt.Errorf("%w: invalid terminated v2 frame", ErrCorrupt)
 		}
 		if committed.Commit.SessionID != s.sessionID || committed.Commit.LineageManifestID != s.manifestID || committed.Commit.LineageManifestSHA256 != s.manifestID {
 			return fmt.Errorf("%w: v2 lineage mismatch", ErrCorrupt)
 		}
-		if err := validateNextV2(*state, committed.Commit); err != nil {
+		if err := validateNextV3(*state, committed.Commit); err != nil {
 			return fmt.Errorf("%w: v2 sequence", ErrCorrupt)
 		}
 		if committed.Commit.CommandID != "" {
 			if _, duplicate := state.CommandResults[committed.Commit.CommandID]; duplicate || len(state.CommandResults) >= contracts.MaxCheckpointCommandResults {
 				return fmt.Errorf("%w: duplicate or over-limit command", ErrCorrupt)
 			}
-			committed.Locator = contracts.PolicyCommandLocatorV2{
+			committed.Locator = contracts.PolicyCommandLocatorV3{
 				CommandID: committed.Commit.CommandID, SegmentID: filepath.Base(path), FrameOffset: offset,
 				CommitSequence: committed.Commit.CommitSequence, FrameSHA256: committed.Hash,
 			}
 		}
-		if err := verifyCommitV2(committed.Commit, *s.verifier); err != nil {
+		if err := verifyCommitV3(committed.Commit, *s.verifier); err != nil {
 			return fmt.Errorf("%w: recovery activation: %v", ErrCorrupt, err)
 		}
-		applyV2(state, committed)
+		applyV3(state, committed)
 		offset += frameSize
 	}
 	return nil
 }
 
-func readFrameV2(r io.Reader, segment string, offset int64) (CommittedV2, int64, error) {
+func readFrameV3(r io.Reader, segment string, offset int64) (CommittedV3, int64, error) {
 	var length [lengthBytes]byte
 	if _, err := io.ReadFull(r, length[:]); err != nil {
-		return CommittedV2{}, 0, err
+		return CommittedV3{}, 0, err
 	}
 	n := int(binary.BigEndian.Uint32(length[:]))
 	if n <= 0 || n > contracts.MaxPolicyCommitBytes {
-		return CommittedV2{}, 0, ErrCorrupt
+		return CommittedV3{}, 0, ErrCorrupt
 	}
 	payload := make([]byte, n)
 	storedHash := make([]byte, hashBytes)
 	marker := make([]byte, markerBytes)
 	if _, err := io.ReadFull(r, payload); err != nil {
-		return CommittedV2{}, 0, err
+		return CommittedV3{}, 0, err
 	}
 	if _, err := io.ReadFull(r, storedHash); err != nil {
-		return CommittedV2{}, 0, err
+		return CommittedV3{}, 0, err
 	}
 	if _, err := io.ReadFull(r, marker); err != nil {
-		return CommittedV2{}, 0, err
+		return CommittedV3{}, 0, err
 	}
 	sum := sha256.Sum256(payload)
-	if !bytes.Equal(storedHash, sum[:]) || !bytes.Equal(marker, commitMarkerV2[:]) {
-		return CommittedV2{}, 0, ErrCorrupt
+	if !bytes.Equal(storedHash, sum[:]) || !bytes.Equal(marker, commitMarkerV3[:]) {
+		return CommittedV3{}, 0, ErrCorrupt
 	}
-	var commit contracts.PolicyCommitV2
+	var commit contracts.PolicyCommitV3
 	if err := contracts.DecodeStrict(payload, &commit); err != nil || commit.Validate() != nil {
-		return CommittedV2{}, 0, ErrCorrupt
+		return CommittedV3{}, 0, ErrCorrupt
 	}
 	canonical, err := contracts.MarshalCanonical(commit)
 	if err != nil || !bytes.Equal(canonical, payload) {
-		return CommittedV2{}, 0, ErrCorrupt
+		return CommittedV3{}, 0, ErrCorrupt
 	}
 	hash := hex.EncodeToString(sum[:])
-	return CommittedV2{Commit: commit, Payload: payload, Hash: hash}, int64(lengthBytes + n + hashBytes + markerBytes), nil
+	return CommittedV3{Commit: commit, Payload: payload, Hash: hash}, int64(lengthBytes + n + hashBytes + markerBytes), nil
 }
 
-func (s *StoreV2) recoverTail(f *os.File, last bool, offset int64) error {
+func (s *StoreV3) recoverTail(f *os.File, last bool, offset int64) error {
 	if !last {
 		return fmt.Errorf("%w: incomplete nonfinal v2 segment", ErrCorrupt)
 	}
@@ -796,14 +849,14 @@ func (s *StoreV2) recoverTail(f *os.File, last bool, offset int64) error {
 	return nil
 }
 
-func (s *StoreV2) reopenLastSegment() error {
+func (s *StoreV3) reopenLastSegment() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return err
 	}
 	var names []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl3") {
 			names = append(names, entry.Name())
 		}
 	}
@@ -826,7 +879,7 @@ func (s *StoreV2) reopenLastSegment() error {
 	return nil
 }
 
-func (s *StoreV2) Close() error {
+func (s *StoreV3) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -839,17 +892,17 @@ func (s *StoreV2) Close() error {
 	return nil
 }
 
-func encodeFrameV2(payload []byte) ([]byte, [32]byte) {
+func encodeFrameV3(payload []byte) ([]byte, [32]byte) {
 	sum := sha256.Sum256(payload)
 	frame := make([]byte, lengthBytes+len(payload)+hashBytes+markerBytes)
 	binary.BigEndian.PutUint32(frame, uint32(len(payload)))
 	copy(frame[lengthBytes:], payload)
 	copy(frame[lengthBytes+len(payload):], sum[:])
-	copy(frame[lengthBytes+len(payload)+hashBytes:], commitMarkerV2[:])
+	copy(frame[lengthBytes+len(payload)+hashBytes:], commitMarkerV3[:])
 	return frame, sum
 }
 
-func validateNextV2(state StateV2, commit contracts.PolicyCommitV2) error {
+func validateNextV3(state StateV3, commit contracts.PolicyCommitV3) error {
 	if commit.CommitSequence != state.CommitSequence+1 || commit.PriorPolicyRevision != state.PolicyRevision || commit.ResultingObservationSequence < state.LastObservationSequence || commit.ResultingPolicyTimeMS < state.LastPolicyTimeMS {
 		return ErrSequence
 	}
@@ -859,7 +912,7 @@ func validateNextV2(state StateV2, commit contracts.PolicyCommitV2) error {
 	return nil
 }
 
-func applyV2(state *StateV2, committed CommittedV2) {
+func applyV3(state *StateV3, committed CommittedV3) {
 	state.CommitSequence = committed.Commit.CommitSequence
 	state.PolicyRevision = committed.Commit.ResultingPolicyRevision
 	state.StateHash = committed.Commit.ResultingStateHash
@@ -872,22 +925,22 @@ func applyV2(state *StateV2, committed CommittedV2) {
 	}
 }
 
-func cloneCommittedV2(committed CommittedV2) CommittedV2 {
+func cloneCommittedV3(committed CommittedV3) CommittedV3 {
 	committed.Payload = append([]byte(nil), committed.Payload...)
-	var decoded contracts.PolicyCommitV2
+	var decoded contracts.PolicyCommitV3
 	if err := contracts.DecodeStrict(committed.Payload, &decoded); err == nil {
 		committed.Commit = decoded
 	}
 	return committed
 }
 
-func cloneStateV2(state StateV2) StateV2 {
+func cloneStateV3(state StateV3) StateV3 {
 	copyState := state
 	copyState.CommandResults = make(map[string]string, len(state.CommandResults))
 	for key, value := range state.CommandResults {
 		copyState.CommandResults[key] = value
 	}
-	copyState.CommandLocators = make(map[string]contracts.PolicyCommandLocatorV2, len(state.CommandLocators))
+	copyState.CommandLocators = make(map[string]contracts.PolicyCommandLocatorV3, len(state.CommandLocators))
 	for key, value := range state.CommandLocators {
 		copyState.CommandLocators[key] = value
 	}
@@ -895,14 +948,14 @@ func cloneStateV2(state StateV2) StateV2 {
 	return copyState
 }
 
-func (s *StoreV2) scanFrames(visit func(CommittedV2) error) error {
+func (s *StoreV3) scanFrames(visit func(CommittedV3) error) error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return err
 	}
 	var names []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl3") {
 			names = append(names, entry.Name())
 		}
 	}
@@ -918,13 +971,13 @@ func (s *StoreV2) scanFrames(visit func(CommittedV2) error) error {
 			return err
 		}
 		for offset := int64(0); offset < info.Size(); {
-			committed, consumed, err := readFrameV2(f, name, offset)
+			committed, consumed, err := readFrameV3(f, name, offset)
 			if err != nil {
 				_ = f.Close()
 				return err
 			}
 			if committed.Commit.CommandID != "" {
-				committed.Locator = contracts.PolicyCommandLocatorV2{CommandID: committed.Commit.CommandID, SegmentID: name, FrameOffset: offset, CommitSequence: committed.Commit.CommitSequence, FrameSHA256: committed.Hash}
+				committed.Locator = contracts.PolicyCommandLocatorV3{CommandID: committed.Commit.CommandID, SegmentID: name, FrameOffset: offset, CommitSequence: committed.Commit.CommitSequence, FrameSHA256: committed.Hash}
 			}
 			if err := visit(committed); err != nil {
 				_ = f.Close()
@@ -939,37 +992,37 @@ func (s *StoreV2) scanFrames(visit func(CommittedV2) error) error {
 	return nil
 }
 
-func cloneCheckpointV2(checkpoint contracts.PolicyCheckpointV2) contracts.PolicyCheckpointV2 {
+func cloneCheckpointV3(checkpoint contracts.PolicyCheckpointV3) contracts.PolicyCheckpointV3 {
 	payload, err := contracts.MarshalCanonical(checkpoint)
 	if err != nil {
 		return checkpoint
 	}
-	var clone contracts.PolicyCheckpointV2
+	var clone contracts.PolicyCheckpointV3
 	if err := contracts.DecodeStrict(payload, &clone); err != nil {
 		return checkpoint
 	}
 	return clone
 }
 
-type ReplayVerifierV2 struct {
-	VerifyObservation func(contracts.PolicyCommitV2) error
-	VerifyCommand     func(contracts.PolicyCommitV2) error
-	Reevaluate        func(contracts.PolicyCommitV2) error
+type ReplayVerifierV3 struct {
+	VerifyObservation func(contracts.PolicyCommitV3) error
+	VerifyCommand     func(contracts.PolicyCommitV3) error
+	Reevaluate        func(contracts.PolicyCommitV3) error
 }
 
-// VerifyReplayV2 enforces source verification before semantic re-evaluation.
+// VerifyReplayV3 enforces source verification before semantic re-evaluation.
 // The application supplies lineage-bound raw projection and pure-engine
 // callbacks; the durable adapter never imports capture or policy evaluation.
-func VerifyReplayV2(commits []contracts.PolicyCommitV2, verifier ReplayVerifierV2) error {
+func VerifyReplayV3(commits []contracts.PolicyCommitV3, verifier ReplayVerifierV3) error {
 	for _, commit := range commits {
-		if err := verifyCommitV2(commit, verifier); err != nil {
+		if err := verifyCommitV3(commit, verifier); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func verifyCommitV2(commit contracts.PolicyCommitV2, verifier ReplayVerifierV2) error {
+func verifyCommitV3(commit contracts.PolicyCommitV3, verifier ReplayVerifierV3) error {
 	if err := commit.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrCorrupt, err)
 	}

@@ -17,7 +17,7 @@ const (
 	productLineageSourceSHA256    = "426f51938697789b97f7599339ba73585d3e64684a444320493b7d4a9eb5e572"
 	sessionHighWaterSourceSHA256  = "8cd02d084a5ae7077364e5c93872b2aa00a0f13ae0fbaa9e20d1abdf5a3263c7"
 	sessionFollowerSourceSHA256   = "022ac146cdea343cd3c438eab8be585862874914d33fb16e765edbbdd2a8f435"
-	insightEngineSourceSHA256     = "ed03607f7d06de0b5ec3c888d16c143762d0c64a39f5611ba5fcc28cef3fdc52"
-	policyEngineSourceSHA256      = "63bb5fce0e5d71195c5a73fe55fb83f2cbc3476fb8cccaf07b15b595351d6f83"
+	insightEngineSourceSHA256     = "03fe0d238c1bb1eb166414e1baa060362356fcdfe964cc968808107e63e7f55f"
+	policyEngineSourceSHA256      = "f73d242b74f06589cc68d00592eb1dce6c940883ab6da7320d3ac9d24e06697f"
 	policyApplicationSourceSHA256 = "5678bc191e6e454694662488b4aa3af9950c1c14299aa70bc4babd3c84a6d771"
 )

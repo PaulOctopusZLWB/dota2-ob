@@ -163,7 +163,7 @@ func Open(root, sessionID string, opts ...Option) (*Store, State, error) {
 		return nil, State{}, err
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".pcl2") {
+		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".pcl2") || strings.HasSuffix(entry.Name(), ".pcl3")) {
 			return nil, State{}, ErrMixedLineage
 		}
 	}

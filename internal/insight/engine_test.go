@@ -66,6 +66,28 @@ func TestEvaluateFailsLiveClaimsClosedAndIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestEvaluateLiveOnlyEmitsNoHistoryFamilies(t *testing.T) {
+	now := time.Date(2026, 8, 12, 0, 0, 1, 0, time.UTC)
+	observation := completeObservation(now)
+	previous := completeObservation(now.Add(-time.Second))
+	previous.Evidence.Sequence = 1
+	previous.Map.RadiantScore = contracts.Present(int64(1))
+	history := contracts.HistoryAvailabilityBindingV1{SchemaVersion: contracts.HistoryAvailabilityBindingSchemaV1, Mode: contracts.HistoryModeNoGo, TerminalOutcome: contracts.HistoricalNoGoOutcome, CodeFoundationCommit: contracts.AcceptedHistoryCodeCommit, EvidenceCommit: contracts.AcceptedHistoryEvidenceCommit, EvidenceIndexSHA256: contracts.AcceptedEvidenceIndexSHA256, ArtifactTreeSHA256: contracts.AcceptedArtifactTreeSHA256, ReplayGateAuditSHA256: contracts.AcceptedReplayGateAuditSHA256, SourceProvenanceSHA256: contracts.AcceptedSourceProvenanceSHA256, DisabledFamilies: append([]string(nil), contracts.HistoricalDisabledFamiliesV1...), TournamentScopeID: contracts.AcceptedTournamentScopeID, TournamentScopeSHA256: contracts.AcceptedTournamentScopeSHA256, Cutoff: "2026-08-12T00:00:00Z", Trailing90Start: "2026-05-14T00:00:00Z", Trailing180Start: "2026-02-13T00:00:00Z", PatchID: "60", DotaPatch: "7.41"}
+	id := history.MustContentID()
+	artifact := contracts.PolicyArtifactIdentityV2{Version: "v1", ContentSHA256: hash('9')}
+	lineage := contracts.PolicyLineageManifestV3{SchemaVersion: contracts.PolicyLineageManifestSchemaV3, SessionID: "session", RawRecordSchema: artifact, RawRecordFraming: artifact, RawPayloadSchema: artifact, LiveObservationSchema: artifact, ProjectionMapping: artifact, TournamentScopeID: hash('c'), TournamentScopeSHA256: hash('c'), HistoryAvailabilityBindingID: id, HistoryAvailabilityBindingSHA256: id, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(insight.DefaultConfig()), Catalog: artifact, Terminology: artifact, LocalizationParameterMapping: artifact, EngineBuild: artifact}
+	input := insight.LiveOnlyInput{Observation: observation, Previous: &previous, History: history, Lineage: lineage, PolicyTimeMS: now.UnixMilli()}
+	first, second := insight.EvaluateLiveOnly(input, insight.DefaultConfig()), insight.EvaluateLiveOnly(input, insight.DefaultConfig())
+	a, _ := contracts.MarshalCanonical(first)
+	b, _ := contracts.MarshalCanonical(second)
+	if string(a) != string(b) {
+		t.Fatal("live-only evaluation is nondeterministic")
+	}
+	if len(first) != 1 || insight.Family(first[0].RuleVersion) != "objective" {
+		t.Fatalf("history-dependent output escaped: %#v", first)
+	}
+}
+
 func TestHistoryRequiresSealedManifestAndLineageMembership(t *testing.T) {
 	observation := completeObservation(time.Unix(1_700_000_000, 0).UTC())
 	previous := observation

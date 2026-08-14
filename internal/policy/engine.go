@@ -86,6 +86,31 @@ func NewFromCheckpoint(checkpoint contracts.PolicyCheckpointV2, config Config) (
 func (e *Engine) State() contracts.PolicyStateV2 { return cloneState(e.state) }
 func (e *Engine) StateHash() string              { return e.hash }
 
+// ReplayCommitV3 preserves the reviewed semantic replay while requiring the
+// explicit V3 durable envelope selected by a live-only lineage.
+func (e *Engine) ReplayCommitV3(committed contracts.PolicyCommitV3, candidates []contracts.InsightCandidateV1) error {
+	if err := committed.Validate(); err != nil {
+		return err
+	}
+	v2 := contracts.PolicyCommitV2(committed)
+	v2.SchemaVersion = contracts.PolicyCommitSchemaV2
+	return e.ReplayCommit(v2, candidates)
+}
+
+func (e *Engine) EvaluateObservationV3(observationSequence uint64, rawRecordHash, liveHash string, evidence contracts.EvidenceRefV1, candidates []contracts.InsightCandidateV1, policyTimeMS int64) contracts.PolicyCommitV3 {
+	v2 := e.EvaluateObservation(observationSequence, rawRecordHash, liveHash, evidence, candidates, policyTimeMS)
+	v3 := contracts.PolicyCommitV3(v2)
+	v3.SchemaVersion = contracts.PolicyCommitSchemaV3
+	return v3
+}
+
+func (e *Engine) ApplyCommandV3(command contracts.OperatorCommandV1) contracts.PolicyCommitV3 {
+	v2 := e.ApplyCommand(command)
+	v3 := contracts.PolicyCommitV3(v2)
+	v3.SchemaVersion = contracts.PolicyCommitSchemaV3
+	return v3
+}
+
 // ReplayCommit re-evaluates one committed causal input against restored state
 // and requires exact canonical equivalence before recovery may continue.
 func (e *Engine) ReplayCommit(committed contracts.PolicyCommitV2, candidates []contracts.InsightCandidateV1) error {

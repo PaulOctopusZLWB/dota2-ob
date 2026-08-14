@@ -32,20 +32,32 @@ type report struct {
 	Exclusions                                                                                      []string
 	Failures, ExcludedSamples                                                                       int
 	RawSamples, SummarizationCommand, Hostname, Kernel, CPUModel, GPUContext, PowerMode, HostLoad   string
+	Mode                                                                                            string
+	HistoryDependentCandidates                                                                      int
 }
 
 func main() {
 	samplesPath := flag.String("samples", "m2-p1-samples.txt", "raw nanosecond samples output")
 	summarizePath := flag.String("summarize", "", "summarize an existing raw sample file")
+	liveOnly := flag.Bool("live-only", false, "run the historical-no-go typed-unavailable V3 fixture")
 	flag.Parse()
 	if *summarizePath != "" {
 		summarize(*summarizePath)
 		return
 	}
 	input, config := fixture()
+	liveInput := liveOnlyFixture(input, config)
+	run := func(sequence uint64) evaluation { return evaluate(input, config, sequence) }
+	mode := "snapshot_baseline"
+	lineageID := input.Lineage.MustContentID()
+	if *liveOnly {
+		run = func(sequence uint64) evaluation { return evaluateLiveOnly(liveInput, config, sequence) }
+		mode = "historical_no_go_accepted_live_only"
+		lineageID = liveInput.Lineage.MustContentID()
+	}
 	baselineRSS := rss()
 	for i := 1; i <= warmups; i++ {
-		evaluate(input, config, uint64(i))
+		run(uint64(i))
 	}
 	runtime.GC()
 	postWarmup := rss()
@@ -57,7 +69,7 @@ func main() {
 	for i := 0; i < measured; i++ {
 		sequence := uint64(warmups + i + 1)
 		start := time.Now()
-		final = evaluate(input, config, sequence)
+		final = run(sequence)
 		durations[i] = time.Since(start).Nanoseconds()
 		if i%1000 == 0 {
 			if current := rss(); current > peak {
@@ -70,22 +82,28 @@ func main() {
 	writeSamples(*samplesPath, durations)
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 	candidateHash, _ := contracts.CanonicalSHA256(final.candidates)
-	decisionHash, _ := contracts.CanonicalSHA256(final.commit.Decisions)
+	decisionHash, _ := contracts.CanonicalSHA256(final.decisions)
+	historyDependent := 0
+	for _, candidate := range final.candidates {
+		if insight.Family(candidate.RuleVersion) != "objective" && insight.Family(candidate.RuleVersion) != "live" {
+			historyDependent++
+		}
+	}
 	host, _ := os.Hostname()
-	output := report{Warmups: warmups, Evaluations: measured, P50NS: nearest(durations, 50), P95NS: nearest(durations, 95), P99NS: nearest(durations, 99), MaxNS: durations[len(durations)-1], AllocationsPerEvaluation: float64(after.Mallocs-before.Mallocs) / measured, AllocatedBytesPerEvaluation: float64(after.TotalAlloc-before.TotalAlloc) / measured, BaselineRSSBytes: baselineRSS, PeakRSSBytes: peak, PostWarmupRSSBytes: postWarmup, FinalRSSBytes: finalRSS, FixtureID: "m2-complete-ten-player.v3-fixed-state", ConfigVersion: config.Version, RuleVersions: "draft.v1,item.v1,lane.v1,objective.v1,readiness.v1", LineageID: input.Lineage.MustContentID(), CandidateSHA256: candidateHash, DecisionSHA256: decisionHash, StateSHA256: final.stateHash, Runtime: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Compiler: runtime.Compiler, CPUs: runtime.NumCPU(), Exclusions: []string{"GSI capture and DotaTV delay", "filesystem commit log and sync", "network, localization, rendering, delivery HTTP, OBS"}, RawSamples: *samplesPath, SummarizationCommand: "m2-p1 --summarize " + *samplesPath, Hostname: host, Kernel: readFirst("/proc/sys/kernel/osrelease"), CPUModel: cpuModel(), GPUContext: readFirst("/proc/driver/nvidia/version"), PowerMode: readFirst("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"), HostLoad: readFirst("/proc/loadavg")}
+	output := report{Warmups: warmups, Evaluations: measured, P50NS: nearest(durations, 50), P95NS: nearest(durations, 95), P99NS: nearest(durations, 99), MaxNS: durations[len(durations)-1], AllocationsPerEvaluation: float64(after.Mallocs-before.Mallocs) / measured, AllocatedBytesPerEvaluation: float64(after.TotalAlloc-before.TotalAlloc) / measured, BaselineRSSBytes: baselineRSS, PeakRSSBytes: peak, PostWarmupRSSBytes: postWarmup, FinalRSSBytes: finalRSS, FixtureID: "m2-complete-ten-player.v3-fixed-state", ConfigVersion: config.Version, RuleVersions: "draft.v1,item.v1,lane.v1,objective.v1,readiness.v1", LineageID: lineageID, CandidateSHA256: candidateHash, DecisionSHA256: decisionHash, StateSHA256: final.stateHash, Runtime: runtime.Version(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Compiler: runtime.Compiler, CPUs: runtime.NumCPU(), Exclusions: []string{"GSI capture and DotaTV delay", "filesystem commit log and sync", "network, localization, rendering, delivery HTTP, OBS"}, RawSamples: *samplesPath, SummarizationCommand: "m2-p1 --summarize " + *samplesPath, Hostname: host, Kernel: readFirst("/proc/sys/kernel/osrelease"), CPUModel: cpuModel(), GPUContext: readFirst("/proc/driver/nvidia/version"), PowerMode: readFirst("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"), HostLoad: readFirst("/proc/loadavg"), Mode: mode, HistoryDependentCandidates: historyDependent}
 	if finalRSS > postWarmup {
 		output.PostWarmupGrowthBytes = finalRSS - postWarmup
 	}
 	data, _ := json.MarshalIndent(output, "", "  ")
 	fmt.Println(string(data))
-	if output.P99NS >= 20_000_000 || output.PeakRSSBytes >= 128<<20 || output.PostWarmupGrowthBytes > 16<<20 {
+	if output.P99NS >= 20_000_000 || output.PeakRSSBytes >= 128<<20 || output.PostWarmupGrowthBytes > 16<<20 || (*liveOnly && historyDependent != 0) {
 		os.Exit(1)
 	}
 }
 
 type evaluation struct {
 	candidates []contracts.InsightCandidateV1
-	commit     contracts.PolicyCommitV2
+	decisions  []contracts.BroadcastDecisionV1
 	stateHash  string
 }
 
@@ -101,7 +119,22 @@ func evaluate(input insight.Input, config insight.Config, sequence uint64) evalu
 	policyConfig.CandidateConfigArtifact, policyConfig.CandidateRulesArtifact = input.Lineage.Config, input.Lineage.Rules
 	engine := policy.New("p1-session", policyConfig)
 	commit := engine.EvaluateObservation(sequence, strings.Repeat("e", 64), liveHash, input.Observation.Evidence, values, input.PolicyTimeMS)
-	return evaluation{values, commit, engine.StateHash()}
+	return evaluation{values, commit.Decisions, engine.StateHash()}
+}
+
+func evaluateLiveOnly(input insight.LiveOnlyInput, config insight.Config, sequence uint64) evaluation {
+	input.Observation.Evidence.Sequence = sequence
+	input.Observation.Evidence.ReceiveTime = time.Unix(1_700_000_000, 0).UTC().Add(time.Duration(sequence) * time.Millisecond)
+	input.PolicyTimeMS = input.Observation.Evidence.ReceiveTime.UnixMilli()
+	values := insight.EvaluateLiveOnly(input, config)
+	liveHash, _ := contracts.CanonicalSHA256(input.Observation)
+	policyConfig := policy.DefaultConfig()
+	policyConfig.LineageID = input.Lineage.MustContentID()
+	policyConfig.CandidateConfigVersion = config.Version
+	policyConfig.CandidateConfigArtifact, policyConfig.CandidateRulesArtifact = input.Lineage.Config, input.Lineage.Rules
+	engine := policy.New("p1-session", policyConfig)
+	commit := engine.EvaluateObservationV3(sequence, strings.Repeat("e", 64), liveHash, input.Observation.Evidence, values, input.PolicyTimeMS)
+	return evaluation{values, commit.Decisions, engine.StateHash()}
 }
 func nearest(v []int64, p int) int64 {
 	rank := (p*len(v) + 99) / 100
@@ -205,6 +238,14 @@ func fixture() (insight.Input, insight.Config) {
 	previous.Buildings = []contracts.BuildingObservationV1{{Team: "dire", Name: "tower1_mid", Health: contracts.Present(contracts.Decimal("1000")), MaxHealth: contracts.Present(contracts.Decimal("1000"))}}
 	manifest, lineage, baselines := historyFixture(observation)
 	return insight.Input{Observation: observation, Previous: &previous, Manifest: &manifest, Lineage: &lineage, Baselines: baselines}, insight.DefaultConfig()
+}
+
+func liveOnlyFixture(snapshot insight.Input, config insight.Config) insight.LiveOnlyInput {
+	history := contracts.HistoryAvailabilityBindingV1{SchemaVersion: contracts.HistoryAvailabilityBindingSchemaV1, Mode: contracts.HistoryModeNoGo, TerminalOutcome: contracts.HistoricalNoGoOutcome, CodeFoundationCommit: contracts.AcceptedHistoryCodeCommit, EvidenceCommit: contracts.AcceptedHistoryEvidenceCommit, EvidenceIndexSHA256: contracts.AcceptedEvidenceIndexSHA256, ArtifactTreeSHA256: contracts.AcceptedArtifactTreeSHA256, ReplayGateAuditSHA256: contracts.AcceptedReplayGateAuditSHA256, SourceProvenanceSHA256: contracts.AcceptedSourceProvenanceSHA256, DisabledFamilies: append([]string(nil), contracts.HistoricalDisabledFamiliesV1...), TournamentScopeID: contracts.AcceptedTournamentScopeID, TournamentScopeSHA256: contracts.AcceptedTournamentScopeSHA256, Cutoff: "2026-08-12T00:00:00Z", Trailing90Start: "2026-05-14T00:00:00Z", Trailing180Start: "2026-02-13T00:00:00Z", PatchID: "60", DotaPatch: "7.41"}
+	id := history.MustContentID()
+	v2 := snapshot.Lineage
+	lineage := contracts.PolicyLineageManifestV3{SchemaVersion: contracts.PolicyLineageManifestSchemaV3, SessionID: v2.SessionID, RawRecordSchema: v2.RawRecordSchema, RawRecordFraming: v2.RawRecordFraming, RawPayloadSchema: v2.RawPayloadSchema, LiveObservationSchema: v2.LiveObservationSchema, ProjectionMapping: v2.ProjectionMapping, TournamentScopeID: v2.TournamentScopeID, TournamentScopeSHA256: v2.TournamentScopeSHA256, HistoryAvailabilityBindingID: id, HistoryAvailabilityBindingSHA256: id, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(config), Catalog: v2.Catalog, Terminology: v2.Terminology, LocalizationParameterMapping: v2.LocalizationParameterMapping, EngineBuild: v2.EngineBuild}
+	return insight.LiveOnlyInput{Observation: snapshot.Observation, Previous: snapshot.Previous, History: history, Lineage: lineage}
 }
 
 func historyFixture(observation contracts.LiveObservationV1) (contracts.HistoricalSnapshotManifestV1, contracts.PolicyLineageManifestV2, []contracts.HistoricalBaselineV1) {
