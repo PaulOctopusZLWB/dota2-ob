@@ -29,6 +29,7 @@ func expectedProductLineageArtifacts() productLineageArtifacts {
 		localizationMapping: sourceArtifact("localization_parameter_mapping.v1", presentationCatalogSHA256),
 		engineBuild: sourceArtifact("dota2-ob.product.v1", productMainSourceSHA256, productPortsSourceSHA256,
 			productRecoverySourceSHA256, productRuntimeSourceSHA256, productLineageSourceSHA256,
+			productLiveOnlySourceSHA256, productRecoveryV3SourceSHA256, productRuntimeV3SourceSHA256,
 			sessionHighWaterSourceSHA256, sessionFollowerSourceSHA256,
 			insightEngineSourceSHA256, policyEngineSourceSHA256, policyApplicationSourceSHA256, insight.RulesArtifact().ContentSHA256),
 	}
@@ -66,6 +67,19 @@ func sourceArtifact(version string, sourceSHA256 ...string) contracts.PolicyArti
 func matchesProductLineage(lineage contracts.PolicyLineageManifestV2, sessionID string) bool {
 	expected := expectedProductLineageArtifacts()
 	return lineage.Validate() == nil && lineage.SessionID == sessionID &&
+		lineage.RawRecordSchema == expected.rawRecordSchema && lineage.RawRecordFraming == expected.rawRecordFraming &&
+		lineage.RawPayloadSchema == expected.rawPayloadSchema && lineage.LiveObservationSchema == expected.liveObservationSchema &&
+		lineage.ProjectionMapping == expected.projectionMapping && lineage.Rules == insight.RulesArtifact() &&
+		lineage.Config == insight.ConfigArtifact(insight.DefaultConfig()) && lineage.Catalog == expected.catalog &&
+		lineage.Terminology == expected.terminology && lineage.LocalizationParameterMapping == expected.localizationMapping &&
+		lineage.EngineBuild == expected.engineBuild
+}
+
+func matchesProductLineageV3(lineage contracts.PolicyLineageManifestV3, binding contracts.HistoryAvailabilityBindingV1, sessionID string) bool {
+	expected := expectedProductLineageArtifacts()
+	bindingID, err := binding.ContentID()
+	return err == nil && binding.Mode == contracts.HistoryModeNoGo && lineage.Validate() == nil && lineage.SessionID == sessionID &&
+		lineage.HistoryAvailabilityBindingID == bindingID && lineage.HistoryAvailabilityBindingSHA256 == bindingID &&
 		lineage.RawRecordSchema == expected.rawRecordSchema && lineage.RawRecordFraming == expected.rawRecordFraming &&
 		lineage.RawPayloadSchema == expected.rawPayloadSchema && lineage.LiveObservationSchema == expected.liveObservationSchema &&
 		lineage.ProjectionMapping == expected.projectionMapping && lineage.Rules == insight.RulesArtifact() &&

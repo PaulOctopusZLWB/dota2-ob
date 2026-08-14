@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,18 @@ type broadcastPorts interface {
 	execute(context.Context, contracts.OperatorCommandV1) (contracts.OperatorCommandResultV1, error)
 	operatorState(context.Context) (delivery.OperatorState, error)
 	overlayState(context.Context) (contracts.OverlayStateV1, error)
+}
+
+// productBroadcastRuntime is the intentionally narrow product composition
+// seam implemented independently by the snapshot-backed V2 and live-only V3
+// runtimes. It is not a version-neutral policy envelope: typed V2/V3 contracts
+// remain confined to their respective implementations.
+type productBroadcastRuntime interface {
+	broadcastPorts
+	io.Closer
+	applyObservation(context.Context, contracts.LiveObservationV1) error
+	session.StartupPublicationBarrier
+	session.RejectionHealthSink
 }
 
 type broadcastCommandPort struct{ runtime broadcastPorts }
@@ -120,11 +133,11 @@ func (p trackedCaptureProjection) Apply(ctx context.Context, record *session.Rec
 }
 
 type policyObservationProjection struct {
-	runtime *broadcastRuntime
+	runtime productBroadcastRuntime
 	tracker *operator.Tracker
 }
 
-func newPolicyObservationProjection(runtime *broadcastRuntime, tracker *operator.Tracker) liveprojection.Projection {
+func newPolicyObservationProjection(runtime productBroadcastRuntime, tracker *operator.Tracker) liveprojection.Projection {
 	return policyObservationProjection{runtime: runtime, tracker: tracker}
 }
 
@@ -167,7 +180,7 @@ type policyProjectionRunner struct {
 	once        sync.Once
 }
 
-func newPolicyProjectionRunner(store *session.Store, runtime *broadcastRuntime, tracker *operator.Tracker) *policyProjectionRunner {
+func newPolicyProjectionRunner(store *session.Store, runtime productBroadcastRuntime, tracker *operator.Tracker) *policyProjectionRunner {
 	updates, unsubscribe := store.HighWater().Subscribe()
 	follower := session.NewLiveFollower(
 		store.SessionID(),

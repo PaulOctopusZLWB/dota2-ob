@@ -103,13 +103,37 @@ func (e *Engine) ReplayCommitV3(committed contracts.PolicyCommitV3, candidates [
 	if err := committed.Validate(); err != nil {
 		return err
 	}
-	v2 := contracts.PolicyCommitV2(committed)
-	v2.SchemaVersion = contracts.PolicyCommitSchemaV2
-	return e.ReplayCommit(v2, candidates)
+	if committed.SessionID != e.state.SessionID || committed.LineageManifestID != e.config.LineageID {
+		return errors.New("replay lineage mismatch")
+	}
+	var replayed contracts.PolicyCommitV3
+	if committed.Command != nil {
+		replayed = e.ApplyCommandV3(*committed.Command)
+	} else if committed.ObservationEvidence != nil {
+		replayed = e.EvaluateObservationV3(committed.ObservationSequence, committed.RawRecordSHA256, committed.LiveObservationSHA256, *committed.ObservationEvidence, candidates, causalPolicyTime(contracts.PolicyCommitV2(committed)))
+	} else {
+		return errors.New("replay missing causal input")
+	}
+	want, err := contracts.MarshalCanonical(committed)
+	if err != nil {
+		return err
+	}
+	got, err := contracts.MarshalCanonical(replayed)
+	if err != nil {
+		return err
+	}
+	if string(want) != string(got) {
+		return errors.New("replay canonical mismatch")
+	}
+	return nil
 }
 
 func (e *Engine) EvaluateObservationV3(observationSequence uint64, rawRecordHash, liveHash string, evidence contracts.EvidenceRefV1, candidates []contracts.InsightCandidateV1, policyTimeMS int64) contracts.PolicyCommitV3 {
 	v2 := e.EvaluateObservation(observationSequence, rawRecordHash, liveHash, evidence, candidates, policyTimeMS)
+	if v2.Publication == contracts.PublicationSuppressedV2 && len(v2.AuditEvents) == 1 &&
+		v2.AuditEvents[0].EventType == "candidate_suppressed" && v2.AuditEvents[0].Reason == "objective_non_event" {
+		v2.Publication = contracts.PublicationUnchanged
+	}
 	v3 := contracts.PolicyCommitV3(v2)
 	v3.SchemaVersion = contracts.PolicyCommitSchemaV3
 	return v3

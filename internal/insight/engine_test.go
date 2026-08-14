@@ -7,6 +7,7 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/presentation"
 )
 
 func TestEvaluateFiveFamiliesAndHistorySuppression(t *testing.T) {
@@ -85,6 +86,9 @@ func TestEvaluateLiveOnlyEmitsNoHistoryFamilies(t *testing.T) {
 	}
 	if len(first) != 1 || insight.Family(first[0].RuleVersion) != "objective" {
 		t.Fatalf("history-dependent output escaped: %#v", first)
+	}
+	if _, err := presentation.Preview("zh-CN", first[0]); err != nil {
+		t.Fatalf("live-only objective is not presentation-ready: %v", err)
 	}
 }
 

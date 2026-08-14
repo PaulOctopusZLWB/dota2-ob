@@ -223,9 +223,35 @@ func objectiveCandidate(o contracts.LiveObservationV1, previous *contracts.LiveO
 		c.Availability = "available"
 		c.SourceRequirements = []contracts.SourceRequirementV1{{Source: "gsi", MinimumConfidence: "medium"}}
 		c.ObservedValues = objectiveMetrics(o, *previous)
+		team, objective, delta := objectivePresentation(o, *previous, c.ObservedValues)
+		c.Parameters = []contracts.TypedParameterV1{
+			typedStringParameter("team", "team", team),
+			typedStringParameter("objective", "objective", objective),
+			decimalParameter("net_worth_delta", delta),
+		}
 	}
 	seal(&c)
 	return c
+}
+
+func objectivePresentation(current, previous contracts.LiveObservationV1, metrics []contracts.ObservedMetricV1) (team, objective string, delta contracts.Decimal) {
+	team = "radiant"
+	if *current.Map.DireScore.Value != *previous.Map.DireScore.Value && *current.Map.RadiantScore.Value == *previous.Map.RadiantScore.Value {
+		team = "dire"
+	}
+	objective = "tower"
+	if *current.Roshan.State.Value != *previous.Roshan.State.Value {
+		objective = "roshan"
+	} else if *current.Tormentor.State.Value != *previous.Tormentor.State.Value {
+		objective = "tormentor"
+	}
+	wantMetric := team + "_net_worth_delta"
+	for _, metric := range metrics {
+		if metric.Name == wantMetric {
+			return team, objective, metric.Value
+		}
+	}
+	return team, objective, contracts.Decimal("0")
 }
 
 func readinessCandidate(o contracts.LiveObservationV1, manifest *contracts.HistoricalSnapshotManifestV1, lineage *contracts.PolicyLineageManifestV2, baselines []contracts.HistoricalBaselineV1, config Config, now int64) contracts.InsightCandidateV1 {
@@ -468,6 +494,16 @@ func baselineIdentityMatches(o contracts.LiveObservationV1, baseline contracts.H
 func stringParameter(name, value string) contracts.TypedParameterV1 {
 	copy := value
 	return contracts.TypedParameterV1{Name: name, Type: "string", StringValue: &copy}
+}
+
+func typedStringParameter(name, kind, value string) contracts.TypedParameterV1 {
+	copy := value
+	return contracts.TypedParameterV1{Name: name, Type: kind, StringValue: &copy}
+}
+
+func decimalParameter(name string, value contracts.Decimal) contracts.TypedParameterV1 {
+	copy := value
+	return contracts.TypedParameterV1{Name: name, Type: "decimal", DecimalValue: &copy}
 }
 
 func observed[T any](v contracts.ObservedV1[T]) bool {

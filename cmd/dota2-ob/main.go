@@ -21,6 +21,7 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/delivery"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
@@ -72,7 +73,11 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	sessionID := flags.String("session-id", "", "explicit safe session identity for sealed policy lineage and restart")
 	diagnosticMode := flags.Bool("diagnostic-mode", false, "enable authenticated legacy capture diagnostics")
 	operatorTokenFile := flags.String("operator-token-file", "", "explicit external 0600 token handoff path for the operator process")
+	policyMode := flags.String("policy-mode", "v2-snapshot", "explicit policy mode: v2-snapshot or v3-live-only")
 	policyLineageFile := flags.String("policy-lineage-file", "", "sealed PolicyLineageManifestV2 for the broadcast policy plane")
+	historyBindingFile := flags.String("history-binding-file", "", "strict canonical HistoryAvailabilityBindingV1 for v3-live-only")
+	liveOnlyLineageFile := flags.String("live-only-lineage-file", "", "strict canonical PolicyLineageManifestV3 for v3-live-only")
+	liveOnlyReleaseFile := flags.String("live-only-release-file", "", "strict canonical LiveOnlyReleaseBindingV1 for v3-live-only")
 	analyzeSession := flags.String("analyze-session", "", "offline: analyze a session directory and exit")
 	doctorMode := flags.Bool("doctor", false, "run one-shot operator readiness checks and exit")
 	gsiConfig := flags.String("gsi-config", "", "explicit Dota 2 GSI config path for doctor mode")
@@ -118,6 +123,18 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		fmt.Fprintln(output, "stale_threshold_invalid")
 		return 1
 	}
+	if *policyMode != "v2-snapshot" && *policyMode != "v3-live-only" {
+		fmt.Fprintln(output, "policy_mode_invalid")
+		return 1
+	}
+	if *policyMode == "v2-snapshot" && (*historyBindingFile != "" || *liveOnlyLineageFile != "" || *liveOnlyReleaseFile != "") {
+		fmt.Fprintln(output, "policy_mode_artifact_mismatch")
+		return 1
+	}
+	if *policyMode == "v3-live-only" && (*policyLineageFile != "" || strings.TrimSpace(*sessionID) == "") {
+		fmt.Fprintln(output, "policy_mode_artifact_mismatch")
+		return 1
+	}
 
 	store, err := deps.newStore(*dataDir, *sessionID)
 	if err != nil {
@@ -142,13 +159,26 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		logger.Printf("delivery_listen_failed")
 		deliveryListener = nil
 	}
-	var broadcast *broadcastRuntime
+	var broadcast productBroadcastRuntime
 	if deliveryListener != nil {
-		lineage, lineageErr := loadPolicyLineage(*policyLineageFile, store.SessionID())
-		if lineageErr == nil {
-			broadcast, lineageErr = newBroadcastRuntime(broadcastConfig{
-				DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Lineage: lineage, Now: time.Now, ProjectionRestoreRequired: true,
-			})
+		var lineageErr error
+		switch *policyMode {
+		case "v2-snapshot":
+			var lineage contracts.PolicyLineageManifestV2
+			lineage, lineageErr = loadPolicyLineage(*policyLineageFile, store.SessionID())
+			if lineageErr == nil {
+				broadcast, lineageErr = newBroadcastRuntime(broadcastConfig{
+					DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Lineage: lineage, Now: time.Now, ProjectionRestoreRequired: true,
+				})
+			}
+		case "v3-live-only":
+			var artifacts liveOnlyPolicyArtifacts
+			artifacts, lineageErr = loadLiveOnlyPolicyArtifacts(*historyBindingFile, *liveOnlyLineageFile, *liveOnlyReleaseFile, store.SessionID())
+			if lineageErr == nil {
+				broadcast, lineageErr = newBroadcastRuntimeV3(broadcastConfigV3{
+					DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Artifacts: artifacts, Now: time.Now, ProjectionRestoreRequired: true,
+				})
+			}
 		}
 		if lineageErr != nil {
 			logger.Printf("broadcast_policy_config_failed")
@@ -215,7 +245,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		capture: server, delivery: deliveryServer, deliveryListener: deliveryListener,
 		reportDeliveryFailure: func(code string) { logger.Printf("%s", code) },
 	}
-	logger.Printf("server_started addr=%s delivery_addr=%s session_id=%s capture_target=%s", normalized, normalizedDelivery, store.SessionID(), filepath.Join(store.SessionID(), "raw.jsonl"))
+	logger.Printf("server_started addr=%s delivery_addr=%s session_id=%s policy_mode=%s capture_target=%s", normalized, normalizedDelivery, store.SessionID(), *policyMode, filepath.Join(store.SessionID(), "raw.jsonl"))
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)

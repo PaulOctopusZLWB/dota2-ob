@@ -107,3 +107,19 @@ func TestApplicationV3PersistsOutOfOrderInputsWithoutSemanticAdvance(t *testing.
 		t.Fatalf("late command was not durably rejected: %#v", rejected)
 	}
 }
+
+func TestApplicationV3PersistsObjectiveNonEventAsUnchanged(t *testing.T) {
+	log := &recordingLogV3{}
+	app := policy.NewApplicationV3(policy.New("session", policy.DefaultConfig()), log)
+	c := candidate("v3-non-event", "objective.v1", "observed", 1, 10)
+	c.Availability, c.Reason, c.CandidateID = "suppressed", "objective_non_event", ""
+	c.CandidateID, _ = contracts.InsightCandidateContentID(c)
+	commit, err := app.EvaluateObservation(1, hash('c'), hash('d'), evidence(1), []contracts.InsightCandidateV1{c}, 1)
+	if err != nil || commit.Publication != contracts.PublicationUnchanged || len(log.commits) != 1 {
+		t.Fatalf("V3 unchanged terminal: %#v %v", commit, err)
+	}
+	replay := policy.New("session", policy.DefaultConfig())
+	if err := replay.ReplayCommitV3(commit, []contracts.InsightCandidateV1{c}); err != nil {
+		t.Fatalf("V3 unchanged replay: %v", err)
+	}
+}
