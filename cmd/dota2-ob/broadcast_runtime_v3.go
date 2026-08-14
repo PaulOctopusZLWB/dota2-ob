@@ -24,6 +24,7 @@ type broadcastConfigV3 struct {
 	Now                       func() time.Time
 	StoreOptions              []commitlog.V3Option
 	ProjectionRestoreRequired bool
+	PolicyConfig              *policy.Config
 }
 
 // broadcastRuntimeV3 is intentionally separate from broadcastRuntime. This
@@ -39,6 +40,7 @@ type broadcastRuntimeV3 struct {
 	restoringProjection  bool
 	projectionRejected   bool
 	projectionHealthCode string
+	candidateSaturated   bool
 }
 
 func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error) {
@@ -51,6 +53,9 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 		return nil, errors.New("live-only broadcast lineage configuration mismatch")
 	}
 	policyConfig := policy.DefaultConfig()
+	if config.PolicyConfig != nil {
+		policyConfig = *config.PolicyConfig
+	}
 	policyConfig.LineageID = config.Artifacts.Lineage.MustContentID()
 	policyConfig.CandidateConfigVersion = config.Artifacts.Lineage.Config.Version
 	policyConfig.CandidateConfigArtifact = config.Artifacts.Lineage.Config
@@ -75,9 +80,21 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 		_ = store.Close()
 		return nil, resolverCloseErr
 	}
+	saturated := false
+	if err := store.VisitAll(func(committed commitlog.CommittedV3) error {
+		if commitHasQueueFull(committed.Commit) {
+			saturated = true
+		}
+		return nil
+	}); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	nowMS := config.Now().UTC().UnixMilli()
 	healthCode := "waiting_for_policy_decision"
-	if config.ProjectionRestoreRequired {
+	if saturated {
+		healthCode = "candidate_queue_saturated"
+	} else if config.ProjectionRestoreRequired {
 		healthCode = "projection_restoring"
 	}
 	hidden, err := presentation.Hidden(config.SessionID, nowMS, nowMS+overlayFreshness.Milliseconds(), healthCode)
@@ -87,7 +104,7 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 	}
 	return &broadcastRuntimeV3{
 		app: app, store: store, now: config.Now, artifacts: config.Artifacts,
-		previous: previous, overlay: hidden, restoringProjection: config.ProjectionRestoreRequired,
+		previous: previous, overlay: hidden, restoringProjection: config.ProjectionRestoreRequired, candidateSaturated: saturated,
 	}, nil
 }
 
@@ -105,8 +122,6 @@ func (r *broadcastRuntimeV3) applyObservation(ctx context.Context, observation c
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if observation.Evidence.Sequence <= r.app.State().LastObservationSequence {
-		copyObservation := observation
-		r.previous = &copyObservation
 		return nil
 	}
 	policyTimeMS := r.now().UTC().UnixMilli()
@@ -138,6 +153,11 @@ func (r *broadcastRuntimeV3) commitCandidatesLocked(observation contracts.LiveOb
 	}
 	copyObservation := observation
 	r.previous = &copyObservation
+	if commitHasQueueFull(commit) {
+		r.candidateSaturated = true
+		r.hideLocked("candidate_queue_saturated")
+		return nil
+	}
 	r.publishLocked(commit)
 	return nil
 }
@@ -150,6 +170,10 @@ func (r *broadcastRuntimeV3) execute(ctx context.Context, command contracts.Oper
 	defer r.mu.Unlock()
 	if r.restoringProjection {
 		return contracts.OperatorCommandResultV1{}, errors.New("projection restore in progress")
+	}
+	if r.candidateSaturated {
+		r.hideLocked("candidate_queue_saturated")
+		return contracts.OperatorCommandResultV1{}, errors.New("candidate queue saturated")
 	}
 	duplicate := hasCommandResult(r.app.State().CommandResults, command.CommandID)
 	commit, err := r.app.ApplyCommand(command)
@@ -170,6 +194,10 @@ func (r *broadcastRuntimeV3) execute(ctx context.Context, command contracts.Oper
 }
 
 func (r *broadcastRuntimeV3) publishLocked(commit contracts.PolicyCommitV3) {
+	if r.candidateSaturated {
+		r.hideLocked("candidate_queue_saturated")
+		return
+	}
 	if r.restoringProjection {
 		r.hideLocked("projection_restoring")
 		return
@@ -210,6 +238,10 @@ func (r *broadcastRuntimeV3) publishLocked(commit contracts.PolicyCommitV3) {
 }
 
 func (r *broadcastRuntimeV3) republishLocked() {
+	if r.candidateSaturated {
+		r.hideLocked("candidate_queue_saturated")
+		return
+	}
 	if r.restoringProjection {
 		r.hideLocked("projection_restoring")
 		return
@@ -228,6 +260,15 @@ func (r *broadcastRuntimeV3) republishLocked() {
 		return
 	}
 	r.publishLocked(contracts.PolicyCommitV3{Publication: contracts.PublicationPublish})
+}
+
+func commitHasQueueFull(commit contracts.PolicyCommitV3) bool {
+	for _, event := range commit.AuditEvents {
+		if event.EventType == "candidate_suppressed" && event.Reason == "queue_full" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *broadcastRuntimeV3) BeginRestore(ctx context.Context) error {

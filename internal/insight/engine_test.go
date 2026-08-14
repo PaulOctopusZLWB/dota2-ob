@@ -2,6 +2,7 @@ package insight_test
 
 import (
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +74,16 @@ func TestEvaluateLiveOnlyEmitsNoHistoryFamilies(t *testing.T) {
 	previous := completeObservation(now.Add(-time.Second))
 	previous.Evidence.Sequence = 1
 	previous.Map.RadiantScore = contracts.Present(int64(1))
+	for i := range observation.Participants {
+		if i < len(observation.Participants)/2 {
+			observation.Participants[i].TeamKey = "team2"
+			previous.Participants[i].TeamKey = "team2"
+		} else {
+			observation.Participants[i].TeamKey = "team3"
+			previous.Participants[i].TeamKey = "team3"
+		}
+	}
+	previous.Participants[0].NetWorth = contracts.Present(contracts.Decimal("4500"))
 	history := contracts.HistoryAvailabilityBindingV1{SchemaVersion: contracts.HistoryAvailabilityBindingSchemaV1, Mode: contracts.HistoryModeNoGo, TerminalOutcome: contracts.HistoricalNoGoOutcome, CodeFoundationCommit: contracts.AcceptedHistoryCodeCommit, EvidenceCommit: contracts.AcceptedHistoryEvidenceCommit, EvidenceIndexSHA256: contracts.AcceptedEvidenceIndexSHA256, ArtifactTreeSHA256: contracts.AcceptedArtifactTreeSHA256, ReplayGateAuditSHA256: contracts.AcceptedReplayGateAuditSHA256, SourceProvenanceSHA256: contracts.AcceptedSourceProvenanceSHA256, DisabledFamilies: contracts.HistoricalDisabledFamiliesV1(), TournamentScopeID: contracts.AcceptedTournamentScopeID, TournamentScopeSHA256: contracts.AcceptedTournamentScopeSHA256, Cutoff: "2026-08-12T00:00:00Z", Trailing90Start: "2026-05-14T00:00:00Z", Trailing180Start: "2026-02-13T00:00:00Z", PatchID: "60", DotaPatch: "7.41"}
 	id := history.MustContentID()
 	artifact := contracts.PolicyArtifactIdentityV2{Version: "v1", ContentSHA256: hash('9')}
@@ -87,8 +98,17 @@ func TestEvaluateLiveOnlyEmitsNoHistoryFamilies(t *testing.T) {
 	if len(first) != 1 || insight.Family(first[0].RuleVersion) != "objective" {
 		t.Fatalf("history-dependent output escaped: %#v", first)
 	}
-	if _, err := presentation.Preview("zh-CN", first[0]); err != nil {
-		t.Fatalf("live-only objective is not presentation-ready: %v", err)
+	if first[0].LocalizationKey != "insight.live_visible_change" || len(first[0].ObservedValues) != 2 || first[0].ObservedValues[0].Value != contracts.Decimal("1500") || first[0].ObservedValues[1].Value != contracts.Decimal("0") {
+		t.Fatalf("live-only visible values were not truthfully attributed: %#v", first[0])
+	}
+	claim, err := presentation.Preview("zh-CN", first[0])
+	if err != nil {
+		t.Fatalf("live-only generic claim is not presentation-ready: %v", err)
+	}
+	for _, fabricated := range []string{"防御塔", "肉山", "魔方", "拿下"} {
+		if strings.Contains(claim.Title+claim.Body, fabricated) {
+			t.Fatalf("generic live-only claim fabricated %q: %#v", fabricated, claim)
+		}
 	}
 }
 

@@ -58,6 +58,7 @@ func TestCatalogCoversEveryAudienceKeyInBothLocales(t *testing.T) {
 		"insight.economy_lead",
 		"insight.item_timing",
 		"insight.lane_checkpoint",
+		"insight.live_visible_change",
 		"insight.objective_exchange",
 		"insight.teamfight_readiness",
 	}
@@ -116,6 +117,7 @@ func TestBuildLocalizesAllTemplatesWithoutLeakingSemanticKeys(t *testing.T) {
 		{"insight.economy_lead", []contracts.TypedParameterV1{parameter("team", "team", "radiant"), parameter("net_worth_lead", "decimal", "5000")}, "天辉建立经济领先", "Radiant builds a net-worth lead"},
 		{"insight.item_timing", []contracts.TypedParameterV1{parameter("player", "player_handle", "Ame"), parameter("item", "item", "item_blink"), parameter("timing_delta_seconds", "decimal", "75")}, "Ame 的闪烁匕首", "Ame's Blink Dagger"},
 		{"insight.lane_checkpoint", []contracts.TypedParameterV1{parameter("team", "team", "dire"), parameter("checkpoint_minute", "decimal", "10"), parameter("net_worth_delta", "decimal", "1800")}, "夜魇十分钟对线检查点", "Dire 10-minute lane checkpoint"},
+		{"insight.live_visible_change", []contracts.TypedParameterV1{parameter("radiant_net_worth_delta", "decimal", "500"), parameter("dire_net_worth_delta", "decimal", "-50")}, "可见比赛状态发生变化", "Visible match state changed"},
 		{"insight.objective_exchange", []contracts.TypedParameterV1{parameter("team", "team", "radiant"), parameter("objective", "objective", "roshan"), parameter("net_worth_delta", "decimal", "2200")}, "天辉拿下肉山", "Radiant secures Roshan"},
 		{"insight.teamfight_readiness", []contracts.TypedParameterV1{parameter("team", "team", "dire"), parameter("ready_count", "decimal", "4")}, "夜魇团战资源就绪", "Dire teamfight resources ready"},
 	}

@@ -12,6 +12,7 @@ var audienceKeys = []string{
 	"insight.economy_lead",
 	"insight.item_timing",
 	"insight.lane_checkpoint",
+	"insight.live_visible_change",
 	"insight.objective_exchange",
 	"insight.teamfight_readiness",
 }
@@ -136,6 +137,7 @@ type renderValues struct {
 	player, hero, role, team, item, objective string
 	netWorthLead, checkpointMinute            string
 	netWorthDelta, timingDelta, readyCount    string
+	radiantNetWorthDelta, direNetWorthDelta   string
 }
 
 func render(locale string, candidate contracts.InsightCandidateV1) (contracts.OverlayClaimV1, error) {
@@ -173,6 +175,11 @@ func render(locale string, candidate contracts.InsightCandidateV1) (contracts.Ov
 			return contracts.OverlayClaimV1{Title: values.team + "拿下" + values.objective, Body: "本轮可见资源交换净变化 " + values.netWorthDelta + " 经济。", AssetKey: "objective"}, nil
 		}
 		return contracts.OverlayClaimV1{Title: values.team + " secures " + values.objective, Body: "Observed net change across this objective exchange: " + values.netWorthDelta + ".", AssetKey: "objective"}, nil
+	case "insight.live_visible_change":
+		if zh {
+			return contracts.OverlayClaimV1{Title: "可见比赛状态发生变化", Body: "GSI 可见经济变化：天辉 " + values.radiantNetWorthDelta + "，夜魇 " + values.direNetWorthDelta + "；不归因目标或所有者。", AssetKey: "economy"}, nil
+		}
+		return contracts.OverlayClaimV1{Title: "Visible match state changed", Body: "GSI-visible net-worth changes: Radiant " + values.radiantNetWorthDelta + ", Dire " + values.direNetWorthDelta + "; no objective or owner is attributed.", AssetKey: "economy"}, nil
 	case "insight.teamfight_readiness":
 		if zh {
 			return contracts.OverlayClaimV1{Title: values.team + "团战资源就绪", Body: values.readyCount + " 名英雄的可见关键资源已就绪；不推断战争迷雾信息。", AssetKey: "teamfight"}, nil
@@ -233,6 +240,10 @@ func readParameters(locale string, candidate contracts.InsightCandidateV1) (rend
 			values.timingDelta = value
 		case "ready_count":
 			values.readyCount = value
+		case "radiant_net_worth_delta":
+			values.radiantNetWorthDelta = value
+		case "dire_net_worth_delta":
+			values.direNetWorthDelta = value
 		}
 	}
 	return values, nil
@@ -252,6 +263,8 @@ func parameterSpec(key string) []parameterDefinition {
 		return []parameterDefinition{{"team", "team"}, {"checkpoint_minute", "decimal"}, {"net_worth_delta", "decimal"}}
 	case "insight.objective_exchange":
 		return []parameterDefinition{{"team", "team"}, {"objective", "objective"}, {"net_worth_delta", "decimal"}}
+	case "insight.live_visible_change":
+		return []parameterDefinition{{"radiant_net_worth_delta", "decimal"}, {"dire_net_worth_delta", "decimal"}}
 	case "insight.teamfight_readiness":
 		return []parameterDefinition{{"team", "team"}, {"ready_count", "decimal"}}
 	}

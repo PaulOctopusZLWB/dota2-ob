@@ -38,11 +38,13 @@ const operatorTokenFilename = "operator.token"
 func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
 
 type runDependencies struct {
-	newStore     func(string, string) (*session.Store, error)
-	newTokenFile func(string) (string, string, func(), error)
-	listen       func(string, string) (net.Listener, error)
-	runLifecycle func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
-	runDoctor    func(preflight.DoctorConfig) preflight.Result
+	newStore       func(string, string) (*session.Store, error)
+	newTokenFile   func(string) (string, string, func(), error)
+	listen         func(string, string) (net.Listener, error)
+	runLifecycle   func(lifecycle.Server, net.Listener, lifecycle.Closer, lifecycle.Waiter, <-chan os.Signal, lifecycle.ContextFactory) error
+	runDoctor      func(preflight.DoctorConfig) preflight.Result
+	now            func() time.Time
+	newBroadcastV3 func(broadcastConfigV3) (*broadcastRuntimeV3, error)
 }
 
 func defaultRunDependencies() runDependencies {
@@ -53,10 +55,12 @@ func defaultRunDependencies() runDependencies {
 			}
 			return session.NewStore(root, session.WithSessionID(sessionID))
 		},
-		newTokenFile: createEphemeralTokenFile,
-		listen:       net.Listen,
-		runLifecycle: lifecycle.Run,
-		runDoctor:    preflight.NewDoctor(preflight.Dependencies{}).Run,
+		newTokenFile:   createEphemeralTokenFile,
+		listen:         net.Listen,
+		runLifecycle:   lifecycle.Run,
+		runDoctor:      preflight.NewDoctor(preflight.Dependencies{}).Run,
+		now:            time.Now,
+		newBroadcastV3: newBroadcastRuntimeV3,
 	}
 }
 
@@ -65,6 +69,12 @@ func run(args []string, output io.Writer) int {
 }
 
 func runWithDependencies(args []string, output io.Writer, deps runDependencies) int {
+	if deps.now == nil {
+		deps.now = time.Now
+	}
+	if deps.newBroadcastV3 == nil {
+		deps.newBroadcastV3 = newBroadcastRuntimeV3
+	}
 	flags := flag.NewFlagSet("dota2-ob", flag.ContinueOnError)
 	flags.SetOutput(output)
 	addr := flags.String("addr", "127.0.0.1:43210", "HTTP listen address")
@@ -175,8 +185,8 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 			var artifacts liveOnlyPolicyArtifacts
 			artifacts, lineageErr = loadLiveOnlyPolicyArtifacts(*historyBindingFile, *liveOnlyLineageFile, *liveOnlyReleaseFile, store.SessionID())
 			if lineageErr == nil {
-				broadcast, lineageErr = newBroadcastRuntimeV3(broadcastConfigV3{
-					DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Artifacts: artifacts, Now: time.Now, ProjectionRestoreRequired: true,
+				broadcast, lineageErr = deps.newBroadcastV3(broadcastConfigV3{
+					DataRoot: *dataDir, SessionID: store.SessionID(), RawPath: store.RawPath(), Artifacts: artifacts, Now: deps.now, ProjectionRestoreRequired: true,
 				})
 			}
 		}
@@ -191,8 +201,8 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 			}
 		}()
 	}
-	now := time.Now().UTC()
-	tracker := operator.NewTracker(store.SessionID(), now, *staleThreshold, time.Now)
+	now := deps.now().UTC()
+	tracker := operator.NewTracker(store.SessionID(), now, *staleThreshold, deps.now)
 	latest := state.NewLatest()
 	profilerInstance := profile.NewProfiler()
 	analyticsEngine := analytics.NewEngine()
@@ -223,14 +233,14 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		if broadcast != nil {
 			ports = broadcast
 		} else {
-			ports, err = newFailClosedBroadcastPorts(store.SessionID(), time.Now().UTC().UnixMilli())
+			ports, err = newFailClosedBroadcastPorts(store.SessionID(), deps.now().UTC().UnixMilli())
 		}
 		var gateway http.Handler
 		gatewayErr := err
 		if gatewayErr == nil {
 			gateway, gatewayErr = delivery.NewGateway(delivery.Config{
 				BearerToken: token, AllowedOrigin: "http://" + normalizedDelivery,
-				Commands: broadcastCommandPort{ports}, Operator: broadcastOperatorPort{ports}, Overlay: broadcastOverlayPort{ports}, ReadAsset: webassets.ReadAsset, Now: time.Now,
+				Commands: broadcastCommandPort{ports}, Operator: broadcastOperatorPort{ports}, Overlay: broadcastOverlayPort{ports}, ReadAsset: webassets.ReadAsset, Now: deps.now,
 			})
 		}
 		if gatewayErr != nil {

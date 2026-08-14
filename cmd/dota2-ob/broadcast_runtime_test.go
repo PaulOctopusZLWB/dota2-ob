@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +227,38 @@ func TestProductLineageUsesAcceptedCaptureV3Identities(t *testing.T) {
 	wantProjection := sourceArtifact("gsi_projection.v3+live_observation.v1", strings.TrimPrefix(session.GSIProjectionMappingV3Identity, "sha256:"), liveMappingSourceSHA256)
 	if artifacts.projectionMapping != wantProjection {
 		t.Errorf("projection mapping identity=%#v want=%#v", artifacts.projectionMapping, wantProjection)
+	}
+}
+
+func TestSnapshotV2AcceptedCanonicalBytesAndLineageRemainPinned(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	const sessionID = "v2-regression"
+	lineage := testLineage(sessionID)
+	runtime, err := newBroadcastRuntime(broadcastConfig{DataRoot: t.TempDir(), SessionID: sessionID, RawPath: filepath.Join(t.TempDir(), "raw.jsonl"), Lineage: lineage, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	observation := testObservation(sessionID, 1, now)
+	candidate := testPresentationCandidate(observation)
+	if err := runtime.commitCandidates(observation, []contracts.InsightCandidateV1{candidate}, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	state := runtime.app.State()
+	command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "v2-regression-approve", SessionID: sessionID, Action: contracts.ActionApprove, TargetCandidateID: candidate.CandidateID, ExpectedPolicyRevision: state.PolicyRevision, PolicyTimeMS: now.UnixMilli() + 1}
+	result, err := runtime.execute(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitHashes := []string{}
+	if err := runtime.store.VisitAll(func(value commitlog.CommittedV2) error { commitHashes = append(commitHashes, value.Hash); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	candidateHash, _ := contracts.CanonicalSHA256(candidate)
+	resultHash, _ := contracts.CanonicalSHA256(result)
+	wantCommits := []string{"2d744d2178b2f9fada4eb8bd947c5a4c19dbe38359d1f260758816d6c55f8a4c", "6111c372b17d8d1b47fd1d3fd433a48ec8fd579f9ce911d134246bc9b396e7ab"}
+	if lineage.MustContentID() != "16b476e58855042ac6474a8bf75d18f3247d4a45a3d35d2267097978d36fe723" || candidate.CandidateID != "596c8f5153b9f8a9d71ab3da1ba19dff53bba2426b2cc378ad99258931f337fb" || candidateHash != "15732db121932440f9c4b6384c68695e5bb25e6f5f933ed9d49ecad78853efef" || resultHash != "7c22fbcced7e36cf6505c2adf7aae31ad53b6eaaf22e2b7d7711fa6d574d2f6e" || !slices.Equal(commitHashes, wantCommits) {
+		t.Fatalf("accepted V2 bytes changed: lineage=%s candidate_id=%s candidate=%s result=%s commits=%v", lineage.MustContentID(), candidate.CandidateID, candidateHash, resultHash, commitHashes)
 	}
 }
 

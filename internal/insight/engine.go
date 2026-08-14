@@ -120,7 +120,17 @@ func EvaluateLiveOnly(input LiveOnlyInput, config Config) []contracts.InsightCan
 	if reason := unsafeReason(o); reason != "" {
 		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", reason)}
 	}
-	results := []contracts.InsightCandidateV1{objectiveCandidate(o, input.Previous, config, input.PolicyTimeMS)}
+	candidate := objectiveCandidate(o, input.Previous, config, input.PolicyTimeMS)
+	if candidate.Availability == "available" {
+		candidate.LocalizationKey = "insight.live_visible_change"
+		candidate.ObservedValues = liveOnlyVisibleMetrics(o, *input.Previous)
+		candidate.Parameters = []contracts.TypedParameterV1{
+			decimalParameter("radiant_net_worth_delta", candidate.ObservedValues[0].Value),
+			decimalParameter("dire_net_worth_delta", candidate.ObservedValues[1].Value),
+		}
+		seal(&candidate)
+	}
+	results := []contracts.InsightCandidateV1{candidate}
 	Sort(results)
 	return results
 }
@@ -223,35 +233,29 @@ func objectiveCandidate(o contracts.LiveObservationV1, previous *contracts.LiveO
 		c.Availability = "available"
 		c.SourceRequirements = []contracts.SourceRequirementV1{{Source: "gsi", MinimumConfidence: "medium"}}
 		c.ObservedValues = objectiveMetrics(o, *previous)
-		team, objective, delta := objectivePresentation(o, *previous, c.ObservedValues)
-		c.Parameters = []contracts.TypedParameterV1{
-			typedStringParameter("team", "team", team),
-			typedStringParameter("objective", "objective", objective),
-			decimalParameter("net_worth_delta", delta),
-		}
 	}
 	seal(&c)
 	return c
 }
 
-func objectivePresentation(current, previous contracts.LiveObservationV1, metrics []contracts.ObservedMetricV1) (team, objective string, delta contracts.Decimal) {
-	team = "radiant"
-	if *current.Map.DireScore.Value != *previous.Map.DireScore.Value && *current.Map.RadiantScore.Value == *previous.Map.RadiantScore.Value {
-		team = "dire"
-	}
-	objective = "tower"
-	if *current.Roshan.State.Value != *previous.Roshan.State.Value {
-		objective = "roshan"
-	} else if *current.Tormentor.State.Value != *previous.Tormentor.State.Value {
-		objective = "tormentor"
-	}
-	wantMetric := team + "_net_worth_delta"
-	for _, metric := range metrics {
-		if metric.Name == wantMetric {
-			return team, objective, metric.Value
+// liveOnlyVisibleMetrics deliberately describes only values directly visible in
+// the two observations. GSI uses team2/team3 in captured participant records;
+// radiant/dire are accepted aliases for canonical fixtures and older sessions.
+func liveOnlyVisibleMetrics(current, previous contracts.LiveObservationV1) []contracts.ObservedMetricV1 {
+	radiant, dire := new(big.Rat), new(big.Rat)
+	for i := range current.Participants {
+		delta := new(big.Rat).Sub(decimalRat(*current.Participants[i].NetWorth.Value), decimalRat(*previous.Participants[i].NetWorth.Value))
+		switch current.Participants[i].TeamKey {
+		case "team2", "radiant":
+			radiant.Add(radiant, delta)
+		case "team3", "dire":
+			dire.Add(dire, delta)
 		}
 	}
-	return team, objective, contracts.Decimal("0")
+	return []contracts.ObservedMetricV1{
+		{Name: "radiant_net_worth_delta", Value: ratDecimal(radiant), Unit: "gold"},
+		{Name: "dire_net_worth_delta", Value: ratDecimal(dire), Unit: "gold"},
+	}
 }
 
 func readinessCandidate(o contracts.LiveObservationV1, manifest *contracts.HistoricalSnapshotManifestV1, lineage *contracts.PolicyLineageManifestV2, baselines []contracts.HistoricalBaselineV1, config Config, now int64) contracts.InsightCandidateV1 {
@@ -494,11 +498,6 @@ func baselineIdentityMatches(o contracts.LiveObservationV1, baseline contracts.H
 func stringParameter(name, value string) contracts.TypedParameterV1 {
 	copy := value
 	return contracts.TypedParameterV1{Name: name, Type: "string", StringValue: &copy}
-}
-
-func typedStringParameter(name, kind, value string) contracts.TypedParameterV1 {
-	copy := value
-	return contracts.TypedParameterV1{Name: name, Type: kind, StringValue: &copy}
 }
 
 func decimalParameter(name string, value contracts.Decimal) contracts.TypedParameterV1 {

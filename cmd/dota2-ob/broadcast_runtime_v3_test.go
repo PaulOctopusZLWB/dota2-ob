@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
@@ -150,6 +152,161 @@ func TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate(t *testing.T)
 	}
 }
 
+func TestBroadcastRuntimeV3DoesNotRewindCausalBaselineAndRestartsAtNewest(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "live-causal-baseline"
+	now := time.UnixMilli(20_000).UTC()
+	raw, err := session.NewStore(root, session.WithSessionID(sessionID), session.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := make([]contracts.LiveObservationV1, 3)
+	for i := range observations {
+		now = now.Add(time.Millisecond)
+		record, appendErr := raw.Append([]byte(`{}`))
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		observations[i], err = capture.MapLiveObservationV1(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := testLiveOnlyArtifacts(sessionID)
+	config := broadcastConfigV3{DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"), Artifacts: artifacts, Now: func() time.Time { return now }}
+	r, err := newBroadcastRuntimeV3(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observation := range observations[:2] {
+		if err := r.applyObservation(context.Background(), observation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, stale := range []contracts.LiveObservationV1{observations[1], observations[0], observations[0]} {
+		if err := r.applyObservation(context.Background(), stale); err != nil {
+			t.Fatal(err)
+		}
+		if r.previous == nil || r.previous.Evidence.Sequence != 2 {
+			t.Fatalf("stale delivery rewound baseline: %#v", r.previous)
+		}
+	}
+	if err := r.applyObservation(context.Background(), observations[2]); err != nil {
+		t.Fatal(err)
+	}
+	if r.previous == nil || r.previous.Evidence.Sequence != 3 || r.app.State().LastObservationSequence != 3 {
+		t.Fatalf("next-newer observation did not advance: %#v", r.previous)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newBroadcastRuntimeV3(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if restarted.previous == nil || restarted.previous.Evidence.Sequence != 3 {
+		t.Fatalf("restart baseline=%#v", restarted.previous)
+	}
+}
+
+func TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers(t *testing.T) {
+	fixture := readM4Schedule(t)
+	root := t.TempDir()
+	const sessionID = "live-saturation"
+	now := time.UnixMilli(30_000).UTC()
+	raw, err := session.NewStore(root, session.WithSessionID(sessionID), session.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(fixture.Updates[2].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	records := make([]*session.Record, 0, 67)
+	for i := 0; i < 67; i++ {
+		players := body["player"].(map[string]any)["team2"].(map[string]any)
+		players["player0"].(map[string]any)["net_worth"] = float64(10_000 + i*i)
+		payload, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		now = now.Add(time.Millisecond)
+		record, appendErr := raw.Append(payload)
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		records = append(records, record)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := testLiveOnlyArtifacts(sessionID)
+	policyConfig := policy.DefaultConfig()
+	policyConfig.CooldownMS = 1
+	config := broadcastConfigV3{DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"), Artifacts: artifacts, Now: func() time.Time { return now }, PolicyConfig: &policyConfig}
+	r, err := newBroadcastRuntimeV3(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, record := range records {
+		observation, mapErr := capture.MapLiveObservationV1(record)
+		if mapErr != nil {
+			t.Fatal(mapErr)
+		}
+		now = record.ReceivedAt
+		if err := r.applyObservation(context.Background(), observation); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			state := r.app.State()
+			if len(state.Preview) != 1 {
+				t.Fatalf("initial preview=%d", len(state.Preview))
+			}
+			command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "saturation-visible", SessionID: sessionID, Action: contracts.ActionApprove, TargetCandidateID: state.Preview[0].CandidateID, ExpectedPolicyRevision: state.PolicyRevision, PolicyTimeMS: now.UnixMilli()}
+			if _, err := r.execute(context.Background(), command); err != nil {
+				t.Fatal(err)
+			}
+			visible, _ := r.overlayState(context.Background())
+			if visible.Visibility != "visible" {
+				t.Fatalf("pre-saturation overlay=%#v", visible)
+			}
+		}
+	}
+	if !r.candidateSaturated {
+		last := ""
+		_ = r.store.VisitAll(func(value commitlog.CommittedV3) error {
+			if len(value.Commit.AuditEvents) > 0 {
+				last = value.Commit.AuditEvents[0].Reason
+			}
+			return nil
+		})
+		t.Fatalf("queue saturation did not latch: previews=%d last_audit=%s", len(r.app.State().Preview), last)
+	}
+	hidden, _ := r.overlayState(context.Background())
+	if hidden.Visibility != "hidden" || hidden.HealthCode != "candidate_queue_saturated" || hidden.PublicationTimeMS-records[66].ReceivedAt.UnixMilli() > 2_000 {
+		t.Fatalf("saturation hide=%#v", hidden)
+	}
+	if _, err := r.execute(context.Background(), contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "saturation-command", SessionID: sessionID, Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: r.app.State().PolicyRevision, PolicyTimeMS: now.UnixMilli()}); err == nil {
+		t.Fatal("saturated runtime accepted command")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newBroadcastRuntimeV3(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	recovered, _ := restarted.overlayState(context.Background())
+	if !restarted.candidateSaturated || recovered.Visibility != "hidden" || recovered.HealthCode != "candidate_queue_saturated" {
+		t.Fatalf("saturation recovery=%#v", recovered)
+	}
+}
+
 func testLiveOnlyArtifacts(sessionID string) liveOnlyPolicyArtifacts {
 	history := contracts.HistoryAvailabilityBindingV1{
 		SchemaVersion: contracts.HistoryAvailabilityBindingSchemaV1, Mode: contracts.HistoryModeNoGo,
@@ -161,7 +318,7 @@ func testLiveOnlyArtifacts(sessionID string) liveOnlyPolicyArtifacts {
 		Cutoff: "2026-08-12T00:00:00Z", Trailing90Start: "2026-05-14T00:00:00Z", Trailing180Start: "2026-02-13T00:00:00Z",
 		PatchID: "60", DotaPatch: "7.41",
 	}
-	local := expectedProductLineageArtifacts()
+	local := expectedProductLineageArtifactsV3()
 	bindingID := history.MustContentID()
 	lineage := contracts.PolicyLineageManifestV3{
 		SchemaVersion: contracts.PolicyLineageManifestSchemaV3, SessionID: sessionID,

@@ -17,6 +17,16 @@ type productLineageArtifacts struct {
 }
 
 func expectedProductLineageArtifacts() productLineageArtifacts {
+	// Snapshot V2 is an accepted immutable interface. Its artifact identities
+	// remain pinned to the accepted c0b328a source set even when V3 evolves.
+	const (
+		v2Catalog = "643bbab16fe6576f5be16ee0e71127a58c799730e6754b5ef99178fd91693183"
+		v2Main    = "658cc654f9284889a07dc9c49a070529283f60b013b526544fc5a3fedb503c5f"
+		v2Ports   = "238b095c9a9196feb438d3180caccf302f3eb646ecf7a21e9ee3c048ea3d3d66"
+		v2Lineage = "426f51938697789b97f7599339ba73585d3e64684a444320493b7d4a9eb5e572"
+		v2Insight = "03fe0d238c1bb1eb166414e1baa060362356fcdfe964cc968808107e63e7f55f"
+		v2Policy  = "805386b3fd50c58aa1435f791932336c6aeb40ff6d28feb1cdceeaa8d25cf6cb"
+	)
 	return productLineageArtifacts{
 		rawRecordSchema:       acceptedCaptureArtifact("raw_record.v3", session.RawRecordSchemaV3Identity),
 		rawRecordFraming:      acceptedCaptureArtifact("raw_record_framing.v3", session.RawRecordFramingV3Identity),
@@ -24,10 +34,27 @@ func expectedProductLineageArtifacts() productLineageArtifacts {
 		liveObservationSchema: sourceArtifact(contracts.LiveObservationSchemaV1, contractsSourceSHA256),
 		projectionMapping: sourceArtifact("gsi_projection.v3+live_observation.v1",
 			strings.TrimPrefix(session.GSIProjectionMappingV3Identity, "sha256:"), liveMappingSourceSHA256),
-		catalog:             sourceArtifact(presentation.CatalogVersion(), presentationCatalogSHA256),
-		terminology:         sourceArtifact(presentation.TerminologyVersion(), presentationCatalogSHA256),
-		localizationMapping: sourceArtifact("localization_parameter_mapping.v1", presentationCatalogSHA256),
-		engineBuild: sourceArtifact("dota2-ob.product.v1", productMainSourceSHA256, productPortsSourceSHA256,
+		catalog:             sourceArtifact(presentation.CatalogVersion(), v2Catalog),
+		terminology:         sourceArtifact(presentation.TerminologyVersion(), v2Catalog),
+		localizationMapping: sourceArtifact("localization_parameter_mapping.v1", v2Catalog),
+		engineBuild: sourceArtifact("dota2-ob.product.v1", v2Main, v2Ports,
+			productRecoverySourceSHA256, productRuntimeSourceSHA256, v2Lineage,
+			sessionHighWaterSourceSHA256, sessionFollowerSourceSHA256,
+			v2Insight, v2Policy, policyApplicationSourceSHA256, insight.RulesArtifact().ContentSHA256),
+	}
+}
+
+func expectedProductLineageArtifactsV3() productLineageArtifacts {
+	return productLineageArtifacts{
+		rawRecordSchema:       acceptedCaptureArtifact("raw_record.v3", session.RawRecordSchemaV3Identity),
+		rawRecordFraming:      acceptedCaptureArtifact("raw_record_framing.v3", session.RawRecordFramingV3Identity),
+		rawPayloadSchema:      acceptedCaptureArtifact("dota2_gsi.v3", session.RawPayloadSchemaV3Identity),
+		liveObservationSchema: sourceArtifact(contracts.LiveObservationSchemaV1, contractsSourceSHA256),
+		projectionMapping:     sourceArtifact("gsi_projection.v3+live_observation.v1", strings.TrimPrefix(session.GSIProjectionMappingV3Identity, "sha256:"), liveMappingSourceSHA256),
+		catalog:               sourceArtifact(presentation.CatalogVersion(), presentationCatalogSHA256),
+		terminology:           sourceArtifact(presentation.TerminologyVersion(), presentationCatalogSHA256),
+		localizationMapping:   sourceArtifact("localization_parameter_mapping.v1", presentationCatalogSHA256),
+		engineBuild: sourceArtifact("dota2-ob.product.v3", productMainSourceSHA256, productPortsSourceSHA256,
 			productRecoverySourceSHA256, productRuntimeSourceSHA256, productLineageSourceSHA256,
 			productLiveOnlySourceSHA256, productRecoveryV3SourceSHA256, productRuntimeV3SourceSHA256,
 			sessionHighWaterSourceSHA256, sessionFollowerSourceSHA256,
@@ -76,7 +103,7 @@ func matchesProductLineage(lineage contracts.PolicyLineageManifestV2, sessionID 
 }
 
 func matchesProductLineageV3(lineage contracts.PolicyLineageManifestV3, binding contracts.HistoryAvailabilityBindingV1, sessionID string) bool {
-	expected := expectedProductLineageArtifacts()
+	expected := expectedProductLineageArtifactsV3()
 	bindingID, err := binding.ContentID()
 	return err == nil && binding.Mode == contracts.HistoryModeNoGo && lineage.Validate() == nil && lineage.SessionID == sessionID &&
 		lineage.HistoryAvailabilityBindingID == bindingID && lineage.HistoryAvailabilityBindingSHA256 == bindingID &&
