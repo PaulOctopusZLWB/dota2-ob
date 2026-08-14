@@ -16,10 +16,11 @@ source-safety, or numerical-readiness requirements.
 
 - Governing program spec:
   `docs/specs/2026-08-12-ti-broadcast-analytics-program.md` at
-  `2a0dabb60f5bc57adbc93d79c055ee80b1ccab3a`, especially the frozen program
-  scope, M1, and protocols P0/P4. It already defines historical no-go as a
-  release that becomes live-only unless a separately reviewed source/scope
-  revision is accepted.
+  accepted tip `65d88a797cdcee96f9d183174979fc6a86604691`, especially the frozen
+  program scope, M1, the accepted `RawRecordV3` correction, the non-history
+  lineage/recovery requirements, M3/M4, and protocols P0/P1/P4/P5. It defines
+  historical no-go as a release that becomes live-only unless a separately
+  reviewed source/scope revision is accepted.
 - Accepted M0 base:
   `35191fe95609df52d2b387e8a79ea8c982308cac`.
 - Accepted M1 code foundation:
@@ -134,6 +135,15 @@ application synchronously validates, seals, file-syncs, atomically renames,
 parent-directory-syncs, and retains the canonical history binding and V3
 manifest with the policy log.
 
+The accepted program tip
+`65d88a797cdcee96f9d183174979fc6a86604691` is normative for this inheritance.
+Every live-only V3 lineage binds that tip's accepted `RawRecordV3`
+schema/framing identity and preserves every later non-history lineage, size,
+resource, durability, fault-injection, exact-evidence, restart/recovery, M3, and
+M4 gate. V3 changes only the versioned history-availability binding and the
+commit/checkpoint type needed to carry its lineage identity; it does not revive
+a pre-amendment raw schema or relax any later accepted gate.
+
 The corresponding versioned `PolicyCommitV3` and `PolicyCheckpointV3` carry the
 V3 manifest ID and SHA-256 on every frame. Validation, write, recovery, binding,
 or manifest-identity mismatch hides output and rejects commands without
@@ -166,6 +176,53 @@ evaluations under the unchanged protocol and must emit zero history-dependent
 candidates. The typed-unavailable fixture is not a `HistoricalBaselineV1`, and
 an empty, zero-filled, synthetic, or quarantined-data baseline never satisfies
 P1.
+
+## P5 Release-Mode Reconciliation
+
+P5 remains mandatory and is selected by release mode before the three
+full-match rehearsals begin:
+
+1. A snapshot-backed release retains the accepted protocol unchanged. Every
+   accepted update produces exactly one committed `PolicyCommitV2` terminal
+   outcome and its corresponding V2 checkpoint protocol remains authoritative.
+   Only those V2 commits enter that release's all-update denominator.
+2. A live-only release uses the accepted versioned successor semantics. Every
+   accepted update produces exactly one committed `PolicyCommitV3` terminal
+   outcome and its corresponding V3 checkpoint protocol remains authoritative.
+   Only those V3 commits enter that release's all-update denominator.
+
+The four terminal outcomes are identical in both modes: `publish`, `unchanged`,
+`suppressed`, or `hide`. One accepted update enters its release's denominator
+exactly once. A snapshot-backed rehearsal does not emit or require V3 commits; a
+live-only rehearsal does not emit or require V2 commits. Mixing V2 and V3 in one
+lineage, emitting both for one update, or using one mode's commit to satisfy the
+other mode's denominator fails P5.
+
+Both modes preserve the complete accepted P5 protocol without waiver:
+
+- Collect every accepted update across three full-match rehearsals, with at
+  least 5,000 total samples. `t0` is immediately after the complete GSI body is
+  accepted for validation.
+- For the all-update denominator, `t1` is the synchronized time of the one
+  mode-selected policy commit. For `publish`/`hide` outcomes requiring a new
+  overlay revision, `t1_overlay` is atomic gateway publication. Compute
+  nearest-rank p95 over all accepted updates for `t1 - t0` and separately over
+  the complete publication-required subset for `t1_overlay - t0`, reporting
+  numerator and denominator counts. Unmatched, `unchanged`, and `suppressed`
+  updates remain in the all-update denominator.
+- An update without its mode-selected terminal commit within 2,000 ms is
+  `unresolved`, is assigned 2,000 ms in the all-update distribution when no
+  later timestamp exists, and fails P5 regardless of percentile. A required
+  overlay revision missing or published after 2,000 ms is likewise a hard
+  failure and remains in the publication denominator with its actual latency or
+  2,000 ms lower bound. Zero unresolved updates and zero missing publications
+  are allowed.
+- Record raw append, projector dequeue, engine return, synchronized
+  mode-selected policy commit, presentation assembly, and gateway publication
+  timestamps separately. DotaTV observer delay is the only excluded stage.
+- Both nearest-rank p95 values must remain below 500 ms, and every capture,
+  fail-closed, recovery, M3/M4, and resource gate from accepted tip
+  `65d88a797cdcee96f9d183174979fc6a86604691` must pass concurrently.
 
 ## Live-Only M4/M6 And Release Binding
 
@@ -253,7 +310,7 @@ fabricated identity, or silent threshold/source relaxation.
 ## Acceptance Criteria
 
 - An independent reviewer verifies the exact successor SHA, its direct parent
-  `489583326e98e80c7beddddeffe17337c05b8ab9`, PR-head equality, and that the
+  `fdd90a05e91b1f946556627792329def108a5d36`, PR-head equality, and that the
   successor changes only this scope decision.
 - The reviewer reproduces or validates the sealed identities and terminal
   arithmetic cited above and confirms that the missing public build correlation
@@ -265,6 +322,11 @@ fabricated identity, or silent threshold/source relaxation.
   migration, P1 fixture split, and live-only release binding are canonical,
   versioned, fail closed, and explicitly gated on later implementation and
   independent review.
+- The reviewer confirms snapshot/V2 and live-only/V3 P5 denominators are
+  disjoint, mode-selected, and otherwise preserve every accepted P5 outcome,
+  boundary, sample, latency, resource, and unresolved-update rule, and that V3
+  inherits the complete non-history requirements of accepted program tip
+  `65d88a797cdcee96f9d183174979fc6a86604691`.
 - The reviewer ends with either `accept_historical_no_go_live_only_scope` or
   `reject_with_blockers` and distinguishes blockers from residual limitations.
 - G胖 records the accepted successor SHA, reviewer comment, coordinator
@@ -275,9 +337,9 @@ fabricated identity, or silent threshold/source relaxation.
 
 ```sh
 git rev-parse HEAD^
-git diff --check 489583326e98e80c7beddddeffe17337c05b8ab9..HEAD
-git diff --name-only 489583326e98e80c7beddddeffe17337c05b8ab9..HEAD
-git merge-base --is-ancestor 489583326e98e80c7beddddeffe17337c05b8ab9 HEAD
+git diff --check fdd90a05e91b1f946556627792329def108a5d36..HEAD
+git diff --name-only fdd90a05e91b1f946556627792329def108a5d36..HEAD
+git merge-base --is-ancestor fdd90a05e91b1f946556627792329def108a5d36 HEAD
 go test -count=1 ./...
 go vet ./...
 go build ./...
