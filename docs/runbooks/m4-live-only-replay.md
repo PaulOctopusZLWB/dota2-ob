@@ -26,7 +26,7 @@ The sanitized fixture is
 `internal/integration/m4/testdata/captured_gsi_schedule.json`:
 
 - fixture SHA-256: `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`
-- canonical production-composition golden SHA-256: `7999ad212871750a97c707265757d180006b58879a8d8d455c7bee36b60cd56e`
+- canonical production-composition golden SHA-256: `1d5b62da1e9f2ef61ec99f9de61a1614a22b832fb9b70647378e7bcd50c525ca`
 - no account ID, Steam ID, player handle, token, or other private identifier is present
 
 The test starts the real product composition through `runWithDependencies`,
@@ -37,17 +37,28 @@ commit log or construct a policy application directly. The raw V3 append
 acknowledges before asynchronous projection. The live-only evaluator emits a
 truthfully generic visible-state-change claim: it maps captured `team2` and
 `team3` values to Radiant and Dire economy deltas, but never attributes a tower,
-Roshan, Tormentor, or taking team without a stable captured identifier. A second
-startup on the same root proves replay verification, restore-barrier behavior,
-and visible-state rebuild. Two independent clean roots must produce identical
-canonical bytes.
+Roshan, Tormentor, or taking team without a stable captured identifier. The
+lifecycle path executes the real drain/wait/raw-close sequence before each
+same-root reopen. Two restart passes cover partial raw and policy tails,
+missing/corrupt caches, cursor loss, equality/older replay without a baseline
+rewind, the next newer delayed/older-source observation, and hidden-state
+rebuild. Two independent clean roots must produce identical canonical bytes.
+
+Snapshot V2 provenance is isolated in the compiled
+`internal/snapshotv2/reference` semantic artifact. Runtime code recomputes its
+embedded digests before deriving the accepted V2 catalog and EngineBuild
+identity. Current V3 source hashes remain separately recomputed from the files
+compiled into the current product. The accepted base regression continues to
+pin V2 lineage, candidate, command result, durable commit bytes, content IDs,
+recovery, and behavior.
 
 Clocks are separate and fixture-owned:
 
 - `received_at` drives local raw receipt/evidence time;
 - map `clock_time` and `game_time` remain source game clocks;
 - `policy_time_ms` drives policy causality;
-- command times drive approval/rejection/publication;
+- command times drive approval and stale-revision rejection;
+- display/publication time has an independent injected clock;
 - overlay publication time is at least the corresponding decision time;
 - DotaTV delay is not synthesized and authorizes no claim.
 
@@ -57,17 +68,17 @@ Run the deterministic candidate with:
 go test -count=2 ./cmd/dota2-ob ./internal/integration/m4
 ```
 
-The schedule covers live candidate suppression, a truthfully attributed
-nonzero `team2` economy delta, approval/publish, paused-input suppression,
-durable audit ordering, restart, and visible-state rebuild. Focused V3 tests
-also pin equality/older/retry causal-baseline handling, the next-newer delivery,
-restart baseline recovery, and capacity-64 queue saturation. Saturation latches
-`candidate_queue_saturated`, hides immediately (inside the accepted two-second
-bound), rejects commands, preserves the already-accepted raw stream, and
-recovers hidden without transient republication. The broader component and
-product-startup matrices retain malformed/oversize input, raw tail/cursor,
-projection bounds, policy frame/checkpoint, synchronized append failure,
-gateway ordering/body limits, and browser/OBS disconnect coverage.
+The golden freezes ordered raw and observation hashes, complete candidates,
+terminal V3 commits/outcomes/audits, command results, operator and overlay
+states, clock evidence, restart baselines, and presentation/audit/gateway fault
+states. The product path covers exact 10 MiB capture, malformed and oversize
+input, missing/substituted binding with healthy raw capture, partial-tail and
+cache recovery, cursor loss, duplicate and stale-revision commands, real
+browser/OBS asset reload, capacity-one high-water coalescing, and capacity-64
+saturation. Saturation hides inside two seconds and three further raw updates
+prove no transient republication. Component boundary tests retain the exact 1
+MiB observation and 64 KiB candidate/overlay contract proofs and delayed
+gateway ordering; the product harness freezes their port and health outcomes.
 
 ## Verification
 
@@ -76,7 +87,7 @@ git merge-base --is-ancestor c0b328a95b225e68771adeb4d927b54a90c79a1e HEAD
 git merge-base --is-ancestor cf20368430d46ad395127609eb7eb9609422aaa8 HEAD
 git diff --check c0b328a95b225e68771adeb4d927b54a90c79a1e..HEAD
 go test -count=2 ./cmd/dota2-ob ./internal/integration/m4
-go test -count=2 ./cmd/dota2-ob -run 'TestSnapshotV2AcceptedCanonicalBytesAndLineageRemainPinned|TestBroadcastRuntimeV3DoesNotRewindCausalBaselineAndRestartsAtNewest|TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers|TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts'
+go test -count=2 ./internal/snapshotv2 ./cmd/dota2-ob -run 'TestEmbeddedReference|TestSnapshotV2AcceptedCanonicalBytesAndLineageRemainPinned|TestBroadcastRuntimeV3DoesNotRewindCausalBaselineAndRestartsAtNewest|TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers|TestM4'
 go test -count=1 ./...
 CGO_ENABLED=1 CC="zig cc" go test -race -timeout 30m -count=1 ./...
 go vet ./...
