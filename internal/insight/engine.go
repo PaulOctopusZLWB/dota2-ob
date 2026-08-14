@@ -89,6 +89,42 @@ type Input struct {
 	PolicyTimeMS int64
 }
 
+// LiveOnlyInput makes unavailable history a typed, validated condition. It
+// deliberately has no snapshot or baseline field.
+type LiveOnlyInput struct {
+	Observation  contracts.LiveObservationV1
+	Previous     *contracts.LiveObservationV1
+	History      contracts.HistoryAvailabilityBindingV1
+	Lineage      contracts.PolicyLineageManifestV3
+	PolicyTimeMS int64
+}
+
+// EvaluateLiveOnly emits only source-faithful non-history rules. Historical
+// families are absent, rather than represented by fabricated zero baselines or
+// history-dependent suppressed candidates.
+func EvaluateLiveOnly(input LiveOnlyInput, config Config) []contracts.InsightCandidateV1 {
+	config = normalizeConfig(config)
+	o := input.Observation
+	bindingID, historyErr := input.History.ContentID()
+	lineageID, lineageErr := input.Lineage.ContentID()
+	_ = lineageID
+	if historyErr != nil || lineageErr != nil || input.History.Mode != contracts.HistoryModeNoGo ||
+		input.Lineage.SessionID != o.Evidence.SessionID || input.Lineage.HistoryAvailabilityBindingID != bindingID ||
+		input.Lineage.HistoryAvailabilityBindingSHA256 != bindingID || input.Lineage.Config != ConfigArtifact(config) ||
+		input.Lineage.Rules != RulesArtifact() {
+		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", "invalid_live_only_binding")}
+	}
+	if config.MaximumLiveAgeMS > 0 && input.PolicyTimeMS-o.Evidence.ReceiveTime.UnixMilli() > config.MaximumLiveAgeMS {
+		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", "stale_live_input")}
+	}
+	if reason := unsafeReason(o); reason != "" {
+		return []contracts.InsightCandidateV1{suppress(o, config, input.PolicyTimeMS, "live.suppressed.v1", reason)}
+	}
+	results := []contracts.InsightCandidateV1{objectiveCandidate(o, input.Previous, config, input.PolicyTimeMS)}
+	Sort(results)
+	return results
+}
+
 func Family(ruleVersion string) string {
 	if i := strings.IndexByte(ruleVersion, '.'); i >= 0 {
 		return ruleVersion[:i]

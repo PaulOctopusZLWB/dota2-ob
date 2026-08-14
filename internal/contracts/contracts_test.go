@@ -35,6 +35,12 @@ func TestGoldenContractsStrictRoundTrip(t *testing.T) {
 		{"policy_lineage_manifest_v2.json", func() contracts.Contract { return &contracts.PolicyLineageManifestV2{} }},
 		{"policy_commit_v2.json", func() contracts.Contract { return &contracts.PolicyCommitV2{} }},
 		{"policy_checkpoint_v2.json", func() contracts.Contract { return &contracts.PolicyCheckpointV2{} }},
+		{"history_availability_binding_v1.json", func() contracts.Contract { return &contracts.HistoryAvailabilityBindingV1{} }},
+		{"policy_lineage_manifest_v3.json", func() contracts.Contract { return &contracts.PolicyLineageManifestV3{} }},
+		{"policy_commit_v3.json", func() contracts.Contract { return &contracts.PolicyCommitV3{} }},
+		{"policy_checkpoint_v3.json", func() contracts.Contract { return &contracts.PolicyCheckpointV3{} }},
+		{"historical_unavailable_fixture_v1.json", func() contracts.Contract { return &contracts.HistoricalUnavailableFixtureV1{} }},
+		{"live_only_release_binding_v1.json", func() contracts.Contract { return &contracts.LiveOnlyReleaseBindingV1{} }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
