@@ -46,6 +46,7 @@ type Server struct {
 	projectorDone       chan error
 	projectionDrain     time.Duration
 	projectionOverrides []liveprojection.Projection
+	projectionOptions   []liveprojection.Option
 }
 
 type Option func(*Server)
@@ -119,6 +120,18 @@ func WithLiveProjections(projections ...liveprojection.Projection) Option {
 	}
 }
 
+func WithProjectionStartupBarrier(barrier liveprojection.StartupPublicationBarrier) Option {
+	return func(server *Server) {
+		server.projectionOptions = append(server.projectionOptions, liveprojection.WithStartupBarrier(barrier))
+	}
+}
+
+func WithProjectionRejectionHealthSink(sink liveprojection.RejectionHealthSink) Option {
+	return func(server *Server) {
+		server.projectionOptions = append(server.projectionOptions, liveprojection.WithRejectionHealthSink(sink))
+	}
+}
+
 func WithProjectionDrainTimeout(timeout time.Duration) Option {
 	return func(server *Server) {
 		if timeout > 0 {
@@ -155,8 +168,9 @@ func NewServer(store *session.Store, opts ...Option) *Server {
 	if server.projectionOverrides != nil {
 		projections = server.projectionOverrides
 	}
-	if len(projections) > 0 {
-		server.projector = liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "live_projection_cursor.json"), projections, liveprojection.WithHighWater(store.HighWater()))
+	if len(projections) > 0 || len(server.projectionOptions) > 0 {
+		projectorOptions := append([]liveprojection.Option{liveprojection.WithHighWater(store.HighWater())}, server.projectionOptions...)
+		server.projector = liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "live_projection_cursor.json"), projections, projectorOptions...)
 		projectorContext, cancel := context.WithCancel(context.Background())
 		server.projectorCancel = cancel
 		server.projectorDone = make(chan error, 1)
