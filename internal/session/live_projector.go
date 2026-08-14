@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -489,15 +488,14 @@ func (f *LiveFollower) scanRange(from, through uint64, apply func(*Record, int64
 // StreamRecords decodes and validates one bounded raw frame at a time. The
 // record and its exact raw bytes are owned only for the duration of apply.
 func StreamRecords(rawPath, sessionID string, apply func(*Record) error) error {
-	if !rawPathIsV3(rawPath) {
+	version, err := detectRawSchemaVersion(rawPath)
+	if err != nil {
+		return fmt.Errorf("detect raw schema: %w", err)
+	}
+	if version != 3 {
 		return scanLegacyRecords(rawPath, sessionID, apply)
 	}
 	return scanRecordRange(rawPath, sessionID, 1, 0, false, apply)
-}
-
-func rawPathIsV3(path string) bool {
-	version, err := detectRawSchemaVersion(path)
-	return err == nil && version == 3
 }
 
 func scanLegacyRecords(rawPath, sessionID string, apply func(*Record) error) error {
@@ -724,115 +722,47 @@ func detectRawSchemaVersion(path string) (int, error) {
 	return detectSchemaVersion(bufio.NewReaderSize(file, 64*1024))
 }
 
-// detectSchemaVersion streams the first top-level object without retaining
-// member values. It is deliberately independent of member order so an invalid
-// V3 frame cannot select the larger legacy accumulation limit.
-func detectSchemaVersion(reader *bufio.Reader) (int, error) {
-	depth := 0
-	inString, escaped, capturingKey := false, false, false
-	expectingKey, expectingColon := false, false
-	key := make([]byte, 0, len("schema_version"))
-	matchedKey := false
-	value := make([]byte, 0, 16)
-	readingVersion := false
-	read := 0
-	for {
-		b, err := reader.ReadByte()
-		if err != nil {
-			if err == io.EOF {
-				return 1, nil
-			}
-			return 0, err
-		}
-		read++
-		if read > maxLegacyFrameBytes {
-			return 0, errors.New("raw frame exceeds bounded limit")
-		}
-		if readingVersion {
-			if len(value) == 0 && (b == ' ' || b == '\t' || b == '\r' || b == '\n') {
-				continue
-			}
-			if b == ',' || b == '}' || b == ' ' || b == '\t' || b == '\r' || b == '\n' {
-				parsed, parseErr := strconv.ParseFloat(string(value), 64)
-				if parseErr == nil && parsed == 3 {
-					return 3, nil
-				}
-				return 2, nil
-			}
-			if len(value) < 32 {
-				value = append(value, b)
-			}
-			continue
-		}
-		if inString {
-			if escaped {
-				escaped = false
-				if capturingKey && len(key) <= len("schema_version") {
-					key = append(key, b)
-				}
-				continue
-			}
-			if b == '\\' {
-				escaped = true
-				continue
-			}
-			if b == '"' {
-				inString = false
-				if capturingKey {
-					expectingKey = false
-					expectingColon = true
-					matchedKey = string(key) == "schema_version"
-					capturingKey = false
-				}
-				continue
-			}
-			if capturingKey && len(key) <= len("schema_version") {
-				key = append(key, b)
-			}
-			continue
-		}
-		if expectingColon {
-			if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
-				continue
-			}
-			if b == ':' {
-				expectingColon = false
-				if matchedKey {
-					readingVersion = true
-				}
-				continue
-			}
-			return 1, nil
-		}
-		switch b {
-		case '"':
-			inString = true
-			capturingKey = depth == 1 && expectingKey
-			if capturingKey {
-				key = key[:0]
-			}
-		case '{':
-			depth++
-			if depth == 1 {
-				expectingKey = true
-			}
-		case '[':
-			depth++
-		case '}', ']':
-			depth--
-			if depth <= 0 {
-				return 1, nil
-			}
-		case ',':
-			if depth == 1 {
-				expectingKey = true
-			}
-		case '\n':
-			if depth == 0 {
-				return 1, nil
-			}
-		}
+type schemaProbeTail struct {
+	last byte
+	set  bool
+}
+
+func (tail *schemaProbeTail) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		tail.last = p[len(p)-1]
+		tail.set = true
 	}
+	return len(p), nil
+}
+
+// detectSchemaVersion uses the same encoding/json field semantics as the
+// authoritative persisted-record header decode: JSON string unescaping and
+// duplicate-key last-wins behavior. Only a complete record that fits inside
+// the V3 formula bound can opt into legacy framing. Invalid, incomplete, or
+// over-bound candidates remain V3-bounded and fail closed.
+func detectSchemaVersion(reader *bufio.Reader) (int, error) {
+	tail := &schemaProbeTail{}
+	limited := &io.LimitedReader{R: io.TeeReader(reader, tail), N: int64(maxEncodedRecordBytes) + 1}
+	decoder := json.NewDecoder(limited)
+	var frame json.RawMessage
+	err := decoder.Decode(&frame)
+	if err == io.EOF {
+		return 1, nil
+	}
+	if err != nil {
+		if limited.N == 0 && (!tail.set || tail.last != '\n') {
+			return 0, errors.New("V3 frame exceeds encoded limit")
+		}
+		return 3, nil
+	}
+	if len(frame) > maxEncodedRecordBytes {
+		return 0, errors.New("V3 frame exceeds encoded limit")
+	}
+	schemaVersion, err := persistedSchemaVersion(frame)
+	if err != nil {
+		return 3, nil
+	}
+	return persistedFramingVersion(schemaVersion), nil
 }
 
 func readBoundedLine(reader *bufio.Reader, maxFrameBytes int, message string) ([]byte, bool, error) {

@@ -905,6 +905,59 @@ func TestFollowerCorruptFutureAuthorityRebuildsAtomicallyAndRetriesIdempotently(
 	}
 }
 
+func TestFollowerUsesFormulaLimitAtStartupAndLiveCatchUp(t *testing.T) {
+	prefix := []byte(`{"schema\u005fversion":3,`)
+	for _, tc := range []struct {
+		name      string
+		bytes     int
+		wantError string
+	}{
+		{"exact", session.MaxEncodedRecordBytes(), "unexpected end of JSON input"},
+		{"plus-one", session.MaxEncodedRecordBytes() + 1, "V3 frame exceeds encoded limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frame := append([]byte(nil), prefix...)
+			frame = append(frame, bytes.Repeat([]byte{' '}, tc.bytes-len(prefix))...)
+			frame = append(frame, '\n')
+
+			t.Run("startup", func(t *testing.T) {
+				root := t.TempDir()
+				rawPath := filepath.Join(root, "raw.jsonl")
+				if err := os.WriteFile(rawPath, frame, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				follower := liveprojection.New("startup-limit", rawPath, filepath.Join(root, "cursor.json"), nil)
+				if err := follower.CatchUp(context.Background(), 1); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("startup error=%v", err)
+				}
+			})
+
+			t.Run("live-suffix", func(t *testing.T) {
+				root := t.TempDir()
+				store := appendRecords(t, root, "live-limit", 1)
+				follower := liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "cursor.json"), nil)
+				if err := follower.CatchUp(context.Background(), 1); err != nil {
+					t.Fatal(err)
+				}
+				file, err := os.OpenFile(store.RawPath(), os.O_APPEND|os.O_WRONLY, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := file.Write(frame); err != nil {
+					_ = file.Close()
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := follower.CatchUp(context.Background(), 2); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("live suffix error=%v", err)
+				}
+			})
+		})
+	}
+}
+
 var _ io.Writer = cursorFaultFile{}
 
 func appendRecordsUsing(t *testing.T, store *session.Store, count int) {

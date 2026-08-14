@@ -343,47 +343,65 @@ func recoverRawFile(path, sessionID string) (uint64, int, error) {
 	return sequence, version, nil
 }
 
-func validatePersistedRecord(line []byte, sessionID string, sequence uint64) error {
+func persistedSchemaVersion(line []byte) (json.RawMessage, error) {
 	var header struct {
 		SchemaVersion json.RawMessage `json:"schema_version"`
-		SessionID     string          `json:"session_id"`
-		Sequence      uint64          `json:"sequence"`
-		Source        string          `json:"source"`
-		ReceivedAt    time.Time       `json:"received_at"`
-		Payload       json.RawMessage `json:"payload"`
-		Raw           json.RawMessage `json:"raw"`
+	}
+	if err := json.Unmarshal(line, &header); err != nil {
+		return nil, err
+	}
+	return header.SchemaVersion, nil
+}
+
+func persistedFramingVersion(schemaVersion json.RawMessage) int {
+	switch string(schemaVersion) {
+	case "":
+		return 1
+	case "2":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func validatePersistedRecord(line []byte, schemaVersion json.RawMessage, sessionID string, sequence uint64) error {
+	var header struct {
+		SessionID  string          `json:"session_id"`
+		Sequence   uint64          `json:"sequence"`
+		Source     string          `json:"source"`
+		ReceivedAt time.Time       `json:"received_at"`
+		Payload    json.RawMessage `json:"payload"`
+		Raw        json.RawMessage `json:"raw"`
 	}
 	if err := json.Unmarshal(line, &header); err != nil {
 		return err
 	}
-	if len(header.SchemaVersion) == 0 {
+	if len(schemaVersion) == 0 {
 		if header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 			return errors.New("invalid v1 record")
 		}
 		return validateSemanticRaw(header.Payload, header.Raw)
 	}
 	var version int
-	if string(header.SchemaVersion) == "3" {
+	if string(schemaVersion) == "3" {
 		_, err := DecodeRecordV3(line, sessionID, sequence)
 		return err
 	}
-	if string(header.SchemaVersion) == "null" || json.Unmarshal(header.SchemaVersion, &version) != nil || version != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
+	if string(schemaVersion) == "null" || json.Unmarshal(schemaVersion, &version) != nil || version != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 		return errors.New("invalid v2 record")
 	}
 	return validateSemanticRaw(header.Payload, header.Raw)
 }
 
 func decodePersistedRecord(line []byte, sessionID string, sequence uint64) (*Record, error) {
-	var versionHeader struct {
-		SchemaVersion json.RawMessage `json:"schema_version"`
-	}
-	if err := json.Unmarshal(line, &versionHeader); err != nil {
+	schemaVersion, err := persistedSchemaVersion(line)
+	if err != nil {
 		return nil, err
 	}
-	if string(versionHeader.SchemaVersion) == "3" {
+	if string(schemaVersion) == "3" {
 		return DecodeRecordV3(line, sessionID, sequence)
 	}
-	if err := validatePersistedRecord(line, sessionID, sequence); err != nil {
+	if err := validatePersistedRecord(line, schemaVersion, sessionID, sequence); err != nil {
 		return nil, err
 	}
 	var record Record
@@ -392,7 +410,7 @@ func decodePersistedRecord(line []byte, sessionID string, sequence uint64) (*Rec
 	if err := decoder.Decode(&record); err != nil {
 		return nil, err
 	}
-	if len(versionHeader.SchemaVersion) == 0 {
+	if len(schemaVersion) == 0 {
 		record.SchemaVersion = 1
 		record.SessionID = sessionID
 		record.Sequence = sequence

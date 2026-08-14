@@ -123,6 +123,13 @@ func TestV3ReadersRejectTerminatedFrameAtFormulaLimitBeforeLegacyCap(t *testing.
 	lateOrdered := lateHead + strings.Repeat("x", session.MaxEncodedRecordBytes()+1-len(lateHead)-len(lateTail)) + lateTail
 	for _, tc := range []struct{ name, prefix string }{
 		{"canonical", `{"schema_version":3,`},
+		{"escaped-schema-key", `{"schema\u005fversion":3,`},
+		{"duplicate-last-v3", `{"schema_version":2,"schema_version":3,`},
+		{"duplicate-last-v2-ambiguous", `{"schema_version":3,"schema_version":2,`},
+		{"mixed-literal-escaped-last-v3", `{"schema_version":2,"schema\u005fversion":3,`},
+		{"mixed-escaped-literal-last-v2", `{"schema\u005fversion":3,"schema_version":2,`},
+		{"nested-decoy", `{"unknown":{"schema_version":2},"schema\u005fversion":3,`},
+		{"malformed-key-escape", `{"schema\u00zzversion":3,`},
 		{"noncanonical-number", ` { "schema_version" : 3.0,`},
 		{"session-first", `{"session_id":"overlimit","schema_version":3,`},
 		{"nested-unknown-first", `{"unknown":{"nested":true},"schema_version":3,`},
@@ -145,6 +152,38 @@ func TestV3ReadersRejectTerminatedFrameAtFormulaLimitBeforeLegacyCap(t *testing.
 				t.Fatalf("store recovery error=%v", err)
 			}
 			if err := session.StreamRecords(path, "overlimit", func(*session.Record) error { return nil }); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("offline reader error=%v", err)
+			}
+		})
+	}
+}
+
+func TestV3ReadersDistinguishExactFormulaBoundaryFromPlusOne(t *testing.T) {
+	prefix := `{"schema\u005fversion":3,`
+	for _, tc := range []struct {
+		name      string
+		bytes     int
+		wantError string
+	}{
+		{"exact", session.MaxEncodedRecordBytes(), "unexpected end of JSON input"},
+		{"plus-one", session.MaxEncodedRecordBytes() + 1, "V3 frame exceeds encoded limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "boundary")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			frame := append([]byte(prefix), bytes.Repeat([]byte{' '}, tc.bytes-len(prefix))...)
+			frame = append(frame, '\n')
+			path := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(path, frame, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := session.NewStore(root, session.WithSessionID("boundary")); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("store recovery error=%v", err)
+			}
+			if err := session.StreamRecords(path, "boundary", func(*session.Record) error { return nil }); err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("offline reader error=%v", err)
 			}
 		})
