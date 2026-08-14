@@ -348,6 +348,57 @@ func TestFollowerReplaysAcceptedLegacyRawEnvelope(t *testing.T) {
 	}
 }
 
+func TestFollowerReplaysLargeLegacyBelowPreservedCap(t *testing.T) {
+	const reviewerV2Size = 14_680_223
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "large-legacy")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			frame := largeLegacyFollowerFrame(t, version, reviewerV2Size)
+			rawPath := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(rawPath, frame, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			projection := &recordingProjection{}
+			follower := liveprojection.New("large-legacy", rawPath, filepath.Join(dir, "cursor.json"), []liveprojection.Projection{projection})
+			if err := follower.CatchUp(context.Background(), 1); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(projection.sequences, []uint64{1}) {
+				t.Fatalf("legacy replay=%v", projection.sequences)
+			}
+		})
+	}
+}
+
+func largeLegacyFollowerFrame(t *testing.T, version, target int) []byte {
+	t.Helper()
+	payloadPrefix, payloadSuffix := `{"padding":"`, `","slash":"/"}`
+	rawPrefix, rawSuffix := `{"padding":"`, `","slash":"\/"}`
+	header := `{"received_at":"2026-08-05T12:00:00Z","payload":`
+	if version == 2 {
+		header = `{"schema_version":2,"session_id":"large-legacy","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":`
+	}
+	base := header + payloadPrefix + payloadSuffix + `,"raw":` + rawPrefix + rawSuffix + "}\n"
+	remaining := target - len(base)
+	if remaining < 0 {
+		t.Fatalf("target %d below base %d", target, len(base))
+	}
+	filler := strings.Repeat("x", remaining/2)
+	frame := header + payloadPrefix + filler + payloadSuffix + `,"raw":` + rawPrefix + filler + rawSuffix + "}"
+	if remaining%2 != 0 {
+		frame += " "
+	}
+	frame += "\n"
+	if len(frame) != target {
+		t.Fatalf("legacy fixture size=%d want=%d", len(frame), target)
+	}
+	return []byte(frame)
+}
+
 func TestFollowerRunDrainsCoalescedHighWaterAndStopsBoundedly(t *testing.T) {
 	root := t.TempDir()
 	wake := session.NewHighWater("run", 0)
@@ -919,43 +970,65 @@ func TestFollowerUsesFormulaLimitAtStartupAndLiveCatchUp(t *testing.T) {
 			frame := append([]byte(nil), prefix...)
 			frame = append(frame, bytes.Repeat([]byte{' '}, tc.bytes-len(prefix))...)
 			frame = append(frame, '\n')
-
-			t.Run("startup", func(t *testing.T) {
-				root := t.TempDir()
-				rawPath := filepath.Join(root, "raw.jsonl")
-				if err := os.WriteFile(rawPath, frame, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				follower := liveprojection.New("startup-limit", rawPath, filepath.Join(root, "cursor.json"), nil)
-				if err := follower.CatchUp(context.Background(), 1); err == nil || !strings.Contains(err.Error(), tc.wantError) {
-					t.Fatalf("startup error=%v", err)
-				}
-			})
-
-			t.Run("live-suffix", func(t *testing.T) {
-				root := t.TempDir()
-				store := appendRecords(t, root, "live-limit", 1)
-				follower := liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "cursor.json"), nil)
-				if err := follower.CatchUp(context.Background(), 1); err != nil {
-					t.Fatal(err)
-				}
-				file, err := os.OpenFile(store.RawPath(), os.O_APPEND|os.O_WRONLY, 0o600)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := file.Write(frame); err != nil {
-					_ = file.Close()
-					t.Fatal(err)
-				}
-				if err := file.Close(); err != nil {
-					t.Fatal(err)
-				}
-				if err := follower.CatchUp(context.Background(), 2); err == nil || !strings.Contains(err.Error(), tc.wantError) {
-					t.Fatalf("live suffix error=%v", err)
-				}
-			})
+			assertFollowerFramingFailure(t, frame, tc.wantError)
 		})
 	}
+}
+
+func TestFollowerRejectsUnresolvedCandidatesAtFormulaLimit(t *testing.T) {
+	for _, prefix := range []string{
+		"null", "[]", "1", `"scalar"`, "{}",
+		`{"received_at":null,"payload":null,"raw":null}`,
+		`{"schema_version":2,"session_id":null,"sequence":null,"received_at":null,"source":null,"payload":null,"raw":null}`,
+		`{"schema_version":2,"schema_version":3,`,
+		`{"schema_version":3,"schema_version":2,`,
+		`{"schema_version":2,"schema\u005fversion":3,`,
+		`{"schema\u005fversion":3,"schema_version":2,`,
+	} {
+		t.Run(prefix, func(t *testing.T) {
+			frame := append([]byte(prefix), bytes.Repeat([]byte{' '}, session.MaxEncodedRecordBytes()+1-len(prefix))...)
+			frame = append(frame, '\n')
+			assertFollowerFramingFailure(t, frame, "V3 frame exceeds encoded limit")
+		})
+	}
+}
+
+func assertFollowerFramingFailure(t *testing.T, frame []byte, wantError string) {
+	t.Helper()
+	t.Run("startup", func(t *testing.T) {
+		root := t.TempDir()
+		rawPath := filepath.Join(root, "raw.jsonl")
+		if err := os.WriteFile(rawPath, frame, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		follower := liveprojection.New("startup-limit", rawPath, filepath.Join(root, "cursor.json"), nil)
+		if err := follower.CatchUp(context.Background(), 1); err == nil || !strings.Contains(err.Error(), wantError) {
+			t.Fatalf("startup error=%v", err)
+		}
+	})
+
+	t.Run("live-suffix", func(t *testing.T) {
+		root := t.TempDir()
+		store := appendRecords(t, root, "live-limit", 1)
+		follower := liveprojection.New(store.SessionID(), store.RawPath(), filepath.Join(store.SessionDir(), "cursor.json"), nil)
+		if err := follower.CatchUp(context.Background(), 1); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.OpenFile(store.RawPath(), os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write(frame); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := follower.CatchUp(context.Background(), 2); err == nil || !strings.Contains(err.Error(), wantError) {
+			t.Fatalf("live suffix error=%v", err)
+		}
+	})
 }
 
 var _ io.Writer = cursorFaultFile{}

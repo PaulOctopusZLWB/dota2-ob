@@ -659,6 +659,14 @@ func scanRecordRange(rawPath, sessionID string, from, through uint64, requireThr
 }
 
 func scanV3RecordRange(rawPath, sessionID string, startOffset int64, from, through uint64, chain [sha256.Size]byte, apply func(*Record, int64, [sha256.Size]byte) error) error {
+	framingVersion := 3
+	if startOffset == 0 {
+		var err error
+		framingVersion, err = detectRawSchemaVersion(rawPath)
+		if err != nil {
+			return fmt.Errorf("detect raw schema: %w", err)
+		}
+	}
 	file, err := os.Open(rawPath)
 	if err != nil {
 		return fmt.Errorf("open raw log: %w", err)
@@ -674,7 +682,7 @@ func scanV3RecordRange(rawPath, sessionID string, startOffset int64, from, throu
 		_ = os.Remove(rawAuthorityPath(rawPath))
 	}
 	for want <= through {
-		line, terminated, err := readPersistedLine(reader, 3)
+		line, terminated, err := readPersistedLine(reader, framingVersion)
 		if err == io.EOF && len(line) == 0 {
 			return fmt.Errorf("raw sequence %d is not committed", want)
 		}
@@ -722,47 +730,146 @@ func detectRawSchemaVersion(path string) (int, error) {
 	return detectSchemaVersion(bufio.NewReaderSize(file, 64*1024))
 }
 
-type schemaProbeTail struct {
-	last byte
-	set  bool
-}
-
-func (tail *schemaProbeTail) Write(p []byte) (int, error) {
-	if len(p) > 0 {
-		tail.last = p[len(p)-1]
-		tail.set = true
-	}
-	return len(p), nil
-}
-
 // detectSchemaVersion uses the same encoding/json field semantics as the
 // authoritative persisted-record header decode: JSON string unescaping and
-// duplicate-key last-wins behavior. Only a complete record that fits inside
-// the V3 formula bound can opt into legacy framing. Invalid, incomplete, or
-// over-bound candidates remain V3-bounded and fail closed.
+// duplicate-key last-wins behavior. It retains only the final schema value and
+// required legacy-member presence while scanning at most the legacy cap. Only
+// a complete supported V1/V2 object opts into legacy framing; every unresolved
+// result remains V3-bounded when the caller reads the record.
 func detectSchemaVersion(reader *bufio.Reader) (int, error) {
-	tail := &schemaProbeTail{}
-	limited := &io.LimitedReader{R: io.TeeReader(reader, tail), N: int64(maxEncodedRecordBytes) + 1}
+	limited := &io.LimitedReader{R: reader, N: int64(maxLegacyFrameBytes) + 1}
 	decoder := json.NewDecoder(limited)
-	var frame json.RawMessage
-	err := decoder.Decode(&frame)
+	decoder.UseNumber()
+	first, err := decoder.Token()
 	if err == io.EOF {
 		return 1, nil
 	}
 	if err != nil {
-		if limited.N == 0 && (!tail.set || tail.last != '\n') {
-			return 0, errors.New("V3 frame exceeds encoded limit")
+		return schemaProbeFailure(limited)
+	}
+	if delim, ok := first.(json.Delim); !ok || delim != '{' {
+		return 3, nil
+	}
+	var schemaVersion json.RawMessage
+	var schemaSeen, schemaBeforeFormula, schemaAfterFormula bool
+	var receivedAt, payload, raw, sessionID, sequence, source bool
+	var receivedAtBefore, payloadBefore, rawBefore, sessionIDBefore, sequenceBefore, sourceBefore bool
+	for decoder.More() {
+		keyToken, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return schemaProbeFailure(limited)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return 3, nil
+		}
+		if strings.EqualFold(key, "schema_version") {
+			schemaSeen = true
+			if decodeErr := decoder.Decode(&schemaVersion); decodeErr != nil {
+				return schemaProbeFailure(limited)
+			}
+			schemaBeforeFormula = decoder.InputOffset() <= int64(maxEncodedRecordBytes)
+			if !schemaBeforeFormula {
+				schemaAfterFormula = true
+			}
+			continue
+		}
+		keyBeforeFormula := decoder.InputOffset() <= int64(maxEncodedRecordBytes)
+		switch {
+		case strings.EqualFold(key, "received_at"):
+			var value json.RawMessage
+			if decodeErr := decoder.Decode(&value); decodeErr != nil {
+				return schemaProbeFailure(limited)
+			}
+			var parsed time.Time
+			receivedAt = json.Unmarshal(value, &parsed) == nil && !parsed.IsZero()
+			receivedAtBefore = keyBeforeFormula
+		case strings.EqualFold(key, "payload"):
+			if skipErr := skipPersistedValue(decoder); skipErr != nil {
+				return schemaProbeFailure(limited)
+			}
+			payload = true
+			payloadBefore = keyBeforeFormula
+		case strings.EqualFold(key, "raw"):
+			if skipErr := skipPersistedValue(decoder); skipErr != nil {
+				return schemaProbeFailure(limited)
+			}
+			raw = true
+			rawBefore = keyBeforeFormula
+		case strings.EqualFold(key, "session_id"):
+			var value string
+			sessionID = decoder.Decode(&value) == nil && value != ""
+			sessionIDBefore = keyBeforeFormula
+		case strings.EqualFold(key, "sequence"):
+			var value uint64
+			sequence = decoder.Decode(&value) == nil && value > 0
+			sequenceBefore = keyBeforeFormula
+		case strings.EqualFold(key, "source"):
+			var value string
+			source = decoder.Decode(&value) == nil && value == "gsi"
+			sourceBefore = keyBeforeFormula
+		default:
+			if skipErr := skipPersistedValue(decoder); skipErr != nil {
+				return schemaProbeFailure(limited)
+			}
+		}
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return schemaProbeFailure(limited)
+	}
+	if delim, ok := last.(json.Delim); !ok || delim != '}' {
+		return 3, nil
+	}
+	if !schemaSeen {
+		if receivedAt && payload && raw && receivedAtBefore && payloadBefore && rawBefore {
+			return 1, nil
 		}
 		return 3, nil
 	}
-	if len(frame) > maxEncodedRecordBytes {
+	if persistedFramingVersion(schemaVersion) == 2 && schemaBeforeFormula && !schemaAfterFormula && receivedAt && payload && raw && sessionID && sequence && source && receivedAtBefore && payloadBefore && rawBefore && sessionIDBefore && sequenceBefore && sourceBefore {
+		return 2, nil
+	}
+	return 3, nil
+}
+
+func schemaProbeFailure(limited *io.LimitedReader) (int, error) {
+	if limited.N == 0 {
 		return 0, errors.New("V3 frame exceeds encoded limit")
 	}
-	schemaVersion, err := persistedSchemaVersion(frame)
+	return 3, nil
+}
+
+func skipPersistedValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
 	if err != nil {
-		return 3, nil
+		return err
 	}
-	return persistedFramingVersion(schemaVersion), nil
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		for decoder.More() {
+			if _, err := decoder.Token(); err != nil {
+				return err
+			}
+			if err := skipPersistedValue(decoder); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if err := skipPersistedValue(decoder); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("invalid JSON delimiter")
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func readBoundedLine(reader *bufio.Reader, maxFrameBytes int, message string) ([]byte, bool, error) {

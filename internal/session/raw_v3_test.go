@@ -190,6 +190,120 @@ func TestV3ReadersDistinguishExactFormulaBoundaryFromPlusOne(t *testing.T) {
 	}
 }
 
+func TestLegacyReadersPreserveLargeV1V2Compatibility(t *testing.T) {
+	const reviewerV2Size = 14_680_223
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			frame := largeLegacyFrame(t, version, "large-legacy", reviewerV2Size)
+			if len(frame) != reviewerV2Size || len(frame) <= session.MaxEncodedRecordBytes() {
+				t.Fatalf("fixture size=%d formula=%d", len(frame), session.MaxEncodedRecordBytes())
+			}
+			root := t.TempDir()
+			dir := filepath.Join(root, "large-legacy")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(path, frame, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			if err := session.StreamRecords(path, "large-legacy", func(*session.Record) error { calls++; return nil }); err != nil {
+				t.Fatalf("stream valid V%d: %v", version, err)
+			}
+			if calls != 1 {
+				t.Fatalf("stream calls=%d want=1", calls)
+			}
+			if _, err := session.NewStore(root, session.WithSessionID("large-legacy")); err == nil || !strings.Contains(err.Error(), "legacy raw session is read-only") {
+				t.Fatalf("store recovery did not classify valid V%d as legacy: %v", version, err)
+			}
+		})
+	}
+}
+
+func TestUnresolvedTopLevelValuesCannotSelectLegacyAllowance(t *testing.T) {
+	for _, prefix := range []string{
+		"null", "[]", "1", `"scalar"`, "{}",
+		`{"received_at":null,"payload":null,"raw":null}`,
+		`{"schema_version":2,"session_id":null,"sequence":null,"received_at":null,"source":null,"payload":null,"raw":null}`,
+	} {
+		t.Run(prefix, func(t *testing.T) {
+			frame := append([]byte(prefix), bytes.Repeat([]byte{' '}, session.MaxEncodedRecordBytes()+1-len(prefix))...)
+			frame = append(frame, '\n')
+			root := t.TempDir()
+			dir := filepath.Join(root, "unresolved")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(path, frame, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.StreamRecords(path, "unresolved", func(*session.Record) error { return nil }); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("stream unresolved error=%v", err)
+			}
+			if _, err := session.NewStore(root, session.WithSessionID("unresolved")); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("store unresolved error=%v", err)
+			}
+		})
+	}
+}
+
+func TestSchemaAtOrAfterFormulaBoundaryCannotGrantLegacyAllowance(t *testing.T) {
+	required := `"session_id":"late-schema","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":{},"raw":{},`
+	for _, tc := range []struct{ name, prefix, suffix string }{
+		{"schema-late", `{` + required + `"padding":"`, `","schema_version":2}`},
+		{"escaped-schema-late", `{` + required + `"padding":"`, `","schema\u005fversion":2}`},
+		{"duplicate-after-boundary", `{"schema_version":2,` + required + `"padding":"`, `","schema_version":2}`},
+		{"inverse-duplicate-after-boundary", `{"schema_version":3,` + required + `"padding":"`, `","schema_version":2}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := session.MaxEncodedRecordBytes() + 4096
+			frame := tc.prefix + strings.Repeat("x", target-len(tc.prefix)-len(tc.suffix)) + tc.suffix + "\n"
+			root := t.TempDir()
+			dir := filepath.Join(root, "late-schema")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(path, []byte(frame), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := session.StreamRecords(path, "late-schema", func(*session.Record) error { return nil }); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("stream late schema error=%v", err)
+			}
+			if _, err := session.NewStore(root, session.WithSessionID("late-schema")); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("store late schema error=%v", err)
+			}
+		})
+	}
+}
+
+func largeLegacyFrame(t *testing.T, version int, sessionID string, target int) []byte {
+	t.Helper()
+	payloadPrefix, payloadSuffix := `{"padding":"`, `","slash":"/"}`
+	rawPrefix, rawSuffix := `{"padding":"`, `","slash":"\/"}`
+	header := `{"received_at":"2026-08-05T12:00:00Z","payload":`
+	if version == 2 {
+		header = fmt.Sprintf(`{"schema_version":2,"session_id":%q,"sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":`, sessionID)
+	}
+	base := header + payloadPrefix + payloadSuffix + `,"raw":` + rawPrefix + rawSuffix + "}\n"
+	remaining := target - len(base)
+	if remaining < 0 {
+		t.Fatalf("target %d below base %d", target, len(base))
+	}
+	filler := strings.Repeat("x", remaining/2)
+	frame := header + payloadPrefix + filler + payloadSuffix + `,"raw":` + rawPrefix + filler + rawSuffix + "}"
+	if remaining%2 != 0 {
+		frame += " "
+	}
+	frame += "\n"
+	if len(frame) != target {
+		t.Fatalf("legacy fixture size=%d want=%d", len(frame), target)
+	}
+	return []byte(frame)
+}
+
 func TestStoreAppendClassifiesEveryTopLevelNonObjectWithoutRejectingRaw(t *testing.T) {
 	for _, raw := range []string{"null", "true", "1e2", `"text"`, "[]"} {
 		t.Run(raw, func(t *testing.T) {
