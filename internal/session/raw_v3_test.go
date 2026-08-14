@@ -1,12 +1,14 @@
 package session_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +114,30 @@ func TestV3CanonicalAndNoncanonicalFramingMatrix(t *testing.T) {
 		if _, err := session.DecodeRecordV3([]byte(frame), "frame", 1); err == nil {
 			t.Fatalf("accepted noncanonical frame %q", frame[:min(len(frame), 80)])
 		}
+	}
+}
+
+func TestV3ReadersRejectTerminatedFrameAtFormulaLimitBeforeLegacyCap(t *testing.T) {
+	for _, prefix := range []string{`{"schema_version":3,`, ` { "schema_version" : 3.0,`} {
+		t.Run(prefix, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "overlimit")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			frame := append([]byte(prefix), bytes.Repeat([]byte{' '}, session.MaxEncodedRecordBytes()+1-len(prefix))...)
+			frame = append(frame, '\n')
+			path := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(path, frame, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := session.NewStore(root, session.WithSessionID("overlimit")); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("store recovery error=%v", err)
+			}
+			if err := session.StreamRecords(path, "overlimit", func(*session.Record) error { return nil }); err == nil || !strings.Contains(err.Error(), "V3 frame exceeds encoded limit") {
+				t.Fatalf("offline reader error=%v", err)
+			}
+		})
 	}
 }
 

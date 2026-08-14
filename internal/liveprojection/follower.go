@@ -13,6 +13,8 @@ type CursorIO = session.CursorIO
 type StartupPublicationBarrier = session.StartupPublicationBarrier
 type RejectionHealthSink = session.RejectionHealthSink
 type RejectionTransition = session.RejectionTransition
+type ScanRange = session.ScanRange
+type ScanObserver = session.ScanObserver
 
 func New(sessionID, rawPath, cursorPath string, projections []Projection, opts ...Option) *Follower {
 	return session.NewLiveFollower(sessionID, rawPath, cursorPath, projections, opts...)
@@ -22,3 +24,4 @@ var WithCursorIO = session.WithCursorIO
 var WithHighWater = session.WithFollowerHighWater
 var WithStartupBarrier = session.WithStartupBarrier
 var WithRejectionHealthSink = session.WithRejectionHealthSink
+var WithScanObserver = session.WithScanObserver

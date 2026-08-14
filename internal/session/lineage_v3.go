@@ -15,8 +15,8 @@ const (
 	RawRecordFramingV3Identity       = "sha256:e9b1fae191e03965811571dfe3077c5b9ae2d22779b8334de93a91c818e8b82f"
 	RawPayloadSchemaV3Descriptor     = "gsi-raw-payload-v3|encoding-json-decoder-use-number|one-value|10485760"
 	RawPayloadSchemaV3Identity       = "sha256:be2cf3ac041acbcdf9ddd982ebb56dfc093a101b1a36bf69e85fa68551faaec1"
-	GSIProjectionMappingV3Descriptor = "gsi-projection-v3|provider,league,map,player,hero,items,abilities,buildings|final-last-wins"
-	GSIProjectionMappingV3Identity   = "sha256:1ad4562c4e4bfeb509392dfa155d5e67a5653a7192348e23f861a137616a5ed7"
+	GSIProjectionMappingV3Descriptor = "gsi-projection-v3|provider,league,map,player,hero,items,abilities,buildings|final-last-wins|retained-values-only"
+	GSIProjectionMappingV3Identity   = "sha256:723722566fad1f6b350238172d3ea3926098f3388368253d1c6d687b9a9671d4"
 )
 
 var captureLineageV3 = []byte(`{"schema_version":3,"raw_record_schema":"` + RawRecordSchemaV3Identity + `","framing":"` + RawRecordFramingV3Identity + `","raw_payload_schema":"` + RawPayloadSchemaV3Identity + `","projection_mapping":"` + GSIProjectionMappingV3Identity + `"}` + "\n")

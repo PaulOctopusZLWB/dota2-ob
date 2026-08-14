@@ -40,7 +40,6 @@ func TestProjectionBoundsUseFinalDuplicateValuesAndFixedPrecedence(t *testing.T)
 
 func TestProjectionBoundsAllStableReasons(t *testing.T) {
 	cases := []struct{ name, body, reason string }{
-		{"structural-teams", `{"player":{` + manyEntries("t", 12, `{}`) + `}}`, "participant_count"},
 		{"items", `{"items":{"t":{"p":{` + manyEntries("i", 33, `{"name":"x"}`) + `}}}}`, "item_count"},
 		{"abilities", `{"abilities":{"t":{"p":{` + manyEntries("a", 33, `{"name":"x"}`) + `}}}}`, "ability_count"},
 		{"buildings", `{"buildings":{"t":{` + manyEntries("b", 65, `{"health":1}`) + `}}}`, "building_count"},
@@ -57,6 +56,32 @@ func TestProjectionBoundsAllStableReasons(t *testing.T) {
 			}
 			if r.ProjectionResult != session.ProjectionConsumedNoOutput || r.ProjectionReason != tc.reason {
 				t.Fatalf("record=%#v", r)
+			}
+		})
+	}
+}
+
+func TestProjectionIgnoresHarmlessEmptyAndUnknownContainers(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"reviewer-12-empty-player-teams", `{"player":{` + manyEntries("team", 12, `{}`) + `}}`},
+		{"hero-empty-teams", `{"hero":{` + manyEntries("team", 12, `{}`) + `}}`},
+		{"items-empty-teams", `{"items":{` + manyEntries("team", 12, `{}`) + `}}`},
+		{"abilities-empty-slots", `{"abilities":{"team":{` + manyEntries("slot", 12, `{}`) + `}}}`},
+		{"buildings-empty-teams", `{"buildings":{` + manyEntries("team", 12, `{}`) + `}}`},
+		{"unknown-only-descendants", `{"player":{"team":{"unknown":{"deep":[1,2,3]}}},"items":{"team":{"slot":{"unknown":{"deep":true}}}},"buildings":{"team":{"unknown":{"deep":null}}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := session.NewStore(t.TempDir(), session.WithSessionID("empty-containers"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Append([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.ProjectionResult != session.ProjectionProduced {
+				t.Fatalf("harmless containers rejected: %s/%s", record.ProjectionCode, record.ProjectionReason)
 			}
 		})
 	}

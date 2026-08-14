@@ -68,6 +68,7 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 		return first, ProjectionConsumedNoOutput, "gsi_projection_non_object", "top_level_non_object", nil
 	}
 	root := map[string]any{}
+	overflow := map[string]bool{}
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
@@ -78,17 +79,18 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 			return nil, "", "", "", fmt.Errorf("%w: invalid object key", ErrInvalidJSON)
 		}
 		var value any
+		var exceeded bool
 		switch key {
 		case "provider", "league", "map":
 			value, err = projectFields(dec, simpleFields[key])
 		case "player", "hero":
-			value, err = projectNested(dec, 2, participantFields[key], 11)
+			value, exceeded, err = projectNested(dec, 2, participantFields[key], 11, 0)
 		case "items":
-			value, err = projectNested(dec, 3, itemFields, 33)
+			value, exceeded, err = projectNested(dec, 3, itemFields, 33, 0)
 		case "abilities":
-			value, err = projectNested(dec, 3, abilityFields, 33)
+			value, exceeded, err = projectNested(dec, 3, abilityFields, 33, 0)
 		case "buildings":
-			value, err = projectNested(dec, 2, buildingFields, 65)
+			value, exceeded, err = projectNested(dec, 2, buildingFields, 65, 0)
 		default:
 			err = skipValue(dec)
 			if err == nil {
@@ -99,6 +101,7 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 			return nil, "", "", "", fmt.Errorf("%w: malformed member", ErrInvalidJSON)
 		}
 		root[key] = value // final duplicate key wins at every recognized section.
+		overflow[key] = exceeded
 	}
 	if closeToken, err := dec.Token(); err != nil || closeToken != json.Delim('}') {
 		return nil, "", "", "", fmt.Errorf("%w: malformed object", ErrInvalidJSON)
@@ -106,7 +109,8 @@ func decodeBoundedGSI(raw []byte) (any, ProjectionResult, string, string, error)
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, "", "", "", fmt.Errorf("%w: trailing data", ErrInvalidJSON)
 	}
-	payload, result, code, reason := boundedGSIProjection(root)
+	initial := projectionLimits{participants: overflow["player"] || overflow["hero"], items: overflow["items"], abilities: overflow["abilities"], buildings: overflow["buildings"]}
+	payload, result, code, reason := boundedGSIProjectionWithLimits(root, initial)
 	return payload, result, code, reason, nil
 }
 
@@ -165,80 +169,73 @@ func projectFields(dec *json.Decoder, fields map[string]bool) (any, error) {
 // projectNested walks one of the fixed GSI section shapes. It bounds every
 // retained object before descending; maxLeaf+1 is retained so the existing
 // fixed rejection precedence can classify an overflow exactly.
-func projectNested(dec *json.Decoder, depth int, fields map[string]bool, maxLeaf int) (any, error) {
+func projectNested(dec *json.Decoder, depth int, fields map[string]bool, maxLeaf, retainEmptyAtDepth int) (any, bool, error) {
 	open, err := dec.Token()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if open != json.Delim('{') {
 		if delim, ok := open.(json.Delim); ok {
 			if err := skipDelimited(dec, delim); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
-		return nil, nil
+		return nil, false, nil
 	}
-	out := map[string]any{}
-	limit := 11
-	if depth == 1 {
-		limit = maxLeaf
+	type child struct {
+		value    any
+		overflow bool
 	}
+	children := map[string]child{}
+	overflow := false
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return nil, errors.New("invalid object key")
+			return nil, false, errors.New("invalid object key")
 		}
-		if _, exists := out[key]; !exists && len(out) >= limit {
-			if err := skipValue(dec); err != nil {
-				return nil, err
+		if depth == 1 {
+			if _, exists := children[key]; !exists && len(children) >= maxLeaf {
+				if err := skipValue(dec); err != nil {
+					return nil, false, err
+				}
+				overflow = true
+				continue
 			}
-			// A bounded sentinel preserves the fact that the final object is over
-			// domain without retaining the skipped subtree's shape.
-			out["\x00overflow"] = projectionOverflowSentinel(depth, maxLeaf)
+			value, err := projectFields(dec, fields)
+			if err != nil {
+				return nil, false, err
+			}
+			children[key] = child{value: value}
 			continue
 		}
-		var value any
-		if depth == 1 {
-			value, err = projectFields(dec, fields)
-		} else {
-			value, err = projectNested(dec, depth-1, fields, maxLeaf)
-		}
+		value, exceeded, err := projectNested(dec, depth-1, fields, maxLeaf, retainEmptyAtDepth)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		if value != nil || depth == 1 {
-			out[key] = value
+		keep := depth == retainEmptyAtDepth
+		if m, ok := value.(map[string]any); ok && len(m) > 0 {
+			keep = true
 		}
+		if !keep {
+			delete(children, key)
+			continue
+		}
+		children[key] = child{value: value, overflow: exceeded}
 	}
 	closeToken, err := dec.Token()
 	if err != nil || closeToken != json.Delim('}') {
-		return nil, errors.New("malformed object")
+		return nil, false, errors.New("malformed object")
 	}
-	return out, nil
-}
-
-func projectionOverflowSentinel(depth, maxLeaf int) any {
-	if depth == 1 {
-		return nil
+	out := make(map[string]any, len(children))
+	for key, value := range children {
+		out[key] = value.value
+		overflow = overflow || value.overflow
 	}
-	count := 11
-	if maxLeaf == 65 {
-		count = 65
-	}
-	out := make(map[string]any, count)
-	for i := 0; i < count; i++ {
-		key := fmt.Sprintf("\x00overflow-%d", i)
-		if depth == 2 {
-			out[key] = nil
-		} else {
-			out[key] = map[string]any{}
-		}
-	}
-	return out
+	return out, overflow, nil
 }
 
 func skipValue(dec *json.Decoder) error {
@@ -279,12 +276,15 @@ func skipDelimited(dec *json.Decoder, open json.Delim) error {
 }
 
 func boundedGSIProjection(payload any) (any, ProjectionResult, string, string) {
+	return boundedGSIProjectionWithLimits(payload, projectionLimits{})
+}
+
+func boundedGSIProjectionWithLimits(payload any, limits projectionLimits) (any, ProjectionResult, string, string) {
 	root, ok := payload.(map[string]any)
 	if !ok {
 		return payload, ProjectionConsumedNoOutput, "gsi_projection_non_object", "top_level_non_object"
 	}
 	out := map[string]any{}
-	limits := projectionLimits{}
 	participants := map[string]bool{}
 	for name, fields := range simpleFields {
 		if value, exists := root[name]; exists {

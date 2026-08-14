@@ -1,7 +1,10 @@
 package liveprojection_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,6 +92,22 @@ type controlAwareProjection struct {
 	sink                   *controlSink
 	sequences              []uint64
 	calledWhileRestoreOpen bool
+}
+
+type scanRecorder struct {
+	mu     sync.Mutex
+	ranges []liveprojection.ScanRange
+}
+
+func (r *scanRecorder) ScanStarted(value liveprojection.ScanRange) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ranges = append(r.ranges, value)
+}
+func (r *scanRecorder) snapshot() []liveprojection.ScanRange {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]liveprojection.ScanRange(nil), r.ranges...)
 }
 
 func (p *controlAwareProjection) Apply(_ context.Context, record *session.Record) error {
@@ -588,8 +607,12 @@ func TestFollowerReconstructsThroughValidCursorWithoutReplacingIt(t *testing.T) 
 	root := t.TempDir()
 	store := appendRecords(t, root, "valid-cache", 2)
 	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
-	old := []byte(`{"schema_version":2,"session_id":"valid-cache","sequence":2,"projection_rejection_active":false,"projection_rejection_count":0,"last_projection_rejection_sequence":0}`)
-	if err := os.WriteFile(cursorPath, old, 0o600); err != nil {
+	seed := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, nil)
+	if err := seed.CatchUp(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(cursorPath)
+	if err != nil {
 		t.Fatal(err)
 	}
 	projection := &recordingProjection{}
@@ -642,14 +665,15 @@ func TestFollowerValidCacheResumesAfterPrefixAndTransitionsHealth(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{`null`, `{"map":{"game_time":2}}`} {
-		if _, err := store.Append([]byte(raw)); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := store.Append([]byte(`null`)); err != nil {
+		t.Fatal(err)
 	}
 	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
-	valid := `{"schema_version":2,"session_id":"valid-resume","sequence":1,"projection_rejection_active":true,"projection_rejection_count":1,"last_projection_rejection_sequence":1,"last_projection_rejection_code":"gsi_projection_non_object","last_projection_rejection_reason":"top_level_non_object"}`
-	if err := os.WriteFile(cursorPath, []byte(valid), 0o600); err != nil {
+	seed := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, nil)
+	if err := seed.CatchUp(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"map":{"game_time":2}}`)); err != nil {
 		t.Fatal(err)
 	}
 	sink := &controlSink{}
@@ -670,6 +694,122 @@ func TestFollowerValidCacheResumesAfterPrefixAndTransitionsHealth(t *testing.T) 
 	sink.mu.Unlock()
 	if !reflect.DeepEqual(events, []string{"begin", "hide", "complete", "clear"}) {
 		t.Fatalf("events=%v", events)
+	}
+}
+
+func TestFollowerUsesExactlyOneAuthoritativeScanAtRequiredRange(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mutate       func(t *testing.T, cursorPath string)
+		wantFrom     uint64
+		recoverStore bool
+	}{
+		{name: "missing", mutate: func(t *testing.T, cursorPath string) {
+			if err := os.Remove(cursorPath); err != nil {
+				t.Fatal(err)
+			}
+		}, wantFrom: 1},
+		{name: "corrupt", mutate: func(t *testing.T, cursorPath string) {
+			if err := os.WriteFile(cursorPath, []byte("bad"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantFrom: 1},
+		{name: "false-summary", mutate: func(t *testing.T, cursorPath string) {
+			data, err := os.ReadFile(cursorPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = bytes.Replace(data,
+				[]byte(`"projection_rejection_count":0,"last_projection_rejection_sequence":0,"next_offset"`),
+				[]byte(`"projection_rejection_count":1,"last_projection_rejection_sequence":1,"last_projection_rejection_code":"gsi_projection_non_object","last_projection_rejection_reason":"top_level_non_object","next_offset"`), 1)
+			var cursor map[string]any
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.UseNumber()
+			if err := decoder.Decode(&cursor); err != nil {
+				t.Fatal(err)
+			}
+			delete(cursor, "proof_sha256")
+			unsigned, err := json.Marshal(cursor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof := sha256.Sum256(unsigned)
+			cursor["proof_sha256"] = hex.EncodeToString(proof[:])
+			data, err = json.Marshal(cursor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cursorPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantFrom: 1},
+		{name: "stale-offset", mutate: func(t *testing.T, cursorPath string) {
+			data, err := os.ReadFile(cursorPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = bytes.Replace(data, []byte(`"next_offset":`), []byte(`"next_offset":9`), 1)
+			if err := os.WriteFile(cursorPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantFrom: 1},
+		{name: "raw-inconsistent-authority", mutate: func(t *testing.T, cursorPath string) {
+			path := filepath.Join(filepath.Dir(cursorPath), "raw.jsonl.authority-v3")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data[2*72-1] ^= 0xff
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantFrom: 1},
+		{name: "valid", mutate: func(*testing.T, string) {}, wantFrom: 3},
+		{name: "valid-after-store-recovery", mutate: func(*testing.T, string) {}, wantFrom: 3, recoverStore: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := appendRecords(t, root, "scan-range", 2)
+			cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+			seed := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, nil)
+			if err := seed.CatchUp(context.Background(), 2); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append([]byte(`{"map":{"game_time":3}}`)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.recoverStore {
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := session.NewStore(root, session.WithSessionID("scan-range"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				store = reopened
+			}
+			tc.mutate(t, cursorPath)
+			recorder := &scanRecorder{}
+			projection := &recordingProjection{}
+			follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithScanObserver(recorder))
+			if err := follower.CatchUp(context.Background(), 3); err != nil {
+				t.Fatal(err)
+			}
+			ranges := recorder.snapshot()
+			if len(ranges) != 1 || ranges[0].FromSequence != tc.wantFrom || ranges[0].ThroughSequence != 3 {
+				t.Fatalf("scan ranges=%#v want one %d..3", ranges, tc.wantFrom)
+			}
+			if (tc.wantFrom == 1 && ranges[0].StartOffset != 0) || (tc.wantFrom == 3 && ranges[0].StartOffset <= 0) {
+				t.Fatalf("scan offset=%d for from=%d", ranges[0].StartOffset, tc.wantFrom)
+			}
+			wantCalls := []uint64{1, 2, 3}
+			if tc.wantFrom == 3 {
+				wantCalls = []uint64{3}
+			}
+			if !reflect.DeepEqual(projection.sequences, wantCalls) {
+				t.Fatalf("adapter calls=%v want=%v", projection.sequences, wantCalls)
+			}
+		})
 	}
 }
 

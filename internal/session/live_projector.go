@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,12 @@ type RejectionTransition struct {
 type RejectionHealthSink interface {
 	ProjectionHealth(context.Context, RejectionTransition) error
 }
+type ScanRange struct {
+	FromSequence    uint64
+	ThroughSequence uint64
+	StartOffset     int64
+}
+type ScanObserver interface{ ScanStarted(ScanRange) }
 type LiveProjectionHealth struct {
 	HighWater                       uint64        `json:"high_water"`
 	ProjectedSequence               uint64        `json:"projected_sequence"`
@@ -63,6 +71,9 @@ type liveCursor struct {
 	LastProjectionRejectionSequence uint64 `json:"last_projection_rejection_sequence"`
 	LastProjectionRejectionCode     string `json:"last_projection_rejection_code,omitempty"`
 	LastProjectionRejectionReason   string `json:"last_projection_rejection_reason,omitempty"`
+	NextOffset                      int64  `json:"next_offset"`
+	RawChainSHA256                  string `json:"raw_chain_sha256"`
+	ProofSHA256                     string `json:"proof_sha256,omitempty"`
 }
 type CursorFile interface {
 	io.Writer
@@ -101,6 +112,9 @@ func WithStartupBarrier(barrier StartupPublicationBarrier) LiveFollowerOption {
 func WithRejectionHealthSink(sink RejectionHealthSink) LiveFollowerOption {
 	return func(f *LiveFollower) { f.rejectionSink = sink }
 }
+func WithScanObserver(observer ScanObserver) LiveFollowerOption {
+	return func(f *LiveFollower) { f.scanObserver = observer }
+}
 
 type LiveFollower struct {
 	sessionID, rawPath, cursorPath string
@@ -118,6 +132,9 @@ type LiveFollower struct {
 	startupBarrier                 StartupPublicationBarrier
 	rejectionSink                  RejectionHealthSink
 	restoring                      bool
+	scanObserver                   ScanObserver
+	nextOffset                     int64
+	rawChain                       [sha256.Size]byte
 }
 
 func NewLiveFollower(sessionID, rawPath, cursorPath string, projections []LiveProjection, opts ...LiveFollowerOption) *LiveFollower {
@@ -163,21 +180,14 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 		f.restoring = true
 		cached, valid := f.loadCursor(highWater)
 		if valid {
-			authoritative, err := f.summarizeThrough(cached.Sequence)
-			if err != nil {
-				return f.fail(err)
-			}
-			valid = cursorSummariesEqual(cached, authoritative)
-			if valid {
-				f.restoreCursor(authoritative)
-				if authoritative.ProjectionRejectionActive {
-					if err := f.emitRejectionTransition(ctx, authoritative); err != nil {
-						return f.fail(err)
-					}
-				}
-				if err := f.completeStartupBarrier(ctx); err != nil {
+			f.restoreCursor(cached)
+			if cached.ProjectionRejectionActive {
+				if err := f.emitRejectionTransition(ctx, cached); err != nil {
 					return f.fail(err)
 				}
+			}
+			if err := f.completeStartupBarrier(ctx); err != nil {
+				return f.fail(err)
 			}
 		}
 		if !valid {
@@ -196,11 +206,9 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 	if projected >= highWater {
 		return f.completeStartupBarrier(ctx)
 	}
-	err := f.forEachRange(projected+1, highWater, func(record *Record) error {
+	err := f.scanRange(projected+1, highWater, func(record *Record, nextOffset int64, rawChain [sha256.Size]byte) error {
 		f.healthMu.Lock()
-		if f.oldestLagAt.IsZero() {
-			f.oldestLagAt = record.ReceivedAt
-		}
+		f.oldestLagAt = record.ReceivedAt
 		f.healthMu.Unlock()
 		if record.ProjectionResult == ProjectionProduced {
 			start := 0
@@ -230,20 +238,24 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 			}
 		}
 		f.restoreRejectionSummary(next)
-		if err := f.writeCursor(record.Sequence); err != nil {
+		next.NextOffset = nextOffset
+		next.RawChainSHA256 = hex.EncodeToString(rawChain[:])
+		if err := appendRawAuthority(f.rawPath, record.Sequence, nextOffset, rawChain, rawAuthoritySummaryHash(next)); err != nil {
+			_ = os.Remove(rawAuthorityPath(f.rawPath))
+			return fmt.Errorf("write raw authority: %w", err)
+		}
+		if err := f.writeCursor(next); err != nil {
 			return err
 		}
 		f.cachedSequence = record.Sequence
+		f.nextOffset = nextOffset
+		f.rawChain = rawChain
 		f.healthMu.Lock()
 		f.health.ProjectedSequence = record.Sequence
 		f.pendingSequence = 0
 		f.nextProjection = 0
 		f.health.LastError = ""
-		if record.Sequence < f.health.HighWater {
-			if at, err := f.recordReceivedAt(record.Sequence + 1); err == nil {
-				f.oldestLagAt = at
-			}
-		} else {
+		if record.Sequence >= f.health.HighWater {
 			f.oldestLagAt = time.Time{}
 		}
 		f.updateLagLocked()
@@ -257,7 +269,7 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 }
 
 func cursorFromHealth(sessionID string, sequence uint64, h LiveProjectionHealth) liveCursor {
-	return liveCursor{SchemaVersion: 2, SessionID: sessionID, Sequence: sequence, ProjectionRejectionActive: h.ProjectionRejectionActive, ProjectionRejectionCount: h.ProjectionRejectionCount, LastProjectionRejectionSequence: h.LastProjectionRejectionSequence, LastProjectionRejectionCode: h.LastProjectionRejectionCode, LastProjectionRejectionReason: h.LastProjectionRejectionReason}
+	return liveCursor{SchemaVersion: 3, SessionID: sessionID, Sequence: sequence, ProjectionRejectionActive: h.ProjectionRejectionActive, ProjectionRejectionCount: h.ProjectionRejectionCount, LastProjectionRejectionSequence: h.LastProjectionRejectionSequence, LastProjectionRejectionCode: h.LastProjectionRejectionCode, LastProjectionRejectionReason: h.LastProjectionRejectionReason}
 }
 func applyCursorResult(c *liveCursor, record *Record) {
 	c.Sequence = record.Sequence
@@ -273,17 +285,11 @@ func applyCursorResult(c *liveCursor, record *Record) {
 		c.ProjectionRejectionActive = false
 	}
 }
-func (f *LiveFollower) summarizeThrough(sequence uint64) (liveCursor, error) {
-	summary := liveCursor{SchemaVersion: 2, SessionID: f.sessionID}
-	if sequence == 0 {
-		return summary, nil
-	}
-	err := f.forEachRange(1, sequence, func(record *Record) error { applyCursorResult(&summary, record); return nil })
-	return summary, err
-}
-func cursorSummariesEqual(a, b liveCursor) bool { return a == b }
 func (f *LiveFollower) restoreCursor(c liveCursor) {
 	f.cachedSequence = c.Sequence
+	f.nextOffset = c.NextOffset
+	decoded, _ := hex.DecodeString(c.RawChainSHA256)
+	copy(f.rawChain[:], decoded)
 	f.healthMu.Lock()
 	f.health.ProjectedSequence = c.Sequence
 	f.health.ProjectionRejectionActive = c.ProjectionRejectionActive
@@ -305,6 +311,8 @@ func (f *LiveFollower) restoreRejectionSummary(c liveCursor) {
 }
 func (f *LiveFollower) resetProjectionState() {
 	f.cachedSequence = 0
+	f.nextOffset = 0
+	f.rawChain = [sha256.Size]byte{}
 	f.healthMu.Lock()
 	f.health.ProjectedSequence = 0
 	f.health.ProjectionRejectionActive = false
@@ -381,10 +389,57 @@ func (f *LiveFollower) loadCursor(highWater uint64) (liveCursor, bool) {
 		return liveCursor{}, false
 	}
 	var cached liveCursor
-	if json.Unmarshal(data, &cached) != nil || cached.SchemaVersion != 2 || cached.SessionID != f.sessionID || cached.Sequence > highWater || !validCursorSummary(cached) {
+	if json.Unmarshal(data, &cached) != nil || cached.SchemaVersion != 3 || cached.SessionID != f.sessionID || cached.Sequence > highWater || !validCursorSummary(cached) || !validCursorProof(cached) || !f.validCursorBoundary(cached) {
 		return liveCursor{}, false
 	}
 	return cached, true
+}
+
+func cursorProof(c liveCursor) string {
+	c.ProofSHA256 = ""
+	data, _ := json.Marshal(c)
+	var canonical map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	_ = decoder.Decode(&canonical)
+	data, _ = json.Marshal(canonical)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+func validCursorProof(c liveCursor) bool {
+	if len(c.RawChainSHA256) != 64 || len(c.ProofSHA256) != 64 {
+		return false
+	}
+	if _, err := hex.DecodeString(c.RawChainSHA256); err != nil {
+		return false
+	}
+	return c.ProofSHA256 == cursorProof(c)
+}
+func (f *LiveFollower) validCursorBoundary(c liveCursor) bool {
+	if c.Sequence == 0 {
+		return c.NextOffset == 0
+	}
+	if c.NextOffset <= 0 {
+		return false
+	}
+	file, err := os.Open(f.rawPath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || c.NextOffset > info.Size() {
+		return false
+	}
+	one := []byte{0}
+	if _, err := file.ReadAt(one, c.NextOffset-1); err != nil || one[0] != '\n' {
+		return false
+	}
+	authorityOffset, authorityChain, authoritySummary, ok := readRawAuthority(f.rawPath, c.Sequence)
+	if !ok || authorityOffset != c.NextOffset {
+		return false
+	}
+	return hex.EncodeToString(authorityChain[:]) == c.RawChainSHA256 && authoritySummary == rawAuthoritySummaryHash(c)
 }
 
 func validCursorSummary(c liveCursor) bool {
@@ -413,6 +468,13 @@ func (f *LiveFollower) forEachRange(from, through uint64, apply func(*Record) er
 	return scanRecordRange(f.rawPath, f.sessionID, from, through, true, apply)
 }
 
+func (f *LiveFollower) scanRange(from, through uint64, apply func(*Record, int64, [sha256.Size]byte) error) error {
+	if f.scanObserver != nil {
+		f.scanObserver.ScanStarted(ScanRange{FromSequence: from, ThroughSequence: through, StartOffset: f.nextOffset})
+	}
+	return scanV3RecordRange(f.rawPath, f.sessionID, f.nextOffset, from, through, f.rawChain, apply)
+}
+
 // StreamRecords decodes and validates one bounded raw frame at a time. The
 // record and its exact raw bytes are owned only for the duration of apply.
 func StreamRecords(rawPath, sessionID string, apply func(*Record) error) error {
@@ -430,7 +492,7 @@ func rawPathIsV3(path string) bool {
 	defer file.Close()
 	prefix := make([]byte, 64)
 	n, _ := file.Read(prefix)
-	return bytes.HasPrefix(bytes.TrimSpace(prefix[:n]), []byte(`{"schema_version":3,`))
+	return persistedPrefixDeclaresV3(bytes.TrimLeft(prefix[:n], " \t\r\n"))
 }
 
 func scanLegacyRecords(rawPath, sessionID string, apply func(*Record) error) error {
@@ -553,7 +615,7 @@ func scanRecordRange(rawPath, sessionID string, from, through uint64, requireThr
 	want := uint64(1)
 	version := 0
 	for {
-		line, terminated, err := readBoundedLine(reader)
+		line, terminated, err := readPersistedLine(reader)
 		if err == io.EOF && len(line) == 0 {
 			break
 		}
@@ -589,13 +651,90 @@ func scanRecordRange(rawPath, sessionID string, from, through uint64, requireThr
 	return nil
 }
 
-func readBoundedLine(reader *bufio.Reader) ([]byte, bool, error) {
-	const maxLegacyFrame = 32 << 20
+func scanV3RecordRange(rawPath, sessionID string, startOffset int64, from, through uint64, chain [sha256.Size]byte, apply func(*Record, int64, [sha256.Size]byte) error) error {
+	file, err := os.Open(rawPath)
+	if err != nil {
+		return fmt.Errorf("open raw log: %w", err)
+	}
+	defer file.Close()
+	if _, err := file.Seek(startOffset, io.SeekStart); err != nil {
+		return fmt.Errorf("seek raw log: %w", err)
+	}
+	reader := bufio.NewReaderSize(file, 64*1024)
+	want, offset := from, startOffset
+	version := 0
+	if startOffset == 0 {
+		_ = os.Remove(rawAuthorityPath(rawPath))
+	}
+	for want <= through {
+		line, terminated, err := readPersistedLine(reader)
+		if err == io.EOF && len(line) == 0 {
+			return fmt.Errorf("raw sequence %d is not committed", want)
+		}
+		if err != nil {
+			return err
+		}
+		if !terminated {
+			return fmt.Errorf("raw sequence %d has unterminated tail", want)
+		}
+		frame := bytes.TrimSuffix(line, []byte{'\n'})
+		record, err := decodePersistedRecord(frame, sessionID, want)
+		if err != nil {
+			return fmt.Errorf("decode raw sequence %d: %w", want, err)
+		}
+		if version == 0 {
+			version = record.SchemaVersion
+		} else if version != record.SchemaVersion {
+			return errors.New("mixed raw schema versions")
+		}
+		chain = advanceRawChain(chain, record.Raw)
+		offset += int64(len(line))
+		if err := apply(record, offset, chain); err != nil {
+			return err
+		}
+		want++
+	}
+	return nil
+}
+
+const maxLegacyFrameBytes = 32 << 20
+
+func readPersistedLine(reader *bufio.Reader) ([]byte, bool, error) {
+	probe, _ := reader.Peek(256)
+	trimmed := bytes.TrimLeft(probe, " \t\r\n")
+	if persistedPrefixDeclaresV3(trimmed) {
+		return readBoundedLine(reader, maxEncodedRecordBytes, "V3 frame exceeds encoded limit")
+	}
+	return readBoundedLine(reader, maxLegacyFrameBytes, "raw frame exceeds bounded limit")
+}
+
+func persistedPrefixDeclaresV3(prefix []byte) bool {
+	if len(prefix) == 0 || prefix[0] != '{' {
+		return false
+	}
+	rest := bytes.TrimLeft(prefix[1:], " \t\r\n")
+	key := []byte(`"schema_version"`)
+	if !bytes.HasPrefix(rest, key) {
+		return false
+	}
+	rest = bytes.TrimLeft(rest[len(key):], " \t\r\n")
+	if len(rest) == 0 || rest[0] != ':' {
+		return false
+	}
+	rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+	return len(rest) > 0 && rest[0] == '3'
+}
+
+func readBoundedLine(reader *bufio.Reader, maxFrameBytes int, message string) ([]byte, bool, error) {
 	line := make([]byte, 0, 64*1024)
 	for {
 		fragment, err := reader.ReadSlice('\n')
-		if len(line)+len(fragment) > maxLegacyFrame {
-			return nil, false, errors.New("raw frame exceeds bounded limit")
+		limit := maxFrameBytes
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
+			limit++
+		}
+		if len(line)+len(fragment) > limit {
+			return nil, false, errors.New(message)
 		}
 		line = append(line, fragment...)
 		switch err {
@@ -610,7 +749,7 @@ func readBoundedLine(reader *bufio.Reader) ([]byte, bool, error) {
 		}
 	}
 }
-func (f *LiveFollower) writeCursor(sequence uint64) error {
+func (f *LiveFollower) writeCursor(cursor liveCursor) error {
 	tmp, err := f.cursorIO.CreateTemp(filepath.Dir(f.cursorPath), ".live-projection-cursor-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create cursor temp: %w", err)
@@ -626,9 +765,7 @@ func (f *LiveFollower) writeCursor(sequence uint64) error {
 		_ = tmp.Close()
 		return err
 	}
-	f.healthMu.Lock()
-	cursor := cursorFromHealth(f.sessionID, sequence, f.health)
-	f.healthMu.Unlock()
+	cursor.ProofSHA256 = cursorProof(cursor)
 	data, err := json.Marshal(cursor)
 	if err == nil {
 		line := append(data, '\n')

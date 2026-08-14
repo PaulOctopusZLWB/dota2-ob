@@ -15,6 +15,8 @@ import (
 
 const maxEncodedRecordBytes = 4*((maxRawBodyBytes+2)/3) + 4096
 
+func MaxEncodedRecordBytes() int { return maxEncodedRecordBytes }
+
 // DecodeRecordV3 validates one complete, newline-free V3 frame and returns
 // owned exact request bytes. Callers must release the record after processing.
 func DecodeRecordV3(line []byte, sessionID string, sequence uint64) (*Record, error) {

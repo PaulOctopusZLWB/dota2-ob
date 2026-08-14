@@ -260,6 +260,7 @@ func (s *Store) Close() error {
 }
 
 func recoverRawFile(path, sessionID string) (uint64, int, error) {
+	var chain [sha256.Size]byte
 	file, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, 0, nil
@@ -268,12 +269,26 @@ func recoverRawFile(path, sessionID string) (uint64, int, error) {
 		return 0, 0, fmt.Errorf("open raw jsonl: %w", err)
 	}
 	defer file.Close()
+	indexPath := rawAuthorityPath(path)
+	tmpPath := indexPath + ".tmp"
+	index, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, 0, fmt.Errorf("create raw authority index: %w", err)
+	}
+	keepIndex := false
+	defer func() {
+		_ = index.Close()
+		if !keepIndex {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 	reader := bufio.NewReaderSize(file, 64*1024)
 	sequence := uint64(0)
 	version := 0
 	committed := int64(0)
+	summary := liveCursor{SchemaVersion: 3, SessionID: sessionID}
 	for {
-		line, terminated, readErr := readBoundedLine(reader)
+		line, terminated, readErr := readPersistedLine(reader)
 		if readErr == io.EOF {
 			if len(line) > 0 {
 				if err := file.Truncate(committed); err != nil {
@@ -290,24 +305,30 @@ func recoverRawFile(path, sessionID string) (uint64, int, error) {
 		}
 		sequence++
 		frame := line[:len(line)-1]
-		if err := validatePersistedRecord(frame, sessionID, sequence); err != nil {
-			return 0, 0, fmt.Errorf("invalid committed raw record %d: %w", sequence, err)
+		record, decodeErr := decodePersistedRecord(frame, sessionID, sequence)
+		if decodeErr != nil {
+			return 0, 0, fmt.Errorf("invalid committed raw record %d: %w", sequence, decodeErr)
 		}
-		var h struct {
-			SchemaVersion json.RawMessage `json:"schema_version"`
-		}
-		_ = json.Unmarshal(frame, &h)
-		current := 1
-		if len(h.SchemaVersion) > 0 {
-			_ = json.Unmarshal(h.SchemaVersion, &current)
-		}
+		current := record.SchemaVersion
 		if version == 0 {
 			version = current
 		} else if current != version {
 			return 0, 0, errors.New("mixed raw schema versions")
 		}
 		committed += int64(len(line))
+		chain = advanceRawChain(chain, record.Raw)
+		applyCursorResult(&summary, record)
+		if err := writeComplete(index, encodeRawAuthority(committed, chain, rawAuthoritySummaryHash(summary))); err != nil {
+			return 0, 0, err
+		}
 	}
+	if err := index.Close(); err != nil {
+		return 0, 0, err
+	}
+	if err := os.Rename(tmpPath, indexPath); err != nil {
+		return 0, 0, err
+	}
+	keepIndex = true
 	return sequence, version, nil
 }
 
