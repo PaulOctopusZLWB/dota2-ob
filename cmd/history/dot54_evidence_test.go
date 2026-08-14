@@ -167,7 +167,11 @@ func TestReconcileDOT54DiscoveryRejectsDuplicateMatch(t *testing.T) {
 	explorer.Rows = append(explorer.Rows, explorer.Rows[0])
 	explorer.RowCount++
 	provider.OpenDota.Explorer.RowCount++
-	if err := reconcileDOT54Discovery(source, explorer, provider, checkpoints, 1786492800); err == nil || !strings.Contains(err.Error(), "duplicate Explorer match_id") {
+	resolved, _, err := resolveDOT54Roster(source, mustReadDOT54Official(t, source).Teams, mustReadDOT54Registry(t, source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileDOT54Discovery(source, explorer, provider, checkpoints, resolved, 1786492800); err == nil || !strings.Contains(err.Error(), "duplicate Explorer match_id") {
 		t.Fatalf("error=%v, want duplicate Explorer match_id", err)
 	}
 }
@@ -187,8 +191,97 @@ func TestReconcileDOT54DiscoveryRequiresEveryCandidatePagePair(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpoints = checkpoints[:len(checkpoints)-1]
-	if err := reconcileDOT54Discovery(source, explorer, provider, checkpoints, 1786492800); err == nil || !strings.Contains(err.Error(), "checkpoint page-pair count differs") {
+	resolved, _, err := resolveDOT54Roster(source, mustReadDOT54Official(t, source).Teams, mustReadDOT54Registry(t, source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileDOT54Discovery(source, explorer, provider, checkpoints, resolved, 1786492800); err == nil || !strings.Contains(err.Error(), "checkpoint page-pair count differs") {
 		t.Fatalf("error=%v, want checkpoint page-pair count differs", err)
+	}
+}
+
+func TestReconcileDOT54DiscoveryRejectsCandidateOutsideResolvedAllowSet(t *testing.T) {
+	source := writeDOT54TestSource(t)
+	var explorer dot54ExplorerResponse
+	var provider dot54ProviderSourceDescriptor
+	if err := readDOT54JSON(filepath.Join(source, "pages", "opendota", "explorer-frozen-identity.json"), &explorer); err != nil {
+		t.Fatal(err)
+	}
+	if err := readDOT54JSON(filepath.Join(source, "pages", "opendota", "provider-source.json"), &provider); err != nil {
+		t.Fatal(err)
+	}
+	checkpoints, err := readDOT54PageCheckpoints(filepath.Join(source, "pages", "opendota", "team-pages.checkpoint.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := make([]dot54ResolvedTeam, 0, len(provider.OpenDota.Explorer.TeamIDs)-1)
+	for _, id := range provider.OpenDota.Explorer.TeamIDs[1:] {
+		resolved = append(resolved, dot54ResolvedTeam{TeamID: fmt.Sprintf("valve-team:%d", id)})
+	}
+	if err := reconcileDOT54Discovery(source, explorer, provider, checkpoints, resolved, 1786492800); err == nil || !strings.Contains(err.Error(), "conflict-resolved allow-set") {
+		t.Fatalf("error=%v, want conflict-resolved allow-set rejection", err)
+	}
+}
+
+func TestUnresolvedScopeDoesNotEmitHistoricalNoGoCandidate(t *testing.T) {
+	source := writeDOT54TestSource(t)
+	out := filepath.Join(t.TempDir(), "evidence")
+	if _, err := runDOT54Evidence(source, out); err != nil {
+		t.Fatal(err)
+	}
+	var readiness dot54ReadinessEvidence
+	if err := readDOT54JSON(filepath.Join(out, "readiness.json"), &readiness); err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Outcome == "historical_no_go_candidate" {
+		t.Fatalf("unresolved prerequisite was mislabeled as terminal outcome: %#v", readiness)
+	}
+	if readiness.Outcome != "unresolved_scope_blocker" {
+		t.Fatalf("outcome=%q want unresolved_scope_blocker", readiness.Outcome)
+	}
+}
+
+func TestParseDOT54TournamentRosterUsesCutoffRolesAndRejectsFormer(t *testing.T) {
+	wiki := `|{{Opponent|LGD Gaming
+|players={{Persons
+|{{Person|role=1|Yuma}}
+|{{Person|role=2|Topson|trophies=2}}
+|{{Person|role=3|Wisper}}
+|{{Person|role=4|Thiolicor}}
+|{{Person|role=5|KJ}}
+|{{Person|role=2|TaiLung|status=former|results=false}}
+}}
+}}`
+	teams, err := parseDOT54TournamentRoster(wiki)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(teams) != 1 || len(teams[0].Players) != 5 {
+		t.Fatalf("teams=%#v", teams)
+	}
+	if teams[0].Players[1].Handle != "Topson" || teams[0].Players[1].Position != 2 {
+		t.Fatalf("cutoff role not preserved: %#v", teams[0].Players)
+	}
+	for _, player := range teams[0].Players {
+		if player.Handle == "TaiLung" {
+			t.Fatal("former player re-entered cutoff roster")
+		}
+	}
+}
+
+func TestDOT54ReportIsDerivedFromSealedReadiness(t *testing.T) {
+	report := dot54Report(
+		dot54ScopeCandidate{Outcome: "materialized", Teams: []dot54ResolvedTeam{{TeamID: "1", Players: []dot54ResolvedPlayer{{PersonID: "10"}}}}},
+		dot54DiscoveryEvidence{Matches: make([]dot54TerminalMatch, 2), TerminalCount: map[string]uint32{dot54StateReplayIdentityQuarantined: 1, dot54StateGateTargetNotSelected: 1}},
+		dot54ReadinessEvidence{Outcome: "historical_no_go_candidate", ReplayAccessibleTotal: 1, ParserExecutionTotal: 2, RepeatablyProcessedTotal: 0, ParserRequired: "parser@version", Reason: "identity correlation failed"},
+	)
+	for _, want := range []string{"`materialized`", "1 selected teams", "2 independent parser executions", "identity correlation failed"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+	if strings.Contains(report, "do not prove roster effective intervals") || strings.Contains(report, "blocked upstream of download") {
+		t.Fatalf("report retained rejected evidence statement:\n%s", report)
 	}
 }
 
@@ -241,7 +334,7 @@ func writeDOT54TestSource(t *testing.T) string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			line, err := json.Marshal(dot54PageCheckpoint{TeamID: fmt.Sprint(teamID), Kind: kind, HTTPStatus: 200, SHA256: mustDOT54TestFileSHA(t, path), Bytes: info.Size()})
+			line, err := json.Marshal(dot54PageCheckpoint{TeamID: fmt.Sprint(teamID), Kind: kind, URL: fmt.Sprintf("https://api.opendota.com/api/teams/%d/%s", teamID, kind), RetrievedAt: "2026-08-14T01:50:00Z", ProvenanceClass: "Valve-derived test metadata", HTTPStatus: 200, SHA256: mustDOT54TestFileSHA(t, path), Bytes: info.Size()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,9 +355,9 @@ func writeDOT54TestSource(t *testing.T) string {
 	mustJSON(filepath.Join(root, "pages", "opendota", "teams.json"), registry)
 	mustJSON(filepath.Join(root, "pages", "opendota", "constants-patch.json"), []dot54Patch{{Name: "7.41", Date: "2026-03-24T00:50:59Z", ID: 60}})
 	explorer := dot54ExplorerResponse{RowCount: 3, Rows: []dot54ExplorerMatch{
-		{MatchID: 1, StartTime: 1774313458, ReplaySalt: ptrInt64(10), Version: ptrInt64(22)},
-		{MatchID: 2, StartTime: 1774313459, ReplaySalt: nil, Version: ptrInt64(22)},
-		{MatchID: 3, StartTime: 1774313460, ReplaySalt: ptrInt64(11), Version: ptrInt64(22)},
+		{MatchID: 1, StartTime: 1774313458, ReplaySalt: ptrInt64(10), Version: ptrInt64(22), RadiantTeamID: 1001},
+		{MatchID: 2, StartTime: 1774313459, ReplaySalt: nil, Version: ptrInt64(22), RadiantTeamID: 1001},
+		{MatchID: 3, StartTime: 1774313460, ReplaySalt: ptrInt64(11), Version: ptrInt64(22), RadiantTeamID: 1001},
 	}}
 	mustJSON(filepath.Join(root, "pages", "opendota", "explorer-frozen-identity.json"), explorer)
 	mustJSON(filepath.Join(root, "pages", "valve-head", "manifest.json"), []dot54ValveHead{{MatchID: "3", URL: "http://replay1.valve.net/570/3_11.dem.bz2", HTTPStatus: 200, ContentLength: 99, HeaderSHA256: sha256Text("head")}})
@@ -299,6 +392,24 @@ func writeDOT54TestSource(t *testing.T) string {
 		"valve_cdn": map[string]any{"manifest_sha256": mustDOT54TestFileSHA(t, filepath.Join(root, "pages", "valve-head", "manifest.json"))},
 	})
 	return root
+}
+
+func mustReadDOT54Official(t *testing.T, source string) dot54OfficialRoster {
+	t.Helper()
+	var value dot54OfficialRoster
+	if err := readDOT54JSON(filepath.Join(source, "official-roster-extracted.json"), &value); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func mustReadDOT54Registry(t *testing.T, source string) []dot54TeamRegistryEntry {
+	t.Helper()
+	var value []dot54TeamRegistryEntry
+	if err := readDOT54JSON(filepath.Join(source, "pages", "opendota", "teams.json"), &value); err != nil {
+		t.Fatal(err)
+	}
+	return value
 }
 
 func mustDOT54TestFileSHA(t *testing.T, path string) string {
