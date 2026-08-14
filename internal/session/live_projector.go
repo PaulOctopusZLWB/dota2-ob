@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -209,7 +210,15 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 	err := f.scanRange(projected+1, highWater, func(record *Record, nextOffset int64, rawChain [sha256.Size]byte) error {
 		f.healthMu.Lock()
 		f.oldestLagAt = record.ReceivedAt
+		next := cursorFromHealth(f.sessionID, record.Sequence, f.health)
+		applyCursorResult(&next, record)
 		f.healthMu.Unlock()
+		next.NextOffset = nextOffset
+		next.RawChainSHA256 = hex.EncodeToString(rawChain[:])
+		if err := appendRawAuthority(f.rawPath, record.Sequence, nextOffset, rawChain, rawAuthoritySummaryHash(next)); err != nil {
+			f.invalidateProjectionCache()
+			return fmt.Errorf("write raw authority: %w", err)
+		}
 		if record.ProjectionResult == ProjectionProduced {
 			start := 0
 			if f.pendingSequence == record.Sequence {
@@ -228,22 +237,12 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 				f.nextProjection = index + 1
 			}
 		}
-		f.healthMu.Lock()
-		next := cursorFromHealth(f.sessionID, record.Sequence, f.health)
-		applyCursorResult(&next, record)
-		f.healthMu.Unlock()
 		if record.ProjectionResult == ProjectionConsumedNoOutput || next.ProjectionRejectionActive != f.currentRejectionActive() {
 			if err := f.emitRejectionTransition(ctx, next); err != nil {
 				return err
 			}
 		}
 		f.restoreRejectionSummary(next)
-		next.NextOffset = nextOffset
-		next.RawChainSHA256 = hex.EncodeToString(rawChain[:])
-		if err := appendRawAuthority(f.rawPath, record.Sequence, nextOffset, rawChain, rawAuthoritySummaryHash(next)); err != nil {
-			_ = os.Remove(rawAuthorityPath(f.rawPath))
-			return fmt.Errorf("write raw authority: %w", err)
-		}
 		if err := f.writeCursor(next); err != nil {
 			return err
 		}
@@ -313,6 +312,8 @@ func (f *LiveFollower) resetProjectionState() {
 	f.cachedSequence = 0
 	f.nextOffset = 0
 	f.rawChain = [sha256.Size]byte{}
+	f.pendingSequence = 0
+	f.nextProjection = 0
 	f.healthMu.Lock()
 	f.health.ProjectedSequence = 0
 	f.health.ProjectionRejectionActive = false
@@ -321,6 +322,16 @@ func (f *LiveFollower) resetProjectionState() {
 	f.health.LastProjectionRejectionCode = ""
 	f.health.LastProjectionRejectionReason = ""
 	f.healthMu.Unlock()
+}
+
+func (f *LiveFollower) invalidateProjectionCache() {
+	wasRestoring := f.restoring
+	_ = os.Remove(rawAuthorityPath(f.rawPath))
+	_ = f.cursorIO.Remove(f.cursorPath)
+	f.resetProjectionState()
+	// If the publication barrier is already open, retry inside that same
+	// restore. Otherwise force the next call through a fresh startup restore.
+	f.loaded = wasRestoring
 }
 func (f *LiveFollower) currentRejectionActive() bool {
 	f.healthMu.Lock()
@@ -389,7 +400,7 @@ func (f *LiveFollower) loadCursor(highWater uint64) (liveCursor, bool) {
 		return liveCursor{}, false
 	}
 	var cached liveCursor
-	if json.Unmarshal(data, &cached) != nil || cached.SchemaVersion != 3 || cached.SessionID != f.sessionID || cached.Sequence > highWater || !validCursorSummary(cached) || !validCursorProof(cached) || !f.validCursorBoundary(cached) {
+	if json.Unmarshal(data, &cached) != nil || cached.SchemaVersion != 3 || cached.SessionID != f.sessionID || cached.Sequence > highWater || !validCursorSummary(cached) || !validCursorProof(cached) || !rawAuthorityGuardValid(f.rawPath) || !f.validCursorBoundary(cached) {
 		return liveCursor{}, false
 	}
 	return cached, true
@@ -485,14 +496,8 @@ func StreamRecords(rawPath, sessionID string, apply func(*Record) error) error {
 }
 
 func rawPathIsV3(path string) bool {
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	prefix := make([]byte, 64)
-	n, _ := file.Read(prefix)
-	return persistedPrefixDeclaresV3(bytes.TrimLeft(prefix[:n], " \t\r\n"))
+	version, err := detectRawSchemaVersion(path)
+	return err == nil && version == 3
 }
 
 func scanLegacyRecords(rawPath, sessionID string, apply func(*Record) error) error {
@@ -606,6 +611,10 @@ func readLegacyFrame(reader *bufio.Reader) ([]byte, bool, error) {
 }
 
 func scanRecordRange(rawPath, sessionID string, from, through uint64, requireThrough bool, apply func(*Record) error) error {
+	framingVersion, err := detectRawSchemaVersion(rawPath)
+	if err != nil {
+		return fmt.Errorf("detect raw schema: %w", err)
+	}
 	file, err := os.Open(rawPath)
 	if err != nil {
 		return fmt.Errorf("open raw log: %w", err)
@@ -615,7 +624,7 @@ func scanRecordRange(rawPath, sessionID string, from, through uint64, requireThr
 	want := uint64(1)
 	version := 0
 	for {
-		line, terminated, err := readPersistedLine(reader)
+		line, terminated, err := readPersistedLine(reader, framingVersion)
 		if err == io.EOF && len(line) == 0 {
 			break
 		}
@@ -667,7 +676,7 @@ func scanV3RecordRange(rawPath, sessionID string, startOffset int64, from, throu
 		_ = os.Remove(rawAuthorityPath(rawPath))
 	}
 	for want <= through {
-		line, terminated, err := readPersistedLine(reader)
+		line, terminated, err := readPersistedLine(reader, 3)
 		if err == io.EOF && len(line) == 0 {
 			return fmt.Errorf("raw sequence %d is not committed", want)
 		}
@@ -699,30 +708,131 @@ func scanV3RecordRange(rawPath, sessionID string, startOffset int64, from, throu
 
 const maxLegacyFrameBytes = 32 << 20
 
-func readPersistedLine(reader *bufio.Reader) ([]byte, bool, error) {
-	probe, _ := reader.Peek(256)
-	trimmed := bytes.TrimLeft(probe, " \t\r\n")
-	if persistedPrefixDeclaresV3(trimmed) {
+func readPersistedLine(reader *bufio.Reader, version int) ([]byte, bool, error) {
+	if version == 3 {
 		return readBoundedLine(reader, maxEncodedRecordBytes, "V3 frame exceeds encoded limit")
 	}
 	return readBoundedLine(reader, maxLegacyFrameBytes, "raw frame exceeds bounded limit")
 }
 
-func persistedPrefixDeclaresV3(prefix []byte) bool {
-	if len(prefix) == 0 || prefix[0] != '{' {
-		return false
+func detectRawSchemaVersion(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
 	}
-	rest := bytes.TrimLeft(prefix[1:], " \t\r\n")
-	key := []byte(`"schema_version"`)
-	if !bytes.HasPrefix(rest, key) {
-		return false
+	defer file.Close()
+	return detectSchemaVersion(bufio.NewReaderSize(file, 64*1024))
+}
+
+// detectSchemaVersion streams the first top-level object without retaining
+// member values. It is deliberately independent of member order so an invalid
+// V3 frame cannot select the larger legacy accumulation limit.
+func detectSchemaVersion(reader *bufio.Reader) (int, error) {
+	depth := 0
+	inString, escaped, capturingKey := false, false, false
+	expectingKey, expectingColon := false, false
+	key := make([]byte, 0, len("schema_version"))
+	matchedKey := false
+	value := make([]byte, 0, 16)
+	readingVersion := false
+	read := 0
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			if err == io.EOF {
+				return 1, nil
+			}
+			return 0, err
+		}
+		read++
+		if read > maxLegacyFrameBytes {
+			return 0, errors.New("raw frame exceeds bounded limit")
+		}
+		if readingVersion {
+			if len(value) == 0 && (b == ' ' || b == '\t' || b == '\r' || b == '\n') {
+				continue
+			}
+			if b == ',' || b == '}' || b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+				parsed, parseErr := strconv.ParseFloat(string(value), 64)
+				if parseErr == nil && parsed == 3 {
+					return 3, nil
+				}
+				return 2, nil
+			}
+			if len(value) < 32 {
+				value = append(value, b)
+			}
+			continue
+		}
+		if inString {
+			if escaped {
+				escaped = false
+				if capturingKey && len(key) <= len("schema_version") {
+					key = append(key, b)
+				}
+				continue
+			}
+			if b == '\\' {
+				escaped = true
+				continue
+			}
+			if b == '"' {
+				inString = false
+				if capturingKey {
+					expectingKey = false
+					expectingColon = true
+					matchedKey = string(key) == "schema_version"
+					capturingKey = false
+				}
+				continue
+			}
+			if capturingKey && len(key) <= len("schema_version") {
+				key = append(key, b)
+			}
+			continue
+		}
+		if expectingColon {
+			if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+				continue
+			}
+			if b == ':' {
+				expectingColon = false
+				if matchedKey {
+					readingVersion = true
+				}
+				continue
+			}
+			return 1, nil
+		}
+		switch b {
+		case '"':
+			inString = true
+			capturingKey = depth == 1 && expectingKey
+			if capturingKey {
+				key = key[:0]
+			}
+		case '{':
+			depth++
+			if depth == 1 {
+				expectingKey = true
+			}
+		case '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth <= 0 {
+				return 1, nil
+			}
+		case ',':
+			if depth == 1 {
+				expectingKey = true
+			}
+		case '\n':
+			if depth == 0 {
+				return 1, nil
+			}
+		}
 	}
-	rest = bytes.TrimLeft(rest[len(key):], " \t\r\n")
-	if len(rest) == 0 || rest[0] != ':' {
-		return false
-	}
-	rest = bytes.TrimLeft(rest[1:], " \t\r\n")
-	return len(rest) > 0 && rest[0] == '3'
 }
 
 func readBoundedLine(reader *bufio.Reader, maxFrameBytes int, message string) ([]byte, bool, error) {

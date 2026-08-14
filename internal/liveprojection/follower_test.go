@@ -813,6 +813,98 @@ func TestFollowerUsesExactlyOneAuthoritativeScanAtRequiredRange(t *testing.T) {
 	}
 }
 
+func TestFollowerInvalidatesSameLengthCanonicalRawRewrite(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("rewritten-prefix"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+	seed := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, nil)
+	if err := seed.CatchUp(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	line, err := os.ReadFile(store.RawPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := sha256.Sum256([]byte(`{}`))
+	newHash := sha256.Sum256([]byte(`[]`))
+	line = bytes.Replace(line, []byte(`"raw_base64":"e30="`), []byte(`"raw_base64":"W10="`), 1)
+	line = bytes.Replace(line, []byte(hex.EncodeToString(oldHash[:])), []byte(hex.EncodeToString(newHash[:])), 1)
+	if err := os.WriteFile(store.RawPath(), line, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := &scanRecorder{}
+	sink := &controlSink{}
+	projection := &controlAwareProjection{sink: sink}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithScanObserver(recorder), liveprojection.WithStartupBarrier(sink))
+	if err := follower.CatchUp(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if ranges := recorder.snapshot(); len(ranges) != 1 || ranges[0].FromSequence != 1 || ranges[0].ThroughSequence != 1 || ranges[0].StartOffset != 0 {
+		t.Fatalf("rewritten prefix scans=%#v", ranges)
+	}
+	if len(projection.sequences) != 0 {
+		t.Fatalf("non-object rewrite reached adapters: %v", projection.sequences)
+	}
+	if health := follower.Health(); !health.ProjectionRejectionActive || health.ProjectionRejectionCount != 1 || health.LastProjectionRejectionSequence != 1 {
+		t.Fatalf("rewritten prefix health=%#v", health)
+	}
+}
+
+func TestFollowerCorruptFutureAuthorityRebuildsAtomicallyAndRetriesIdempotently(t *testing.T) {
+	root := t.TempDir()
+	store := appendRecords(t, root, "corrupt-future", 1)
+	cursorPath := filepath.Join(store.SessionDir(), "cursor.json")
+	seed := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, nil)
+	if err := seed.CatchUp(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"map":{"game_time":2}}`)); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(store.SessionDir(), "raw.jsonl.authority-v3")
+	entry, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, append(entry, make([]byte, len(entry))...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := &scanRecorder{}
+	sink := &controlSink{}
+	projection := &controlAwareProjection{sink: sink}
+	follower := liveprojection.New(store.SessionID(), store.RawPath(), cursorPath, []liveprojection.Projection{projection}, liveprojection.WithScanObserver(recorder), liveprojection.WithStartupBarrier(sink))
+	if err := follower.CatchUp(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if ranges := recorder.snapshot(); len(ranges) != 1 || ranges[0].FromSequence != 1 || ranges[0].ThroughSequence != 2 || ranges[0].StartOffset != 0 {
+		t.Fatalf("corrupt future scans=%#v", ranges)
+	}
+	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2}) {
+		t.Fatalf("adapter calls=%v", projection.sequences)
+	}
+	if !projection.calledWhileRestoreOpen {
+		t.Fatal("corrupt future index published outside startup barrier")
+	}
+	if err := follower.CatchUp(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if ranges := recorder.snapshot(); len(ranges) != 1 {
+		t.Fatalf("idempotent retry rescanned: %#v", ranges)
+	}
+	if !reflect.DeepEqual(projection.sequences, []uint64{1, 2}) {
+		t.Fatalf("idempotent retry republished: %v", projection.sequences)
+	}
+}
+
 var _ io.Writer = cursorFaultFile{}
 
 func appendRecordsUsing(t *testing.T, store *session.Store, count int) {

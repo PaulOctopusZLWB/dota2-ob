@@ -118,14 +118,24 @@ func TestV3CanonicalAndNoncanonicalFramingMatrix(t *testing.T) {
 }
 
 func TestV3ReadersRejectTerminatedFrameAtFormulaLimitBeforeLegacyCap(t *testing.T) {
-	for _, prefix := range []string{`{"schema_version":3,`, ` { "schema_version" : 3.0,`} {
-		t.Run(prefix, func(t *testing.T) {
+	lateHead := `{"session_id":"overlimit","unknown":"`
+	lateTail := `","schema_version":3,`
+	lateOrdered := lateHead + strings.Repeat("x", session.MaxEncodedRecordBytes()+1-len(lateHead)-len(lateTail)) + lateTail
+	for _, tc := range []struct{ name, prefix string }{
+		{"canonical", `{"schema_version":3,`},
+		{"noncanonical-number", ` { "schema_version" : 3.0,`},
+		{"session-first", `{"session_id":"overlimit","schema_version":3,`},
+		{"nested-unknown-first", `{"unknown":{"nested":true},"schema_version":3,`},
+		{"adversarial-spacing-and-order", ` { "session_id" : "overlimit" , "unknown" : null , "schema_version" : 3 ,`},
+		{"schema-after-formula-bound", lateOrdered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			dir := filepath.Join(root, "overlimit")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			frame := append([]byte(prefix), bytes.Repeat([]byte{' '}, session.MaxEncodedRecordBytes()+1-len(prefix))...)
+			frame := append([]byte(tc.prefix), bytes.Repeat([]byte{' '}, session.MaxEncodedRecordBytes()+1-len(tc.prefix))...)
 			frame = append(frame, '\n')
 			path := filepath.Join(dir, "raw.jsonl")
 			if err := os.WriteFile(path, frame, 0o600); err != nil {

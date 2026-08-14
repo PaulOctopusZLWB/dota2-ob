@@ -161,6 +161,10 @@ func (s *Store) Append(raw []byte) (*Record, error) {
 			return nil, fmt.Errorf("%w: open", ErrAppendFailed)
 		}
 	}
+	if valid, available := rawContentGuardState(s.RawPath()); available && !valid {
+		s.sealed = true
+		return nil, ErrStoreSealed
+	}
 	prior, err := s.file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return nil, fmt.Errorf("%w: seek", ErrAppendFailed)
@@ -178,8 +182,10 @@ func (s *Store) Append(raw []byte) (*Record, error) {
 			s.sealed = true
 			return nil, ErrStoreSealed
 		}
+		_ = refreshRawContentGuard(s.RawPath())
 		return nil, ErrAppendFailed
 	}
+	_ = refreshRawContentGuard(s.RawPath())
 	s.sequence = next
 	if s.highWater != nil {
 		s.highWater.Publish(next)
@@ -261,6 +267,10 @@ func (s *Store) Close() error {
 
 func recoverRawFile(path, sessionID string) (uint64, int, error) {
 	var chain [sha256.Size]byte
+	framingVersion, detectErr := detectRawSchemaVersion(path)
+	if detectErr != nil && !errors.Is(detectErr, os.ErrNotExist) {
+		return 0, 0, fmt.Errorf("detect raw schema: %w", detectErr)
+	}
 	file, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, 0, nil
@@ -288,7 +298,7 @@ func recoverRawFile(path, sessionID string) (uint64, int, error) {
 	committed := int64(0)
 	summary := liveCursor{SchemaVersion: 3, SessionID: sessionID}
 	for {
-		line, terminated, readErr := readPersistedLine(reader)
+		line, terminated, readErr := readPersistedLine(reader, framingVersion)
 		if readErr == io.EOF {
 			if len(line) > 0 {
 				if err := file.Truncate(committed); err != nil {
@@ -329,6 +339,7 @@ func recoverRawFile(path, sessionID string) (uint64, int, error) {
 		return 0, 0, err
 	}
 	keepIndex = true
+	_ = refreshCompleteRawGuard(path)
 	return sequence, version, nil
 }
 

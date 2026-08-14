@@ -61,6 +61,7 @@ func appendRawAuthority(rawPath string, sequence uint64, offset int64, chain, su
 		if _, err := file.ReadAt(existing, want); err != nil || !bytes.Equal(existing, encoded) {
 			return errors.New("raw authority entry mismatch")
 		}
+		_ = refreshAuthorityGuard(rawPath)
 		return nil
 	}
 	if info.Size() != want {
@@ -69,7 +70,11 @@ func appendRawAuthority(rawPath string, sequence uint64, offset int64, chain, su
 	if _, err := file.Seek(want, io.SeekStart); err != nil {
 		return err
 	}
-	return writeComplete(file, encoded)
+	if err := writeComplete(file, encoded); err != nil {
+		return err
+	}
+	_ = refreshAuthorityGuard(rawPath)
+	return nil
 }
 
 func readRawAuthority(rawPath string, sequence uint64) (int64, [sha256.Size]byte, [sha256.Size]byte, bool) {
