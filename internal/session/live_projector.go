@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,16 +21,27 @@ type LiveProjection interface {
 	Apply(context.Context, *Record) error
 }
 type LiveProjectionHealth struct {
-	HighWater         uint64        `json:"high_water"`
-	ProjectedSequence uint64        `json:"projected_sequence"`
-	LagCount          uint64        `json:"lag_count"`
-	OldestLagAge      time.Duration `json:"oldest_lag_age"`
-	LastError         string        `json:"last_error,omitempty"`
-	Degraded          bool          `json:"degraded"`
+	HighWater                       uint64        `json:"high_water"`
+	ProjectedSequence               uint64        `json:"projected_sequence"`
+	LagCount                        uint64        `json:"lag_count"`
+	OldestLagAge                    time.Duration `json:"oldest_lag_age"`
+	LastError                       string        `json:"last_error,omitempty"`
+	Degraded                        bool          `json:"degraded"`
+	ProjectionRejectionActive       bool          `json:"projection_rejection_active"`
+	ProjectionRejectionCount        uint64        `json:"projection_rejection_count"`
+	LastProjectionRejectionSequence uint64        `json:"last_projection_rejection_sequence"`
+	LastProjectionRejectionCode     string        `json:"last_projection_rejection_code,omitempty"`
+	LastProjectionRejectionReason   string        `json:"last_projection_rejection_reason,omitempty"`
 }
 type liveCursor struct {
-	SessionID string `json:"session_id"`
-	Sequence  uint64 `json:"sequence"`
+	SchemaVersion                   int    `json:"schema_version"`
+	SessionID                       string `json:"session_id"`
+	Sequence                        uint64 `json:"sequence"`
+	ProjectionRejectionActive       bool   `json:"projection_rejection_active"`
+	ProjectionRejectionCount        uint64 `json:"projection_rejection_count"`
+	LastProjectionRejectionSequence uint64 `json:"last_projection_rejection_sequence"`
+	LastProjectionRejectionCode     string `json:"last_projection_rejection_code,omitempty"`
+	LastProjectionRejectionReason   string `json:"last_projection_rejection_reason,omitempty"`
 }
 type CursorFile interface {
 	io.Writer
@@ -116,7 +128,17 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 		// Cursor is a cache of completed work, not a durable adapter checkpoint.
 		// Rebuild fresh process-local adapters through it from authoritative raw,
 		// then resume durable cursor replacement at cached sequence + 1.
-		f.cachedSequence = f.loadCursor(highWater)
+		cached, valid := f.loadCursor(highWater)
+		if valid {
+			f.cachedSequence = cached.Sequence
+			f.healthMu.Lock()
+			f.health.ProjectionRejectionActive = cached.ProjectionRejectionActive
+			f.health.ProjectionRejectionCount = cached.ProjectionRejectionCount
+			f.health.LastProjectionRejectionSequence = cached.LastProjectionRejectionSequence
+			f.health.LastProjectionRejectionCode = cached.LastProjectionRejectionCode
+			f.health.LastProjectionRejectionReason = cached.LastProjectionRejectionReason
+			f.healthMu.Unlock()
+		}
 		f.loaded = true
 	}
 	f.healthMu.Lock()
@@ -130,35 +152,49 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 	if projected >= highWater {
 		return nil
 	}
-	records, err := f.readRange(projected+1, highWater)
-	if err != nil {
-		return f.fail(err)
-	}
-	for _, record := range records {
+	err := f.forEachRange(projected+1, highWater, func(record *Record) error {
 		f.healthMu.Lock()
 		if f.oldestLagAt.IsZero() {
 			f.oldestLagAt = record.ReceivedAt
 		}
 		f.healthMu.Unlock()
-		start := 0
-		if f.pendingSequence == record.Sequence {
-			start = f.nextProjection
-		} else {
-			f.pendingSequence = record.Sequence
-			f.nextProjection = 0
+		if record.ProjectionResult == ProjectionProduced {
+			start := 0
+			if f.pendingSequence == record.Sequence {
+				start = f.nextProjection
+			} else {
+				f.pendingSequence = record.Sequence
+				f.nextProjection = 0
+			}
+			for index := start; index < len(f.projections); index++ {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if err := f.projections[index].Apply(ctx, record); err != nil {
+					return fmt.Errorf("project sequence %d: %w", record.Sequence, err)
+				}
+				f.nextProjection = index + 1
+			}
 		}
-		for index := start; index < len(f.projections); index++ {
-			if err := ctx.Err(); err != nil {
-				return f.fail(err)
+		rebuildingCached := record.Sequence <= f.cachedSequence
+		if !rebuildingCached {
+			f.healthMu.Lock()
+			if record.ProjectionResult == ProjectionConsumedNoOutput {
+				f.health.ProjectionRejectionActive = true
+				if f.health.LastProjectionRejectionSequence != record.Sequence {
+					f.health.ProjectionRejectionCount++
+					f.health.LastProjectionRejectionSequence = record.Sequence
+					f.health.LastProjectionRejectionCode = record.ProjectionCode
+					f.health.LastProjectionRejectionReason = record.ProjectionReason
+				}
+			} else {
+				f.health.ProjectionRejectionActive = false
 			}
-			if err := f.projections[index].Apply(ctx, record); err != nil {
-				return f.fail(fmt.Errorf("project sequence %d: %w", record.Sequence, err))
-			}
-			f.nextProjection = index + 1
+			f.healthMu.Unlock()
 		}
 		if record.Sequence > f.cachedSequence {
 			if err := f.writeCursor(record.Sequence); err != nil {
-				return f.fail(err)
+				return err
 			}
 			f.cachedSequence = record.Sequence
 		}
@@ -176,6 +212,10 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 		}
 		f.updateLagLocked()
 		f.healthMu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return f.fail(err)
 	}
 	return nil
 }
@@ -211,57 +251,240 @@ func (f *LiveFollower) Run(ctx context.Context, updates <-chan HighWaterMark) er
 		}
 	}
 }
-func (f *LiveFollower) loadCursor(highWater uint64) uint64 {
+func (f *LiveFollower) loadCursor(highWater uint64) (liveCursor, bool) {
 	data, err := os.ReadFile(f.cursorPath)
 	if err != nil {
-		return 0
+		return liveCursor{}, false
 	}
 	var cached liveCursor
-	if json.Unmarshal(data, &cached) != nil || cached.SessionID != f.sessionID || cached.Sequence > highWater {
-		return 0
+	if json.Unmarshal(data, &cached) != nil || cached.SchemaVersion != 2 || cached.SessionID != f.sessionID || cached.Sequence > highWater || !validCursorSummary(cached) {
+		return liveCursor{}, false
 	}
-	return cached.Sequence
+	return cached, true
 }
-func (f *LiveFollower) readRange(from, through uint64) ([]*Record, error) {
-	file, err := os.Open(f.rawPath)
+
+func validCursorSummary(c liveCursor) bool {
+	if c.ProjectionRejectionCount == 0 {
+		return !c.ProjectionRejectionActive && c.LastProjectionRejectionSequence == 0 && c.LastProjectionRejectionCode == "" && c.LastProjectionRejectionReason == ""
+	}
+	if c.LastProjectionRejectionSequence == 0 || c.LastProjectionRejectionSequence > c.Sequence {
+		return false
+	}
+	if c.ProjectionRejectionActive && c.LastProjectionRejectionSequence != c.Sequence {
+		return false
+	}
+	switch c.LastProjectionRejectionCode {
+	case "gsi_projection_non_object":
+		return c.LastProjectionRejectionReason == "top_level_non_object"
+	case "gsi_projection_bounds_exceeded":
+		for _, reason := range []string{"participant_count", "item_count", "ability_count", "building_count", "identifier_bytes", "string_bytes", "number_bytes"} {
+			if c.LastProjectionRejectionReason == reason {
+				return true
+			}
+		}
+	}
+	return false
+}
+func (f *LiveFollower) forEachRange(from, through uint64, apply func(*Record) error) error {
+	return scanRecordRange(f.rawPath, f.sessionID, from, through, true, apply)
+}
+
+// StreamRecords decodes and validates one bounded raw frame at a time. The
+// record and its exact raw bytes are owned only for the duration of apply.
+func StreamRecords(rawPath, sessionID string, apply func(*Record) error) error {
+	if !rawPathIsV3(rawPath) {
+		return scanLegacyRecords(rawPath, sessionID, apply)
+	}
+	return scanRecordRange(rawPath, sessionID, 1, 0, false, apply)
+}
+
+func rawPathIsV3(path string) bool {
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open raw log: %w", err)
+		return false
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 11<<20)
+	prefix := make([]byte, 64)
+	n, _ := file.Read(prefix)
+	return bytes.HasPrefix(bytes.TrimSpace(prefix[:n]), []byte(`{"schema_version":3,`))
+}
+
+func scanLegacyRecords(rawPath, sessionID string, apply func(*Record) error) error {
+	file, err := os.Open(rawPath)
+	if err != nil {
+		return fmt.Errorf("open raw log: %w", err)
+	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, 64*1024)
+	sequence := uint64(0)
+	version := 0
+	for {
+		frame, terminated, err := readLegacyFrame(reader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if !terminated {
+			break
+		}
+		sequence++
+		record, err := decodePersistedRecord(frame, sessionID, sequence)
+		if err != nil {
+			return fmt.Errorf("decode raw sequence %d: %w", sequence, err)
+		}
+		if version == 0 {
+			version = record.SchemaVersion
+		} else if version != record.SchemaVersion {
+			return errors.New("mixed raw schema versions")
+		}
+		if err := apply(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readLegacyFrame(reader *bufio.Reader) ([]byte, bool, error) {
+	const maxLegacyFrame = 32 << 20
+	frame := make([]byte, 0, 64*1024)
+	depth := 0
+	started := false
+	complete := false
+	inString := false
+	escaped := false
+	for {
+		b, err := reader.ReadByte()
+		if err == io.EOF {
+			return frame, false, io.EOF
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if len(frame) >= maxLegacyFrame {
+			return nil, false, errors.New("raw frame exceeds bounded limit")
+		}
+		if complete {
+			if b == '\n' {
+				return frame, true, nil
+			}
+			if b != ' ' && b != '\t' && b != '\r' {
+				return nil, false, errors.New("multiple JSON values on one raw line")
+			}
+			frame = append(frame, b)
+			continue
+		}
+		frame = append(frame, b)
+		if !started {
+			if b == '\n' {
+				trimmed := bytes.TrimSpace(frame[:len(frame)-1])
+				if len(trimmed) == 0 {
+					return nil, false, errors.New("blank raw record")
+				}
+				return append([]byte(nil), trimmed...), true, nil
+			}
+			if b == ' ' || b == '\t' || b == '\r' {
+				continue
+			}
+			if b != '{' {
+				continue
+			}
+			started = true
+			depth = 1
+			continue
+		}
+		if inString {
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			continue
+		}
+		if b == '{' || b == '[' {
+			depth++
+		} else if b == '}' || b == ']' {
+			depth--
+			if depth == 0 {
+				complete = true
+			}
+		}
+	}
+}
+
+func scanRecordRange(rawPath, sessionID string, from, through uint64, requireThrough bool, apply func(*Record) error) error {
+	file, err := os.Open(rawPath)
+	if err != nil {
+		return fmt.Errorf("open raw log: %w", err)
+	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, 64*1024)
 	want := uint64(1)
-	var records []*Record
-	for scanner.Scan() {
-		var record Record
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-			return nil, fmt.Errorf("decode raw sequence %d: %w", want, err)
+	version := 0
+	for {
+		line, terminated, err := readBoundedLine(reader)
+		if err == io.EOF && len(line) == 0 {
+			break
 		}
-		if record.SchemaVersion == 0 && record.SessionID == "" && record.Sequence == 0 && record.Source == "" && !record.ReceivedAt.IsZero() && record.Payload != nil && len(record.Raw) > 0 {
-			record.SchemaVersion = 1
-			record.SessionID = f.sessionID
-			record.Sequence = want
-			record.Source = "gsi"
+		if err != nil {
+			return err
 		}
-		if record.SessionID != f.sessionID || record.Sequence != want || (record.SchemaVersion != 1 && record.SchemaVersion != 2) || record.Source != "gsi" {
-			return nil, fmt.Errorf("invalid raw sequence %d", want)
+		if !terminated {
+			return fmt.Errorf("raw sequence %d has unterminated tail", want)
 		}
-		if want >= from && want <= through {
-			copy := record
-			records = append(records, &copy)
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		record, err := decodePersistedRecord(line, sessionID, want)
+		if err != nil {
+			return fmt.Errorf("decode raw sequence %d: %w", want, err)
+		}
+		if version == 0 {
+			version = record.SchemaVersion
+		} else if record.SchemaVersion != version {
+			return errors.New("mixed raw schema versions")
+		}
+		if want >= from && (!requireThrough || want <= through) {
+			if err := apply(record); err != nil {
+				return err
+			}
 		}
 		want++
-		if want > through {
+		if requireThrough && want > through {
 			break
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if requireThrough && want <= through {
+		return fmt.Errorf("raw sequence %d is not committed", want)
 	}
-	if want <= through {
-		return nil, fmt.Errorf("raw sequence %d is not committed", want)
+	return nil
+}
+
+func readBoundedLine(reader *bufio.Reader) ([]byte, bool, error) {
+	const maxLegacyFrame = 32 << 20
+	line := make([]byte, 0, 64*1024)
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > maxLegacyFrame {
+			return nil, false, errors.New("raw frame exceeds bounded limit")
+		}
+		line = append(line, fragment...)
+		switch err {
+		case nil:
+			return line, true, nil
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			return line, false, io.EOF
+		default:
+			return nil, false, err
+		}
 	}
-	return records, nil
 }
 func (f *LiveFollower) writeCursor(sequence uint64) error {
 	tmp, err := f.cursorIO.CreateTemp(filepath.Dir(f.cursorPath), ".live-projection-cursor-*.tmp")
@@ -279,7 +502,10 @@ func (f *LiveFollower) writeCursor(sequence uint64) error {
 		_ = tmp.Close()
 		return err
 	}
-	data, err := json.Marshal(liveCursor{SessionID: f.sessionID, Sequence: sequence})
+	f.healthMu.Lock()
+	cursor := liveCursor{SchemaVersion: 2, SessionID: f.sessionID, Sequence: sequence, ProjectionRejectionActive: f.health.ProjectionRejectionActive, ProjectionRejectionCount: f.health.ProjectionRejectionCount, LastProjectionRejectionSequence: f.health.LastProjectionRejectionSequence, LastProjectionRejectionCode: f.health.LastProjectionRejectionCode, LastProjectionRejectionReason: f.health.LastProjectionRejectionReason}
+	f.healthMu.Unlock()
+	data, err := json.Marshal(cursor)
 	if err == nil {
 		line := append(data, '\n')
 		var n int
@@ -310,7 +536,7 @@ func (f *LiveFollower) updateLagLocked() {
 		f.health.LagCount = 0
 		f.oldestLagAt = time.Time{}
 	}
-	f.health.Degraded = f.health.LagCount > 0 || f.health.LastError != ""
+	f.health.Degraded = f.health.LagCount > 0 || f.health.LastError != "" || f.health.ProjectionRejectionActive
 }
 func (f *LiveFollower) refreshHighWaterLocked() {
 	if f.highWater != nil {
@@ -326,11 +552,9 @@ func (f *LiveFollower) refreshHighWaterLocked() {
 	}
 }
 func (f *LiveFollower) recordReceivedAt(sequence uint64) (time.Time, error) {
-	records, err := f.readRange(sequence, sequence)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return records[0].ReceivedAt, nil
+	var at time.Time
+	err := f.forEachRange(sequence, sequence, func(record *Record) error { at = record.ReceivedAt; return nil })
+	return at, err
 }
 func (f *LiveFollower) fail(err error) error {
 	message := err.Error()

@@ -179,3 +179,56 @@ func TestCanonicalRebuildIsByteCompatible(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalRebuildStreamsRawRecordV3(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("v3-rebuild"), session.WithClock(func() time.Time { return time.Unix(1, 0).UTC() }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"map":{"game_time":1,"clock_time":1}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`null`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]byte(`{"map":{"game_time":2,"clock_time":2}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := AnalyzeSession(store.SessionDir(), store.SessionID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TickCount != 2 {
+		t.Fatalf("tick count=%d", snapshot.TickCount)
+	}
+}
+
+func TestLegacyV2RebuildSkipsOutOfDomainRecordAndContinues(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "legacy-bounds")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	players := make([]string, 11)
+	for i := range players {
+		players[i] = fmt.Sprintf(`"p%d":{}`, i)
+	}
+	over := `{"player":{"t":{` + strings.Join(players, ",") + `}}}`
+	valid := `{"map":{"game_time":2}}`
+	line := func(seq int, payload string) string {
+		return fmt.Sprintf(`{"schema_version":2,"session_id":"legacy-bounds","sequence":%d,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":%s,"raw":%s}`+"\n", seq, payload, payload)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(line(1, over)+line(2, valid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := AnalyzeSession(dir, "legacy-bounds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.TickCount != 1 {
+		t.Fatalf("tick count=%d", snapshot.TickCount)
+	}
+}

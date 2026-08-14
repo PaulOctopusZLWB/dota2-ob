@@ -1,7 +1,11 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,14 +52,25 @@ type Store struct {
 }
 
 type Record struct {
-	SchemaVersion int             `json:"schema_version"`
-	SessionID     string          `json:"session_id"`
-	Sequence      uint64          `json:"sequence"`
-	ReceivedAt    time.Time       `json:"received_at"`
-	Source        string          `json:"source"`
-	Payload       any             `json:"payload"`
-	Raw           json.RawMessage `json:"raw"`
+	SchemaVersion    int              `json:"schema_version"`
+	SessionID        string           `json:"session_id"`
+	Sequence         uint64           `json:"sequence"`
+	ReceivedAt       time.Time        `json:"received_at"`
+	Source           string           `json:"source"`
+	Payload          any              `json:"payload"`
+	Raw              json.RawMessage  `json:"raw"`
+	ProjectionResult ProjectionResult `json:"-"`
+	ProjectionCode   string           `json:"-"`
+	ProjectionReason string           `json:"-"`
 }
+
+type ProjectionResult string
+
+const (
+	ProjectionProduced         ProjectionResult = "produced"
+	ProjectionConsumedNoOutput ProjectionResult = "consumed_no_output"
+	maxRawBodyBytes                             = 10 << 20
+)
 
 func WithClock(clock Clock) Option {
 	return func(store *Store) {
@@ -100,9 +115,12 @@ func NewStore(root string, opts ...Option) (*Store, error) {
 	}
 
 	if store.openFile == nil {
-		sequence, err := recoverRawFile(store.RawPath(), store.sessionID)
+		sequence, version, err := recoverRawFile(store.RawPath(), store.sessionID)
 		if err != nil {
 			return nil, err
+		}
+		if sequence > 0 && version != 3 {
+			return nil, errors.New("legacy raw session is read-only; start a new V3 session")
 		}
 		store.sequence = sequence
 		store.openFile = func(path string) (RawFile, error) {
@@ -121,7 +139,10 @@ func (s *Store) RawPath() string       { return filepath.Join(s.SessionDir(), "r
 func (s *Store) HighWater() *HighWater { return s.highWater }
 
 func (s *Store) Append(raw []byte) (*Record, error) {
-	payload, err := decodeJSON(raw)
+	if len(raw) > maxRawBodyBytes {
+		return nil, fmt.Errorf("%w: body exceeds 10 MiB", ErrInvalidJSON)
+	}
+	payload, result, code, reason, err := decodeBoundedGSI(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -143,17 +164,13 @@ func (s *Store) Append(raw []byte) (*Record, error) {
 	}
 	next := s.sequence + 1
 	record := &Record{
-		SchemaVersion: 2, SessionID: s.sessionID, Sequence: next,
+		SchemaVersion: 3, SessionID: s.sessionID, Sequence: next,
 		ReceivedAt: s.clock().UTC(), Source: "gsi", Payload: payload,
-		Raw: append(json.RawMessage(nil), raw...),
+		Raw:              append(json.RawMessage(nil), raw...),
+		ProjectionResult: result, ProjectionCode: code, ProjectionReason: reason,
 	}
-	line, err := json.Marshal(record)
-	if err != nil {
-		return nil, fmt.Errorf("marshal record: %w", err)
-	}
-	line = append(line, '\n')
-	n, writeErr := s.file.Write(line)
-	if writeErr != nil || n != len(line) {
+	writeErr := writeRawRecordV3(s.file, record)
+	if writeErr != nil {
 		if rollbackErr := s.rollback(prior); rollbackErr != nil {
 			s.sealed = true
 			return nil, ErrStoreSealed
@@ -165,6 +182,44 @@ func (s *Store) Append(raw []byte) (*Record, error) {
 		s.highWater.Publish(next)
 	}
 	return record, nil
+}
+
+func writeRawRecordV3(w io.Writer, record *Record) error {
+	sum := sha256.Sum256(record.Raw)
+	prefix := fmt.Sprintf(`{"schema_version":3,"session_id":%q,"sequence":%d,"received_at":%q,"source":"gsi","raw_encoding":"base64_std","raw_byte_length":%d,"raw_base64":"`, record.SessionID, record.Sequence, record.ReceivedAt.UTC().Format(time.RFC3339Nano), len(record.Raw))
+	if err := writeComplete(w, []byte(prefix)); err != nil {
+		return err
+	}
+	encoder := base64.NewEncoder(base64.StdEncoding, writerFunc(func(p []byte) (int, error) {
+		if err := writeComplete(w, p); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}))
+	if _, err := encoder.Write(record.Raw); err != nil {
+		_ = encoder.Close()
+		return err
+	}
+	if err := encoder.Close(); err != nil {
+		return err
+	}
+	suffix := `","raw_payload_sha256":"` + hex.EncodeToString(sum[:]) + `"}` + "\n"
+	return writeComplete(w, []byte(suffix))
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func writeComplete(w io.Writer, p []byte) error {
+	n, err := w.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func (s *Store) rollback(offset int64) error {
@@ -201,42 +256,56 @@ func (s *Store) Close() error {
 	return s.file.Close()
 }
 
-func recoverRawFile(path, sessionID string) (uint64, error) {
-	data, err := os.ReadFile(path)
+func recoverRawFile(path, sessionID string) (uint64, int, error) {
+	file, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("read raw jsonl: %w", err)
+		return 0, 0, fmt.Errorf("open raw jsonl: %w", err)
 	}
-	committed := len(data)
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		if last := bytes.LastIndexByte(data, '\n'); last >= 0 {
-			committed = last + 1
-		} else {
-			committed = 0
-		}
-	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, 64*1024)
 	sequence := uint64(0)
-	lines := bytes.Split(data[:committed], []byte{'\n'})
-	for index, line := range lines {
-		if len(line) == 0 {
-			if index == len(lines)-1 {
-				continue
+	version := 0
+	committed := int64(0)
+	for {
+		line, terminated, readErr := readBoundedLine(reader)
+		if readErr == io.EOF {
+			if len(line) > 0 {
+				if err := file.Truncate(committed); err != nil {
+					return 0, 0, fmt.Errorf("recover raw tail: %w", err)
+				}
 			}
-			return 0, fmt.Errorf("invalid committed raw record %d", sequence+1)
+			break
+		}
+		if readErr != nil {
+			return 0, 0, readErr
+		}
+		if !terminated || len(line) == 1 {
+			return 0, 0, fmt.Errorf("invalid committed raw record %d", sequence+1)
 		}
 		sequence++
-		if err := validatePersistedRecord(line, sessionID, sequence); err != nil {
-			return 0, fmt.Errorf("invalid committed raw record %d", sequence)
+		frame := line[:len(line)-1]
+		if err := validatePersistedRecord(frame, sessionID, sequence); err != nil {
+			return 0, 0, fmt.Errorf("invalid committed raw record %d: %w", sequence, err)
 		}
-	}
-	if committed != len(data) {
-		if err := os.Truncate(path, int64(committed)); err != nil {
-			return 0, fmt.Errorf("recover raw tail: %w", err)
+		var h struct {
+			SchemaVersion json.RawMessage `json:"schema_version"`
 		}
+		_ = json.Unmarshal(frame, &h)
+		current := 1
+		if len(h.SchemaVersion) > 0 {
+			_ = json.Unmarshal(h.SchemaVersion, &current)
+		}
+		if version == 0 {
+			version = current
+		} else if current != version {
+			return 0, 0, errors.New("mixed raw schema versions")
+		}
+		committed += int64(len(line))
 	}
-	return sequence, nil
+	return sequence, version, nil
 }
 
 func validatePersistedRecord(line []byte, sessionID string, sequence uint64) error {
@@ -259,10 +328,43 @@ func validatePersistedRecord(line []byte, sessionID string, sequence uint64) err
 		return validateSemanticRaw(header.Payload, header.Raw)
 	}
 	var version int
+	if string(header.SchemaVersion) == "3" {
+		_, err := DecodeRecordV3(line, sessionID, sequence)
+		return err
+	}
 	if string(header.SchemaVersion) == "null" || json.Unmarshal(header.SchemaVersion, &version) != nil || version != 2 || header.SessionID != sessionID || header.Sequence != sequence || header.Source != "gsi" || header.ReceivedAt.IsZero() || len(header.Payload) == 0 || len(header.Raw) == 0 {
 		return errors.New("invalid v2 record")
 	}
 	return validateSemanticRaw(header.Payload, header.Raw)
+}
+
+func decodePersistedRecord(line []byte, sessionID string, sequence uint64) (*Record, error) {
+	var versionHeader struct {
+		SchemaVersion json.RawMessage `json:"schema_version"`
+	}
+	if err := json.Unmarshal(line, &versionHeader); err != nil {
+		return nil, err
+	}
+	if string(versionHeader.SchemaVersion) == "3" {
+		return DecodeRecordV3(line, sessionID, sequence)
+	}
+	if err := validatePersistedRecord(line, sessionID, sequence); err != nil {
+		return nil, err
+	}
+	var record Record
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.UseNumber()
+	if err := decoder.Decode(&record); err != nil {
+		return nil, err
+	}
+	if len(versionHeader.SchemaVersion) == 0 {
+		record.SchemaVersion = 1
+		record.SessionID = sessionID
+		record.Sequence = sequence
+		record.Source = "gsi"
+	}
+	record.Payload, record.ProjectionResult, record.ProjectionCode, record.ProjectionReason = boundedGSIProjection(record.Payload)
+	return &record, nil
 }
 
 func validateSemanticRaw(payloadRaw, sourceRaw json.RawMessage) error {
@@ -295,8 +397,14 @@ func decodeJSON(raw []byte) (any, error) {
 }
 
 func isSafeSessionID(sessionID string) bool {
-	if strings.TrimSpace(sessionID) == "" || sessionID == "." || sessionID == ".." {
+	if len(sessionID) < 1 || len(sessionID) > 128 || sessionID == "." || sessionID == ".." {
 		return false
 	}
-	return !strings.ContainsAny(sessionID, `/\`)
+	for i := 0; i < len(sessionID); i++ {
+		c := sessionID[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
