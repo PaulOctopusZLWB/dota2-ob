@@ -316,7 +316,7 @@ func (v LiveOnlyReleaseBindingV1) ValidateAgainst(binding HistoryAvailabilityBin
 	}
 	bindingID, bindingErr := binding.ContentID()
 	lineageID, lineageErr := lineage.ContentID()
-	if bindingErr != nil || lineageErr != nil || v.HistoryAvailabilityBindingID != bindingID || v.HistoryAvailabilityBindingSHA256 != bindingID || v.LineageManifestID != lineageID || v.LineageManifestSHA256 != lineageID || lineage.HistoryAvailabilityBindingID != bindingID || v.Rules != lineage.Rules || v.Config != lineage.Config || v.Catalog != lineage.Catalog || v.Terminology != lineage.Terminology || v.LocalizationParameterMapping != lineage.LocalizationParameterMapping {
+	if bindingErr != nil || binding.Mode != HistoryModeNoGo || lineageErr != nil || v.HistoryAvailabilityBindingID != bindingID || v.HistoryAvailabilityBindingSHA256 != bindingID || v.LineageManifestID != lineageID || v.LineageManifestSHA256 != lineageID || lineage.HistoryAvailabilityBindingID != bindingID || v.Rules != lineage.Rules || v.Config != lineage.Config || v.Catalog != lineage.Catalog || v.Terminology != lineage.Terminology || v.LocalizationParameterMapping != lineage.LocalizationParameterMapping {
 		return errors.New("live-only release cross-object mismatch")
 	}
 	return nil

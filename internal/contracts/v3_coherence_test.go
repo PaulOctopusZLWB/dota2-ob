@@ -50,6 +50,38 @@ func TestV3GoldenCrossObjectCoherence(t *testing.T) {
 	}
 }
 
+func TestLiveOnlyReleaseRejectsCoherentSnapshotBindingSubstitution(t *testing.T) {
+	lineage := readV3Golden[contracts.PolicyLineageManifestV3](t, "policy_lineage_manifest_v3.json")
+	release := readV3Golden[contracts.LiveOnlyReleaseBindingV1](t, "live_only_release_binding_v1.json")
+	binding := contracts.HistoryAvailabilityBindingV1{
+		SchemaVersion:            contracts.HistoryAvailabilityBindingSchemaV1,
+		Mode:                     contracts.HistoryModeSnapshotBaseline,
+		HistoricalSnapshotID:     strings.Repeat("b", 64),
+		HistoricalSnapshotSHA256: strings.Repeat("b", 64),
+		EligibleBaselineSHA256:   []string{strings.Repeat("c", 64)},
+	}
+	if err := binding.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	bindingID := binding.MustContentID()
+	lineage.HistoryAvailabilityBindingID = bindingID
+	lineage.HistoryAvailabilityBindingSHA256 = bindingID
+	if err := lineage.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	lineageID := lineage.MustContentID()
+	release.HistoryAvailabilityBindingID = bindingID
+	release.HistoryAvailabilityBindingSHA256 = bindingID
+	release.LineageManifestID = lineageID
+	release.LineageManifestSHA256 = lineageID
+	if err := release.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := release.ValidateAgainst(binding, lineage); err == nil {
+		t.Fatal("live-only release accepted coherent snapshot-backed binding substitution")
+	}
+}
+
 func TestGenerateCoherentV3Goldens(t *testing.T) {
 	if os.Getenv("UPDATE_V3_GOLDENS") != "1" {
 		t.Skip("set UPDATE_V3_GOLDENS=1 to regenerate")
