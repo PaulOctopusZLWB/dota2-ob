@@ -186,9 +186,6 @@ func (f *LiveFollower) CatchUp(ctx context.Context, highWater uint64) error {
 					return f.fail(err)
 				}
 			}
-			if err := f.completeStartupBarrier(ctx); err != nil {
-				return f.fail(err)
-			}
 		}
 		if !valid {
 			f.resetProjectionState()

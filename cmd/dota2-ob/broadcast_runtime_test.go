@@ -186,6 +186,8 @@ func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 		"broadcast_recovery.go":                      productRecoverySourceSHA256,
 		"broadcast_runtime.go":                       productRuntimeSourceSHA256,
 		"broadcast_lineage.go":                       productLineageSourceSHA256,
+		"../../internal/session/highwater.go":        sessionHighWaterSourceSHA256,
+		"../../internal/session/live_projector.go":   sessionFollowerSourceSHA256,
 		"../../internal/insight/engine.go":           insightEngineSourceSHA256,
 		"../../internal/policy/engine.go":            policyEngineSourceSHA256,
 		"../../internal/policy/application.go":       policyApplicationSourceSHA256,

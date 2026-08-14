@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
@@ -121,12 +124,6 @@ type policyObservationProjection struct {
 	tracker *operator.Tracker
 }
 
-type unavailablePolicyObservationProjection struct{}
-
-func (unavailablePolicyObservationProjection) Apply(context.Context, *session.Record) error {
-	return errors.New("broadcast_policy_unconfigured")
-}
-
 func newPolicyObservationProjection(runtime *broadcastRuntime, tracker *operator.Tracker) liveprojection.Projection {
 	return policyObservationProjection{runtime: runtime, tracker: tracker}
 }
@@ -142,4 +139,69 @@ func (p policyObservationProjection) Apply(ctx context.Context, record *session.
 	}
 	p.tracker.Success(policyProjectionSubsystem)
 	return nil
+}
+
+type productWaiter struct {
+	capture interface{ Wait() }
+	policy  *policyProjectionRunner
+}
+
+func (w productWaiter) Wait() {
+	if w.capture != nil {
+		w.capture.Wait()
+	}
+	if w.policy != nil {
+		w.policy.Wait()
+	}
+}
+
+// policyProjectionRunner gives the broadcast policy plane its own cursor and
+// independent high-water subscription. A missing or retrying policy projection
+// therefore cannot stall latest/profile/analytics capture projections.
+type policyProjectionRunner struct {
+	follower    *session.LiveFollower
+	highWater   *session.HighWater
+	cancel      context.CancelFunc
+	done        <-chan error
+	unsubscribe func()
+	once        sync.Once
+}
+
+func newPolicyProjectionRunner(store *session.Store, runtime *broadcastRuntime, tracker *operator.Tracker) *policyProjectionRunner {
+	updates, unsubscribe := store.HighWater().Subscribe()
+	follower := session.NewLiveFollower(
+		store.SessionID(),
+		store.RawPath(),
+		filepath.Join(store.SessionDir(), "broadcast_policy_projection_cursor.json"),
+		[]session.LiveProjection{newPolicyObservationProjection(runtime, tracker)},
+		session.WithFollowerHighWater(store.HighWater()),
+		session.WithStartupBarrier(runtime),
+		session.WithRejectionHealthSink(runtime),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- follower.Run(ctx, updates) }()
+	return &policyProjectionRunner{
+		follower: follower, highWater: store.HighWater(), cancel: cancel,
+		done: done, unsubscribe: unsubscribe,
+	}
+}
+
+func (r *policyProjectionRunner) Wait() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.unsubscribe()
+		select {
+		case <-r.done:
+		case <-time.After(100 * time.Millisecond):
+			r.cancel()
+			<-r.done
+		}
+		r.cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = r.follower.CatchUp(ctx, r.highWater.Current().Sequence)
+		cancel()
+	})
 }

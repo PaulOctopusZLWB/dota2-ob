@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -301,6 +302,12 @@ func TestRunMissingLineageDisablesDeliveryWithoutBlockingRawCapture(t *testing.T
 		return commandListener{address: commandAddress(address)}, nil
 	}
 	deps.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		defer func() {
+			waiter.Wait()
+			if err := appender.Close(); err != nil {
+				t.Errorf("close store: %v", err)
+			}
+		}()
 		product := server.(*pairedHTTPServer)
 		if product.delivery == nil || product.deliveryListener == nil {
 			t.Fatal("misconfigured product removed the fail-closed delivery surface")
@@ -310,18 +317,32 @@ func TestRunMissingLineageDisablesDeliveryWithoutBlockingRawCapture(t *testing.T
 		if overlay.Code != http.StatusOK || !strings.Contains(overlay.Body.String(), `"visibility":"hidden"`) || strings.Contains(overlay.Body.String(), `"claim"`) {
 			t.Fatalf("fail-closed overlay status=%d body=%s", overlay.Code, overlay.Body.String())
 		}
-		request := httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`))
-		response := httptest.NewRecorder()
-		product.capture.Handler.ServeHTTP(response, request)
-		if response.Code != http.StatusOK {
-			t.Fatalf("capture status=%d body=%s", response.Code, response.Body.String())
+		for _, gameTime := range []int{41, 42} {
+			request := httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(fmt.Sprintf(`{"map":{"game_time":%d}}`, gameTime)))
+			response := httptest.NewRecorder()
+			product.capture.Handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("capture status=%d body=%s", response.Code, response.Body.String())
+			}
 		}
-		waiter.Wait()
-		return appender.Close()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			request := httptest.NewRequest(http.MethodGet, "/api/latest", nil)
+			request.Header.Set("Authorization", "Bearer test-only-operator-token")
+			request.Header.Set("Origin", "http://127.0.0.1:43210")
+			response := httptest.NewRecorder()
+			product.capture.Handler.ServeHTTP(response, request)
+			if response.Code == http.StatusOK && strings.Contains(response.Body.String(), `"game_time":42`) {
+				return nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("capture diagnostics did not advance past unavailable policy projection")
+		return nil
 	}
 
 	var output bytes.Buffer
-	if code := runWithDependencies([]string{"--data-dir", root}, &output, deps); code != 0 {
+	if code := runWithDependencies([]string{"--data-dir", root, "--diagnostic-mode"}, &output, deps); code != 0 {
 		t.Fatalf("exit=%d output=%q", code, output.String())
 	}
 	if !strings.Contains(output.String(), "broadcast_policy_config_failed") {
@@ -343,6 +364,12 @@ func TestRunLaterPolicyConfigurationReplaysRecordsNotConsumedByUnavailablePolicy
 
 	first := newDeps()
 	first.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		defer func() {
+			waiter.Wait()
+			if err := appender.Close(); err != nil {
+				t.Errorf("close first store: %v", err)
+			}
+		}()
 		product := server.(*pairedHTTPServer)
 		response := httptest.NewRecorder()
 		product.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{}`)))
@@ -358,8 +385,7 @@ func TestRunLaterPolicyConfigurationReplaysRecordsNotConsumedByUnavailablePolicy
 			}
 			time.Sleep(time.Millisecond)
 		}
-		waiter.Wait()
-		return appender.Close()
+		return nil
 	}
 	var firstOutput bytes.Buffer
 	if code := runWithDependencies([]string{"--data-dir", root, "--session-id", sessionID}, &firstOutput, first); code != 0 {
@@ -524,6 +550,19 @@ func TestRunConfiguredProductConsumesNoOutputWithoutPolicyCommit(t *testing.T) {
 			}
 			return state
 		}
+		waitOverlayHealth := func(healthCode string) contracts.OverlayStateV1 {
+			t.Helper()
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				state := overlay()
+				if state.HealthCode == healthCode {
+					return state
+				}
+				time.Sleep(time.Millisecond)
+			}
+			t.Fatalf("overlay did not reach health_code=%q", healthCode)
+			return contracts.OverlayStateV1{}
+		}
 
 		postGSI(`{}`)
 		waitProjection(1, false)
@@ -537,7 +576,7 @@ func TestRunConfiguredProductConsumesNoOutputWithoutPolicyCommit(t *testing.T) {
 		if after := policyLogBytes(t, policyDir); after != before {
 			t.Fatalf("consumed-no-output record appended policy bytes: before=%d after=%d", before, after)
 		}
-		if state := overlay(); state.Visibility != "hidden" || state.HealthCode != "gsi_projection_non_object" || state.Claim != nil {
+		if state := waitOverlayHealth("gsi_projection_non_object"); state.Visibility != "hidden" || state.Claim != nil {
 			t.Fatalf("terminal no-output did not hide overlay: %#v", state)
 		}
 
@@ -546,9 +585,7 @@ func TestRunConfiguredProductConsumesNoOutputWithoutPolicyCommit(t *testing.T) {
 		if after := policyLogBytes(t, policyDir); after <= before {
 			t.Fatalf("later produced record did not append policy commit: before=%d after=%d", before, after)
 		}
-		if state := overlay(); state.HealthCode == "gsi_projection_non_object" {
-			t.Fatalf("later produced record did not clear rejection: %#v", state)
-		}
+		waitOverlayHealth("no_active_decision")
 		waiter.Wait()
 		return appender.Close()
 	}
@@ -578,13 +615,29 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 
 	first := newDeps()
 	first.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		defer func() {
+			waiter.Wait()
+			if err := appender.Close(); err != nil {
+				t.Errorf("close first store: %v", err)
+			}
+		}()
 		product := server.(*pairedHTTPServer)
 		gsiResponse := httptest.NewRecorder()
 		product.capture.Handler.ServeHTTP(gsiResponse, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"map":{"game_time":41}}`)))
 		if gsiResponse.Code != http.StatusOK {
 			t.Fatalf("first GSI status=%d body=%s", gsiResponse.Code, gsiResponse.Body.String())
 		}
-		command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "restart-hide", SessionID: sessionID, Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: 0, PolicyTimeMS: 10_000}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			response := httptest.NewRecorder()
+			product.delivery.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/overlay/state", nil))
+			var overlay contracts.OverlayStateV1
+			if response.Code == http.StatusOK && json.Unmarshal(response.Body.Bytes(), &overlay) == nil && overlay.HealthCode != "projection_restoring" && policyLogBytes(t, filepath.Join(root, sessionID)) > 0 {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		command := contracts.OperatorCommandV1{SchemaVersion: contracts.OperatorCommandSchemaV1, CommandID: "restart-hide", SessionID: sessionID, Action: contracts.ActionEmergencyHide, ExpectedPolicyRevision: 0, PolicyTimeMS: time.Now().UTC().UnixMilli()}
 		body, _ := json.Marshal(command)
 		request := httptest.NewRequest(http.MethodPost, "/v1/operator/commands", bytes.NewReader(body))
 		request.Header.Set("Authorization", "Bearer test-only-operator-token")
@@ -593,11 +646,11 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 		request.Header.Set(delivery.CSRFHeader, delivery.CSRFValue)
 		response := httptest.NewRecorder()
 		product.delivery.Handler.ServeHTTP(response, request)
-		if response.Code != http.StatusOK {
-			t.Fatalf("first command status=%d body=%s", response.Code, response.Body.String())
+		var result contracts.OperatorCommandResultV1
+		if err := json.Unmarshal(response.Body.Bytes(), &result); response.Code != http.StatusOK || err != nil || result.Status != contracts.CommandAccepted {
+			t.Fatalf("first command status=%d result=%#v decode=%v body=%s", response.Code, result, err, response.Body.String())
 		}
-		waiter.Wait()
-		return appender.Close()
+		return nil
 	}
 	var firstOutput bytes.Buffer
 	if code := runWithDependencies(args, &firstOutput, first); code != 0 {
@@ -607,7 +660,26 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 
 	second := newDeps()
 	second.runLifecycle = func(server lifecycle.Server, _ net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, _ lifecycle.ContextFactory) error {
+		defer func() {
+			waiter.Wait()
+			if err := appender.Close(); err != nil {
+				t.Errorf("close second store: %v", err)
+			}
+		}()
 		product := server.(*pairedHTTPServer)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			request := httptest.NewRequest(http.MethodGet, "/v1/operator/state", nil)
+			request.Header.Set("Authorization", "Bearer test-only-operator-token")
+			request.Header.Set("Origin", "http://127.0.0.1:43211")
+			response := httptest.NewRecorder()
+			product.delivery.Handler.ServeHTTP(response, request)
+			var state delivery.OperatorState
+			if response.Code == http.StatusOK && json.Unmarshal(response.Body.Bytes(), &state) == nil && state.PolicyRevision == 1 && state.EmergencyHidden {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		request := httptest.NewRequest(http.MethodGet, "/v1/operator/state", nil)
 		request.Header.Set("Authorization", "Bearer test-only-operator-token")
 		request.Header.Set("Origin", "http://127.0.0.1:43211")
@@ -617,11 +689,10 @@ func TestRunConfiguredProductRecoversPolicyAcrossRestart(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil || response.Code != http.StatusOK || state.PolicyRevision != 1 || !state.EmergencyHidden {
 			t.Fatalf("recovered status=%d state=%#v decode=%v", response.Code, state, err)
 		}
-		waiter.Wait()
 		if policyBytesAfterRestart := policyLogBytes(t, filepath.Join(root, sessionID)); policyBytesAfterRestart != policyBytesBeforeRestart {
 			t.Fatalf("ordinary product restart duplicated policy log: before=%d after=%d", policyBytesBeforeRestart, policyBytesAfterRestart)
 		}
-		return appender.Close()
+		return nil
 	}
 	var secondOutput bytes.Buffer
 	if code := runWithDependencies(args, &secondOutput, second); code != 0 {

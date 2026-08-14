@@ -170,19 +170,11 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		gsi.WithLatest(latest), gsi.WithProfiler(profilerInstance),
 		gsi.WithAnalytics(analyticsEngine), gsi.WithTracker(tracker),
 	}
-	var policyProjection session.LiveProjection = unavailablePolicyObservationProjection{}
-	if broadcast != nil {
-		policyProjection = newPolicyObservationProjection(broadcast, tracker)
-	}
 	captureOptions = append(captureOptions, gsi.WithLiveProjections(
 		newTrackedCaptureProjection(capture.NewLatestProjection(latest), tracker, operator.SubsystemLatest, "latest_failed"),
 		newTrackedCaptureProjection(capture.NewProfileProjection(profilerInstance, store.SessionDir()), tracker, operator.SubsystemProfile, "profile_failed"),
 		newTrackedCaptureProjection(capture.NewAnalyticsProjection(analyticsEngine, store.SessionDir(), store.SessionID()), tracker, operator.SubsystemAnalytics, "analytics_failed"),
-		policyProjection,
 	))
-	if broadcast != nil {
-		captureOptions = append(captureOptions, gsi.WithProjectionStartupBarrier(broadcast), gsi.WithProjectionRejectionHealthSink(broadcast))
-	}
 	if *diagnosticMode {
 		captureOptions = append(captureOptions,
 			gsi.WithDashboard(http.FileServer(http.Dir("web"))),
@@ -190,6 +182,10 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 		)
 	}
 	handler := gsi.NewServer(store, captureOptions...)
+	var waiter lifecycle.Waiter = handler
+	if broadcast != nil {
+		waiter = productWaiter{capture: handler, policy: newPolicyProjectionRunner(store, broadcast, tracker)}
+	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	var deliveryServer *http.Server
 	if deliveryListener != nil {
@@ -223,7 +219,7 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	err = deps.runLifecycle(servers, listener, store, handler, signals, func() (context.Context, context.CancelFunc) {
+	err = deps.runLifecycle(servers, listener, store, waiter, signals, func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), 10*time.Second)
 	})
 	if err != nil {

@@ -21,6 +21,30 @@ func TestHighWaterCoalescesToNewestCommittedSequence(t *testing.T) {
 	}
 }
 
+func TestHighWaterSubscriberReceivesIndependentCoalescedNotifications(t *testing.T) {
+	wake := session.NewHighWater("session-a", 2)
+	updates, unsubscribe := wake.Subscribe()
+	defer unsubscribe()
+
+	if initial := <-updates; initial.Sequence != 2 {
+		t.Fatalf("initial subscriber notification = %#v, want sequence 2", initial)
+	}
+	wake.Publish(3)
+	wake.Publish(4)
+	if primary := <-wake.C(); primary.Sequence != 4 {
+		t.Fatalf("primary notification = %#v, want sequence 4", primary)
+	}
+	if subscriber := <-updates; subscriber.Sequence != 4 {
+		t.Fatalf("subscriber notification = %#v, want sequence 4", subscriber)
+	}
+
+	unsubscribe()
+	wake.Publish(5)
+	if _, ok := <-updates; ok {
+		t.Fatal("unsubscribed notification channel remained open")
+	}
+}
+
 func TestStorePublishesOnlySuccessfulCompleteAppends(t *testing.T) {
 	wake := session.NewHighWater("committed", 0)
 	f := &fakeRawFile{writeLimit: 4}

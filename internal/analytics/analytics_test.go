@@ -204,7 +204,10 @@ func analyzeSessionLegacy(sessionDir, sessionID string) (Snapshot, error) {
 }
 
 func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	p1, p2 := miniSnapshot("item_boots", 1, 0), miniSnapshot("item_power_treads", 1, 12)
 	raw := fmt.Sprintf("{\"received_at\":\"2026-07-07T14:51:01Z\",\"payload\":%s,\"raw\":%s}\n{\"received_at\":\"2026-07-07T14:51:02Z\",\"payload\":%s,\"raw\":%s}\n", p1, p1, p2, p2)
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
@@ -222,6 +225,14 @@ func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
 		if err != nil || info.Size() == 0 {
 			t.Fatalf("artifact %s missing or empty: %v", name, err)
 		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("artifact %s mode=%v want=0600", name, info.Mode().Perm())
+		}
+	}
+	if info, err := os.Stat(dir); err != nil {
+		t.Fatalf("stat artifact directory: %v", err)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Fatalf("artifact directory mode=%v want=0700", info.Mode().Perm())
 	}
 	// Validate the JSONL/JSON artifacts parse.
 	for _, name := range []string{"normalized_ticks.jsonl", "derived_events.jsonl"} {

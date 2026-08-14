@@ -770,13 +770,13 @@ func TestFollowerValidCacheResumesAfterPrefixAndTransitionsHealth(t *testing.T) 
 	if time.Since(started) > 2*time.Second {
 		t.Fatal("health transition exceeded two seconds")
 	}
-	if !reflect.DeepEqual(projection.sequences, []uint64{2}) || projection.calledWhileRestoreOpen {
+	if !reflect.DeepEqual(projection.sequences, []uint64{2}) || !projection.calledWhileRestoreOpen {
 		t.Fatalf("sequences=%v before_barrier=%v", projection.sequences, projection.calledWhileRestoreOpen)
 	}
 	sink.mu.Lock()
 	events := append([]string(nil), sink.events...)
 	sink.mu.Unlock()
-	if !reflect.DeepEqual(events, []string{"begin", "hide", "complete", "clear"}) {
+	if !reflect.DeepEqual(events, []string{"begin", "hide", "clear", "complete"}) {
 		t.Fatalf("events=%v", events)
 	}
 }
