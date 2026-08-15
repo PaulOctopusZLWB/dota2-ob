@@ -1139,22 +1139,34 @@ Acceptance:
   command replay/revision conflict, and out-of-order delivery.
 - Failures outside raw capture do not corrupt evidence; presentation failures do
   not block capture; all unsafe states fail closed.
-- A 12-hour accelerated soak passes protocol P4: zero lost accepted raw records;
-  notification capacity one; candidate queue capacity 64; accepted GSI request
-  bodies at most the existing 10 MiB limit, other API request/response bodies at
-  most 1 MiB, and `OverlayStateV1` at most 64 KiB; combined live
-  projection/policy/gateway RSS at most 384 MiB, with isolated full no-cache raw
-  recovery at most 192 MiB; post-warmup RSS growth at most 64 MiB; goroutine
-  delta at most ten; open FDs at most 128 and at most 16 above post-warmup
-  baseline; raw file count exactly matches the schedule manifest, accepted
-  request-body bytes equal the schedule, and persisted raw-log bytes equal the
-  deterministic V3 encoding expectation while never exceeding the per-record
-  formula above;
-  policy commits use at most 1 GiB and 104 segments; total non-raw live files
-  under the isolated run data root number at most 192 and use at most 1.6 GiB;
-  rotated operational logs use at most ten files/100 MiB; no temporary file
-  remains at exit; all backlogs expose deterministic health and the process
-  exits cleanly.
+- One complete official TI match passes protocol P4 on PaulPC4090, from an armed
+  capture/OBS stack before game clock `0:00` through the normal post-game state.
+  A late join, remake, abandoned game, incomplete recording, unexplained GSI
+  gap, or missing terminal state does not count. Match duration is measured but
+  has no artificial minimum; completeness replaces the former 12-hour
+  synthetic-duration gate.
+- During that match there are zero lost accepted raw records; notification
+  capacity remains one; candidate queue capacity remains 64; accepted GSI
+  request bodies remain at most the existing 10 MiB limit, other API
+  request/response bodies remain at most 1 MiB, and `OverlayStateV1` remains at
+  most 64 KiB. Combined live projection/policy/gateway RSS is at most 384 MiB,
+  isolated full no-cache raw recovery is at most 192 MiB, post-warmup RSS growth
+  is at most 64 MiB, goroutine delta is at most ten, and open FDs are at most
+  128 and at most 16 above the post-warmup baseline. Policy commits use at most
+  1 GiB and 104 segments; total non-raw live files under the isolated run data
+  root number at most 192 and use at most 1.6 GiB; rotated operational logs use
+  at most ten files/100 MiB; no temporary file remains at exit; all backlogs
+  expose deterministic health and the process exits cleanly.
+- Paul manually launches Dota 2, joins the identified official TI DotaTV match
+  before the start boundary, confirms the match/series identity, and performs
+  the prescribed operator checks. No account, Dota UI, or gameplay automation
+  is introduced. All service, evidence, OBS-profile, measurement, recovery, and
+  cleanup work remains agent-owned.
+- Before Paul is asked to join, the deterministic captured-GSI golden, complete
+  M4 fault matrix, restart/tail/cache/queue adversarial tests, security checks,
+  and a short production-stack resource preflight must pass. Those automated
+  tests retain fault coverage but cannot substitute for or claim the complete
+  TI-match P4 result.
 - Full test, race, vet, contract, frontend, screenshot, and end-to-end suites
   pass from one documented command set.
 
@@ -1336,27 +1348,52 @@ and excluded samples are reported, never silently removed.
   and attach sanitized frames/logs. A short preflight can reject a configuration
   but cannot pass P3 or justify a threshold change.
 
-### P4 — 12-hour bounded soak
+### P4 — one complete official TI match
 
-- Replay a fixed content-addressed multi-match GSI corpus for 12 wall-clock
-  hours at 10 accepted records/second. Its checked-in deterministic schedule
-  freezes session count, record count, exact accepted request-body bytes,
-  deterministic V3 persisted-byte expectation, pause, burst, stale,
-  out-of-order, audit failure, and overlay-disconnect intervals.
-- Execute 12 orderly restarts, 12 `SIGKILL` process restarts on the same running
-  host, and 12 injected incomplete raw tails/cursor/checkpoint/policy frames at
-  deterministic sequence numbers. Recovery must preserve every record whose
-  OS-buffered append returned before process termination, discard only invalid
-  tails, replay stale/missing caches, and preserve every synced policy commit.
-  Kernel crash, storage failure, and sudden power loss are explicitly outside
-  this gate because raw capture does not sync per record; report that residual
-  instead of claiming those failures passed.
-- Sample sequence lag, queue occupancy, file/descriptor/goroutine counts, RSS,
-  per-class file counts/bytes, policy segment count, API/state sizes,
-  decision/audit identities, and raw/derived counts every 30 seconds. Rebuild
-  afterward and byte-compare canonical derived outputs.
-- Apply every numeric M4 bound. Any accepted-record loss, silent queue drop,
-  unreported saturation, nondeterministic rebuild, or unclean exit fails P4.
+- Use one official TI DotaTV game that reaches a normal post-game terminal
+  state. Arm the exact candidate, isolated data root, sanitized evidence sink,
+  operator UI, native 750x640 Browser Source, and OBS recording before Paul
+  manually joins and before game clock `0:00`. Record public tournament,
+  series/game, teams, match ID when available, Dota/OBS/application builds,
+  exact candidate/configuration hashes, start/end boundaries, DotaTV pause and
+  observer-delay context, and the actual wall-clock duration. Do not retain
+  credentials, private chat, account identifiers, or unrelated screen content.
+- Run continuously through post-game and recording finalization. Count every
+  capture HTTP response and bind each accepted response to one exact RawRecordV3
+  identity. Every successfully projected sequence must produce exactly one
+  allowed durable V3 terminal outcome. The raw count, projected cursor/gaps,
+  policy commits, audit records, operator state, overlay revisions, and final
+  health state must reconcile; an unexplained gap or duplicate fails P4.
+- Paul performs a short prescribed operator script during the game: verify the
+  preview, exercise approve or deterministic ineligible rejection, exercise
+  reject or deterministic ineligible rejection, pin/unpin when eligible, then
+  emergency-hide and clear it. The recording and audit must prove claim-free
+  fail-closed output within two seconds, no stale revival, deterministic command
+  revision/idempotency behavior, and continued raw capture. Natural DotaTV
+  pauses are external context and do not fail the gate if the local stack stays
+  correct and continuous.
+- Sample sequence lag, queue occupancy, process-tree CPU/RSS, file/descriptor/
+  goroutine counts, per-class files/bytes, policy segments, API/state sizes,
+  decision/audit identities, OBS rendered/missed/skipped frames, and raw/derived
+  counts at least every five seconds. Apply every numeric M4 and accepted P3
+  visibility/resource bound that is meaningful over the actual match duration.
+- After post-game, stop cleanly, preserve content-addressed evidence, restart
+  from the same retained artifacts, perform one isolated full no-cache raw
+  recovery, and byte-compare canonical rebuilt outputs with the recorded final
+  cursor, V3 policy, audit, operator, and overlay state. Kernel crash, storage
+  failure, and sudden power loss remain outside the OS-buffered raw boundary and
+  are reported rather than claimed.
+- Before the live checkpoint, replay the fixed content-addressed schedule and
+  run every deterministic restart, `SIGKILL`, incomplete-tail/cache/checkpoint/
+  policy-frame, saturation, stale, out-of-order, audit-failure, and overlay-
+  disconnect case from the accepted M4 matrix. These are automated preflight
+  evidence, not a shortened substitute for the complete TI match.
+- Any late join, remake/abandon, accepted-record loss, silent queue drop,
+  unreported saturation, unsafe or stale on-air claim, nondeterministic rebuild,
+  missing evidence boundary, recording loss, or unclean exit fails P4 and
+  requires another complete TI match. Passing P4 requires Paul's explicit
+  confirmation that the prescribed manual steps were performed; technical gate
+  evaluation and acceptance remain with the independent reviewer and G胖.
 
 ### P5 — production rehearsal latency
 
