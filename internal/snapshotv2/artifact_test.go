@@ -43,7 +43,7 @@ func TestEmbeddedReferenceAndAcceptedIdentitiesArePinned(t *testing.T) {
 	assertArtifact(t, catalog.ContentSHA256, "a7815d69b3ffbfe035912c8783639da17cf364ab765302515c4c607acc8177b4")
 	assertArtifact(t, terminology.ContentSHA256, "f94b0aa4baba38873a8e1974abea94bee2c503013fd8ab3bfc4295546dba4116")
 	assertArtifact(t, localization.ContentSHA256, "920569d53c0dd15fe3838b291accd6d63f6f2657cd70166450722f692404ddaa")
-	assertArtifact(t, engine.ContentSHA256, "642c6e838f843fb63b7e4faf8c0ed7a680d58f8b6856a079903a52493903e64b")
+	assertArtifact(t, engine.ContentSHA256, "f233387eb897ee7107c994834b80c74977da7b613d6320e7081a7ad2e89dd95f")
 }
 
 func TestEmbeddedReferenceSubstitutionChangesRuntimeIdentity(t *testing.T) {

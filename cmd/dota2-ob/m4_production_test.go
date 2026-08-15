@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1088,10 +1089,10 @@ func waitRestoreComplete(t *testing.T, runtimeV3 *broadcastRuntimeV3) {
 	if runtimeV3 == nil {
 		t.Fatal("production projection runtime unavailable")
 	}
-	select {
-	case <-runtimeV3.RestoreReady():
-	case <-t.Context().Done():
-		t.Fatal("production projection restore did not complete before test cancellation")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := runtimeV3.WaitRestore(ctx); err != nil {
+		t.Fatalf("production projection readiness deadline: %v", err)
 	}
 }
 
@@ -1100,7 +1101,9 @@ func waitObservation(t *testing.T, runtimeV3 *broadcastRuntimeV3, sequence uint6
 	if runtimeV3 == nil {
 		t.Fatal("production projection runtime unavailable")
 	}
-	if err := runtimeV3.WaitObservation(t.Context(), sequence); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := runtimeV3.WaitObservation(ctx, sequence); err != nil {
 		t.Fatalf("policy projection did not reach observation %d: %v", sequence, err)
 	}
 }

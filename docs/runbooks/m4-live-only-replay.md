@@ -26,7 +26,7 @@ The sanitized fixture is
 `internal/integration/m4/testdata/captured_gsi_schedule.json`:
 
 - fixture SHA-256: `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`
-- canonical production-composition golden SHA-256: `db7794eced282b514bc17e311f8b6e516e3a79738b5b7e01549b85e025f87388`
+- canonical production-composition golden SHA-256: `480ef715e7c04c22315ba8d81369708a430abe6706bc29a221220b813c0275bd`
 - rejected-parent golden SHA-256: `538264076c4e5f05b0d97485e3a35c8d41b3bd27369544666de9534bec16e3bf`
 - no account ID, Steam ID, player handle, token, or other private identifier is present
 
@@ -76,14 +76,21 @@ therefore have the exact Go command-parser semantics. Only policy flags actually
 consumed before the parser stop are removed for immutable V2 delegation; flags
 after a terminator or positional stop remain untouched and cannot select V3.
 Focused subprocess probes freeze the two independent-review reproductions.
+Invalid policy values are parsed as raw strings by that same `FlagSet` and
+validated only after parsing, preserving exact stderr `policy_mode_invalid`
+and exit status 1 without Go usage text.
 
 Restart and observation progress use causal runtime notifications. The follower
 closes restore readiness only from `CompleteRestore` after retained high-water
 rebuild and publication reopen; committed observation progress emits a
-capacity-one wakeup while application state remains authoritative. The M4
-harness blocks on those signals rather than repeatedly contending for the
-runtime mutex. No sleep or local timeout substitutes for readiness, and the
-fixture-owned two-second fail-closed assertions are unchanged.
+capacity-one wakeup after durable policy acceptance. An atomic mirror of that
+durable sequence is the waiter authority, so wakeup checks never contend for
+the runtime mutex held by policy evaluation. The M4 harness blocks on those
+signals with an independent explicit 10-second restore bound and 120-second
+observation-progress bound; deadline errors name the phase, requested
+sequence, and last committed sequence. No sleep or polling substitutes for
+readiness, and the fixture-owned two-second fail-closed assertions are
+unchanged.
 
 The reproducible generator command is `go generate ./internal/snapshotv2`.
 It rewrites only the generated implementation and fingerprint files; the
@@ -131,7 +138,7 @@ git merge-base --is-ancestor cf20368430d46ad395127609eb7eb9609422aaa8 HEAD
 git diff --check c0b328a95b225e68771adeb4d927b54a90c79a1e..HEAD
 go test -count=2 ./cmd/dota2-ob ./internal/integration/m4
 go test -count=2 ./internal/snapshotv2 ./cmd/dota2-ob -run 'TestCompiledV2|TestProductionV2|TestSemanticMutation|TestEmbeddedReference|TestSnapshotV2MigratedCanonicalBytesAndLineageRemainPinned|TestActualBinarySelector|TestProductIdentityMigration|TestBroadcastRuntimeV3DoesNotRewindCausalBaselineAndRestartsAtNewest|TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers|TestM4'
-CGO_ENABLED=1 CC="zig cc" go test -race -timeout 15m -count=50 ./cmd/dota2-ob -run '^(TestBroadcastRuntimeV3RestoreReadinessIsCausalAndOneShot|TestM4ProductionCompositionRestartReadinessIsCausal)$'
+CGO_ENABLED=1 CC="zig cc" go test -race -timeout 10m -count=100 ./cmd/dota2-ob -run '^(TestProductSelector.*|TestBroadcastRuntimeV3RestoreReadinessIsCausalAndOneShot|TestBroadcastRuntimeV3ReadinessDeadlinesNamePhaseAndSequence|TestBroadcastRuntimeV3ObservationWakeupUsesDurableSequenceWithoutRuntimeLock|TestM4ProductionCompositionRestartReadinessIsCausal)$'
 go test -count=1 ./...
 CGO_ENABLED=1 CC="zig cc" go test -race -timeout 30m -count=1 ./...
 go vet ./...

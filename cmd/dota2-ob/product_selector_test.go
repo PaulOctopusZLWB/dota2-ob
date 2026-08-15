@@ -32,7 +32,7 @@ func TestProductSelectorIsClosedAndExplicit(t *testing.T) {
 		{name: "positional stops selection", args: []string{"capture", "--policy-mode=" + productModeLiveOnlyV3}, mode: productModeSnapshotV2, delegated: []string{"capture", "--policy-mode=" + productModeLiveOnlyV3}},
 		{name: "repeated last wins", args: []string{"-policy-mode=" + productModeSnapshotV2, "--policy-mode", productModeLiveOnlyV3, "-doctor"}, mode: productModeLiveOnlyV3, delegated: []string{"-doctor"}},
 		{name: "missing", args: []string{"--policy-mode"}, wantErr: true},
-		{name: "unknown", args: []string{"--policy-mode=other"}, wantErr: true},
+		{name: "invalid value is parsed before contract validation", args: []string{"--policy-mode=other"}, mode: "other"},
 		{name: "unknown flag before stop", args: []string{"--not-a-product-flag"}, wantErr: true},
 		{name: "unknown flag after positional ignored", args: []string{"capture", "--not-a-product-flag"}, mode: productModeSnapshotV2, delegated: []string{"capture", "--not-a-product-flag"}},
 	}
@@ -81,6 +81,22 @@ func TestProductSelectorExecutableDispatchProbes(t *testing.T) {
 	}
 }
 
+func TestProductSelectorInvalidModePreservesExactContract(t *testing.T) {
+	for _, args := range [][]string{{"--policy-mode=other"}, {"-policy-mode=other"}} {
+		var output bytes.Buffer
+		code := runProducts(args, &output, func([]string, io.Writer) int {
+			t.Fatal("invalid mode reached V2")
+			return 0
+		}, func(runOptions, io.Writer) int {
+			t.Fatal("invalid mode reached V3")
+			return 0
+		})
+		if code != 1 || output.String() != "policy_mode_invalid\n" {
+			t.Fatalf("args=%q code=%d stderr=%q", args, code, output.String())
+		}
+	}
+}
+
 func TestProductSelectorExecutableProcessProbes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -104,6 +120,26 @@ func TestProductSelectorExecutableProcessProbes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProductSelectorInvalidModeExecutableProcessProbes(t *testing.T) {
+	for _, argument := range []string{"--policy-mode=other", "-policy-mode=other"} {
+		command := exec.Command(os.Args[0], "-test.run=^TestProductSelectorInvalidModeProcessHelper$")
+		command.Env = append(os.Environ(), "DOTA2_OB_INVALID_SELECTOR_PROBE="+argument)
+		output, err := command.CombinedOutput()
+		exit, ok := err.(*exec.ExitError)
+		if !ok || exit.ExitCode() != 1 || string(output) != "policy_mode_invalid\n" {
+			t.Fatalf("argument=%s err=%v output=%q", argument, err, output)
+		}
+	}
+}
+
+func TestProductSelectorInvalidModeProcessHelper(t *testing.T) {
+	argument := os.Getenv("DOTA2_OB_INVALID_SELECTOR_PROBE")
+	if argument == "" {
+		t.Skip("invalid selector executable probe helper")
+	}
+	os.Exit(runProducts([]string{argument}, os.Stderr, func([]string, io.Writer) int { return 20 }, func(runOptions, io.Writer) int { return 30 }))
 }
 
 func TestProductSelectorProbeHelper(t *testing.T) {

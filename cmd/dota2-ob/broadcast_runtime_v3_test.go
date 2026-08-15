@@ -129,6 +129,62 @@ func TestBroadcastRuntimeV3RestoreReadinessIsCausalAndOneShot(t *testing.T) {
 	}
 }
 
+func TestBroadcastRuntimeV3ReadinessDeadlinesNamePhaseAndSequence(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	root := t.TempDir()
+	const sessionID = "live-readiness-deadline"
+	runtime, err := newBroadcastRuntimeV3(broadcastConfigV3{
+		DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"),
+		Artifacts: testLiveOnlyArtifacts(sessionID), Now: func() time.Time { return now }, ProjectionRestoreRequired: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	restoreCtx, cancelRestore := context.WithCancel(context.Background())
+	cancelRestore()
+	if err := runtime.WaitRestore(restoreCtx); err == nil || !strings.Contains(err.Error(), "phase=restore: context canceled") {
+		t.Fatalf("restore deadline diagnostic=%v", err)
+	}
+	observationCtx, cancelObservation := context.WithCancel(context.Background())
+	cancelObservation()
+	if err := runtime.WaitObservation(observationCtx, 58); err == nil || !strings.Contains(err.Error(), "phase=observation sequence=58 committed=0: context canceled") {
+		t.Fatalf("observation deadline diagnostic=%v", err)
+	}
+}
+
+func TestBroadcastRuntimeV3ObservationWakeupUsesDurableSequenceWithoutRuntimeLock(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	root := t.TempDir()
+	const sessionID = "live-observation-ready"
+	runtime, err := newBroadcastRuntimeV3(broadcastConfigV3{
+		DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"),
+		Artifacts: testLiveOnlyArtifacts(sessionID), Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	observation := testObservation(sessionID, 1, now)
+	if err := runtime.commitCandidates(observation, nil, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- runtime.WaitObservation(context.Background(), 1) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("committed observation waiter contended on runtime lock")
+	}
+	runtime.mu.Unlock()
+}
+
 func TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate(t *testing.T) {
 	now := time.UnixMilli(10_000).UTC()
 	root := t.TempDir()

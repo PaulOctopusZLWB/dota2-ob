@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
@@ -47,6 +49,7 @@ type broadcastRuntimeV3 struct {
 	restoreReady         chan struct{}
 	restoreReadyOnce     sync.Once
 	observationReady     chan struct{}
+	committedObservation atomic.Uint64
 	projectionRejected   bool
 	projectionHealthCode string
 	candidateSaturated   bool
@@ -136,6 +139,7 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 	if !config.ProjectionRestoreRequired {
 		runtime.restoreReadyOnce.Do(func() { close(runtime.restoreReady) })
 	}
+	runtime.committedObservation.Store(app.State().LastObservationSequence)
 	return runtime, nil
 }
 
@@ -188,6 +192,7 @@ func (r *broadcastRuntimeV3) commitCandidatesLocked(observation contracts.LiveOb
 	}
 	copyObservation := observation
 	r.previous = &copyObservation
+	r.committedObservation.Store(observation.Evidence.Sequence)
 	r.signalObservationReadyLocked()
 	if commitHasQueueFull(commit) {
 		r.candidateSaturated = true
@@ -335,20 +340,27 @@ func (r *broadcastRuntimeV3) CompleteRestore(ctx context.Context) error {
 // observer-side mutex polling with a causal production readiness signal.
 func (r *broadcastRuntimeV3) RestoreReady() <-chan struct{} { return r.restoreReady }
 
+func (r *broadcastRuntimeV3) WaitRestore(ctx context.Context) error {
+	select {
+	case <-r.restoreReady:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("phase=restore: %w", ctx.Err())
+	}
+}
+
 // WaitObservation blocks on a coalescing causal notification instead of
 // contending with projection on the runtime mutex. The application state is
 // authoritative, so a notification is only a wakeup and cannot skip progress.
 func (r *broadcastRuntimeV3) WaitObservation(ctx context.Context, sequence uint64) error {
 	for {
-		r.mu.Lock()
-		observed := r.app.State().LastObservationSequence
-		r.mu.Unlock()
+		observed := r.committedObservation.Load()
 		if observed >= sequence {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("phase=observation sequence=%d committed=%d: %w", sequence, r.committedObservation.Load(), ctx.Err())
 		case <-r.observationReady:
 		}
 	}

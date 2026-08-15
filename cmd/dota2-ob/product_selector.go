@@ -39,7 +39,8 @@ func runProducts(args []string, output io.Writer, runV2 func([]string, io.Writer
 	case productModeLiveOnlyV3:
 		return runV3(options, output)
 	default:
-		panic("validated product mode became invalid")
+		fmt.Fprintln(output, "policy_mode_invalid")
+		return 1
 	}
 }
 
@@ -47,9 +48,6 @@ type productModeValue struct{ value string }
 
 func (v *productModeValue) String() string { return v.value }
 func (v *productModeValue) Set(value string) error {
-	if value != productModeSnapshotV2 && value != productModeLiveOnlyV3 {
-		return fmt.Errorf("policy mode %q is invalid", value)
-	}
 	v.value = value
 	return nil
 }
