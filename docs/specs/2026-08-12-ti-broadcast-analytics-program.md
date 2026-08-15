@@ -2,12 +2,12 @@
 
 Date: 2026-08-12
 
-Amended: 2026-08-14
+Amended: 2026-08-15
 
 Decision owner: Paul
 
-Status: M0 and M2 accepted; M1 real-data evidence active; M3 blocked on the
-raw-record V3 migration gate
+Status: M0-M3 accepted; M4 functional integration blocked on the executable
+product-identity migration gate below
 
 ## Objective
 
@@ -1157,6 +1157,73 @@ Acceptance:
   exits cleanly.
 - Full test, race, vet, contract, frontend, screenshot, and end-to-end suites
   pass from one documented command set.
+
+#### Executable product-identity migration gate
+
+Independent review of M4 candidate
+`e37a96f842031d4781e7d26542583a314a56c2b5` proved that snapshot-V2 product
+identity is not closed over the code the binary executes. The identity includes
+generated entry, lineage, orchestration, projection, delivery-port, and
+lifecycle sources, but mutable current startup code still selects and controls
+part of that path. The `DOT-66` bounded contradiction experiment then proved
+that delegating the complete V2 entry truthfully changes a source digest already
+bound into the live-only V3 `EngineBuild`, which transitively changes lineage,
+candidate evidence, and the M4 production golden. Therefore the prior
+requirements to close the executable V2 provenance gap while preserving all
+identities and the golden from `e37a96f...` cannot both hold.
+The exact evidence is `DOT-68` review comment
+`d1307cb8-7339-4d49-a711-a09db7fec0d8` and `DOT-66` contradiction comment
+`91578afa-945a-4fa9-b11f-abeef3391a1d`.
+
+`e37a96f...`, its derived product identities, and production-golden SHA-256
+`538264076c4e5f05b0d97485e3a35c8d41b3bd27369544666de9534bec16e3bf`
+remain immutable rejected-candidate evidence; they are not M4 acceptance
+anchors. M4 may resume only through this narrow migration:
+
+- The actual binary selector and every executed mode-specific entry, lineage,
+  orchestration, projection/follower, delivery-port, and lifecycle semantic
+  source are identity-bearing. Shared code that can change which product mode
+  executes is bound into both affected product builds. Hashing an unexecuted
+  copy, allowing a non-identity-bearing selector, or retaining a mutable
+  wrapper above an identity-bearing partial implementation is prohibited.
+- One immutable successor may change only the product-selection/generated-
+  snapshot seam, its structural/adversarial guards, deterministic goldens, and
+  the focused runbook. It must start from exact rejected parent
+  `e37a96f842031d4781e7d26542583a314a56c2b5` and retain accepted ancestors
+  `c0b328a95b225e68771adeb4d927b54a90c79a1e` and
+  `cf20368430d46ad395127609eb7eb9609422aaa8`.
+- The successor creates new content-addressed product-build and policy-lineage
+  artifacts for every affected mode. It may rotate only identities, hashes,
+  evidence references, and golden fields derived from the truthful executable
+  source set. Prior artifacts are never rewritten or relabeled, and recovery
+  never upgrades an old lineage in place. A deterministic migration manifest
+  records old/new identities, the causal source change, and every transitively
+  changed golden field.
+- Existing contract schemas and canonical encodings remain unchanged, including
+  the five primary V1 contracts and the live-only V3 supporting contracts.
+  Snapshot-V2 and live-only-V3 policy, candidate, command, recovery,
+  presentation, audit, queue, body-size, clock, and fail-closed semantics remain
+  byte-equivalent after normalizing only the migration manifest's declared
+  identity-derived fields. If the existing schemas cannot represent the new
+  truthful source set, implementation stops for a separately reviewed contract
+  version; it must not omit a source or weaken a validator.
+- The fixed captured schedule and its SHA-256
+  `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`
+  remain unchanged. The successor regenerates production evidence twice in
+  independent clean roots, obtains byte-identical outputs and one new golden
+  hash, and explains every old/new canonical diff. No fixture fact, clock,
+  expected terminal outcome, suppression reason, source boundary, or threshold
+  may change to make the new golden pass.
+- Structural guards and review-only adversarial mutations must prove that drift
+  in the real mode/default selector, delegation target, lineage loader,
+  projection runner, delivery ports, or lifecycle changes an admitted identity
+  or fails generation/tests. Repository-wide call search must find no executed
+  snapshot-V2 semantic path outside the identity-bearing implementation.
+- The complete `DOT-66` verification matrix and a fresh independent exact-SHA
+  review remain mandatory before P4 or `DOT-65` starts. This migration does not
+  accept the functional candidate, relax M4/P4 thresholds, authorize M1 data-
+  plane imports, change the safety boundary, merge, deploy, or mutate the
+  canonical acceptance root.
 
 ### M5: Corpus completion, validation, and editorial calibration
 
