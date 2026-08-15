@@ -28,12 +28,12 @@ Run only after the exact clean candidate has been pushed to
 of draft PR #19. Dota and OBS must be stopped:
 
 ```sh
-go run ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-a
-go run ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
+go run -buildvcs=true ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-a
+go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
 ```
 
 Preflight fails closed unless local HEAD has exactly one parent—the rejected
-`cc31d544...` candidate—and local HEAD, the origin branch, PR #19's head, the
+`302d0bbe...` candidate—and local HEAD, the origin branch, PR #19's head, the
 executing harness VCS revision, and the built product VCS revision are identical.
 It binds the binary hash, Git tree, remote URL, and freshly captured Go, Node,
 npm, Zig, kernel, Steam, Dota, OBS, and GPU identities. It runs the complete
@@ -49,10 +49,14 @@ byte-identical.
 Run a second root and compare:
 
 ```sh
-go run ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-b
-go run ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-b --expect preflight
+go run -buildvcs=true ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-b
+go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-b --expect preflight
 cmp /var/tmp/dot65-preflight-a/evidence/canonical/evidence-index.json \
     /var/tmp/dot65-preflight-b/evidence/canonical/evidence-index.json
+diff -qr /var/tmp/dot65-preflight-a/evidence/canonical \
+    /var/tmp/dot65-preflight-b/evidence/canonical
+cmp /var/tmp/dot65-preflight-a/evidence/readiness.json \
+    /var/tmp/dot65-preflight-b/evidence/readiness.json
 sha256sum /var/tmp/dot65-preflight-{a,b}/evidence/canonical/evidence-index.json
 ```
 
@@ -72,7 +76,7 @@ Create a private JSON file containing only public match identity:
 Then run the foreground command:
 
 ```sh
-go run ./cmd/m4-match live \
+go run -buildvcs=true ./cmd/m4-match live \
   --readiness-root /var/tmp/dot65-preflight-a \
   --data-root /var/tmp/dot65-live-1234567890 \
   --identity /var/tmp/dot65-match-identity.json
@@ -132,15 +136,15 @@ self-accept P4.
 Verify before retention or deletion:
 
 ```sh
-go run ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
-go run ./cmd/m4-match verify --data-root /var/tmp/dot65-live-1234567890 --expect live
+go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
+go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-live-1234567890 --expect live
 ```
 
 Cleanup requires the exact index hash printed in `evidence/readiness.json` and
 refuses an unverifiable or protected root:
 
 ```sh
-go run ./cmd/m4-match cleanup \
+go run -buildvcs=true ./cmd/m4-match cleanup \
   --data-root /var/tmp/dot65-preflight-a \
   --confirm-index-sha256 '<exact evidence_index_sha256>'
 ```

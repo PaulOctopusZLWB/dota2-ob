@@ -80,7 +80,7 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	parent, parentErr := runText(ctx, repo, "git", "rev-parse", "HEAD^")
 	evidence.CandidateCommit, evidence.CandidateParent = head, parent
 	add("candidate_commit", headErr == nil && len(head) == 40, "exact immutable successor recorded")
-	add("candidate_parent", parentErr == nil && parent == RequiredSuccessorParent, "sole parent is rejected cc31d544 candidate")
+	add("candidate_parent", parentErr == nil && parent == RequiredSuccessorParent, "sole parent is rejected 302d0bbe candidate")
 	_, ancestryErr := runText(ctx, repo, "git", "merge-base", "--is-ancestor", AcceptedFunctionalBase, "HEAD")
 	add("accepted_ancestry", ancestryErr == nil, "accepted functional base is an ancestor")
 	status, statusErr := runText(ctx, repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
@@ -102,25 +102,32 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	add("isolated_process_state", processErr == nil && len(active) == 0, "no pre-existing Dota or OBS process: "+strings.Join(active, ","))
 
 	commands := []struct {
-		id   string
-		dir  string
-		name string
-		args []string
+		id            string
+		dir           string
+		name          string
+		args          []string
+		lockedInstall bool
 	}{
-		{"focused_twice", repo, "go", []string{"test", "-count=2", "-timeout=12m", "./cmd/dota2-ob", "./internal/integration/m4", "./cmd/m4-match", "./internal/m4match"}},
-		{"m4_fault_matrix", repo, "go", []string{"test", "-v", "-count=1", "-timeout=12m", "-run", "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts|TestM4ProductionCompositionFailsClosedForMissingAndSubstitutedBinding|TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers|TestBroadcastRuntimeV3ReadinessDeadlinesNamePhaseAndSequence|TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate", "./cmd/dota2-ob", "./internal/integration/m4"}},
-		{"full_go", repo, "go", []string{"test", "-count=1", "./..."}},
-		{"full_race", repo, "env", []string{"CGO_ENABLED=1", "CC=zig cc", "go", "test", "-race", "-timeout", "30m", "-count=1", "./..."}},
-		{"vet", repo, "go", []string{"vet", "./..."}},
-		{"build_all", repo, "go", []string{"build", "./..."}},
-		{"module_verify", repo, "go", []string{"mod", "verify"}},
-		{"browser_install", filepath.Join(repo, "web/browser"), "npm", []string{"ci"}},
-		{"browser_tests", filepath.Join(repo, "web/browser"), "npm", []string{"test"}},
-		{"obs_overlay_install", filepath.Join(repo, "spikes/obs-overlay"), "npm", []string{"ci"}},
-		{"obs_overlay_tests", filepath.Join(repo, "spikes/obs-overlay"), "npm", []string{"test"}},
+		{id: "focused_twice", dir: repo, name: "go", args: []string{"test", "-count=2", "-timeout=12m", "./cmd/dota2-ob", "./internal/integration/m4", "./cmd/m4-match", "./internal/m4match"}},
+		{id: "m4_fault_matrix", dir: repo, name: "go", args: []string{"test", "-v", "-count=1", "-timeout=12m", "-run", "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts|TestM4ProductionCompositionFailsClosedForMissingAndSubstitutedBinding|TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers|TestBroadcastRuntimeV3ReadinessDeadlinesNamePhaseAndSequence|TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate", "./cmd/dota2-ob", "./internal/integration/m4"}},
+		{id: "full_go", dir: repo, name: "go", args: []string{"test", "-count=1", "./..."}},
+		{id: "full_race", dir: repo, name: "env", args: []string{"CGO_ENABLED=1", "CC=zig cc", "go", "test", "-race", "-timeout", "30m", "-count=1", "./..."}},
+		{id: "vet", dir: repo, name: "go", args: []string{"vet", "./..."}},
+		{id: "build_all", dir: repo, name: "go", args: []string{"build", "./..."}},
+		{id: "module_verify", dir: repo, name: "go", args: []string{"mod", "verify"}},
+		{id: "browser_install", dir: filepath.Join(repo, "web/browser"), lockedInstall: true},
+		{id: "browser_tests", dir: filepath.Join(repo, "web/browser"), name: "npm", args: []string{"test"}},
+		{id: "obs_overlay_install", dir: filepath.Join(repo, "spikes/obs-overlay"), lockedInstall: true},
+		{id: "obs_overlay_tests", dir: filepath.Join(repo, "spikes/obs-overlay"), name: "npm", args: []string{"test"}},
 	}
 	for _, command := range commands {
-		result := runLogged(ctx, command.dir, filepath.Join(root, "evidence/logs", command.id+".log"), command.name, command.args...)
+		logPath := filepath.Join(root, "evidence/logs", command.id+".log")
+		var result commandResult
+		if command.lockedInstall {
+			result = runLockedInstall(ctx, command.dir, logPath)
+		} else {
+			result = runLogged(ctx, command.dir, logPath, command.name, command.args...)
+		}
 		add(command.id, result.err == nil, "exit status recorded in noncanonical run log")
 	}
 
@@ -232,11 +239,34 @@ func runLogged(ctx context.Context, dir, logPath, name string, args ...string) c
 }
 
 var durationPattern = regexp.MustCompile(`\b[0-9]+(?:\.[0-9]+)?(?:ms|s|m)[0-9]*(?:\.[0-9]+)?s?\b`)
+var durationMillisPattern = regexp.MustCompile(`(?m)(\bduration_ms(?::|\s)\s*)[0-9]+(?:\.[0-9]+)?`)
+var jsonDurationPattern = regexp.MustCompile(`("duration"\s*:\s*)[0-9]+(?:\.[0-9]+)?`)
+var webServerTimestampPattern = regexp.MustCompile(`\b\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\b`)
+var timestampSessionPattern = regexp.MustCompile(`\b\d{8}T\d{6}(?:\.\d+)?Z\b`)
+var processIDPattern = regexp.MustCompile(`(?i)(\bpid(?:=|:\s*|\s+))\d+\b`)
+
+var lockedInstallArgs = []string{"ci", "--no-audit", "--no-fund"}
+
+func runLockedInstall(ctx context.Context, dir, logPath string) commandResult {
+	lockHash, _, lockErr := fileSHA(filepath.Join(dir, "package-lock.json"))
+	command := exec.CommandContext(ctx, "npm", lockedInstallArgs...)
+	command.Dir = dir
+	output, commandErr := command.CombinedOutput()
+	err := errors.Join(lockErr, commandErr)
+	proof := "lockfile_sha256=" + lockHash + "\n"
+	_ = writePrivate(logPath, normalizeLog(append([]byte(proof), output...), dir, filepath.Dir(filepath.Dir(filepath.Dir(logPath))), err))
+	return commandResult{output: output, err: err}
+}
 
 func normalizeLog(output []byte, dir, root string, commandErr error) []byte {
 	text := strings.ReplaceAll(string(output), filepath.Clean(dir), "<WORKDIR>")
 	text = strings.ReplaceAll(text, filepath.Clean(root), "<EVIDENCE_ROOT>")
 	text = durationPattern.ReplaceAllString(text, "<DURATION>")
+	text = durationMillisPattern.ReplaceAllString(text, `${1}<DURATION_MS>`)
+	text = jsonDurationPattern.ReplaceAllString(text, `${1}"<DURATION_MS>"`)
+	text = webServerTimestampPattern.ReplaceAllString(text, "<TIME>")
+	text = timestampSessionPattern.ReplaceAllString(text, "<SESSION>")
+	text = processIDPattern.ReplaceAllString(text, `${1}<PID>`)
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	for index := range lines {
 		lines[index] = strings.TrimRight(lines[index], " \t")

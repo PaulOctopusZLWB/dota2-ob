@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -72,6 +73,69 @@ func TestPrepareIsRootIndependentAndNativeGeometry(t *testing.T) {
 	gsi, _ := os.ReadFile(filepath.Join(first, "config/dota/gamestate_integration_dota2_ob_m4.cfg"))
 	if bytes.Contains(gsi, []byte(`"provider"  "1"`)) || !bytes.Contains(gsi, []byte(`"provider"  "0"`)) {
 		t.Fatal("GSI provider identity is not disabled")
+	}
+}
+
+func TestNormalizeLogCanonicalizesOnlyApprovedVolatility(t *testing.T) {
+	first := []byte("[WebServer] 2026/08/15 18:30:41 server_started pid=123 session_id=20260815T103041.895384756Z capture_target=20260815T103041.895384756Z/raw.jsonl\n" +
+		"duration_ms: 0.404157\n# duration_ms 37.626472\n{\"duration\":12.34}\n68 passed (30.7s)\n[1/68] stable test name\n")
+	second := []byte("[WebServer] 2026/08/16 01:02:03 server_started pid=987 session_id=20260816T010203.123Z capture_target=20260816T010203.123Z/raw.jsonl\n" +
+		"duration_ms: 9.99\n# duration_ms 88.1\n{\"duration\":56.78}\n68 passed (42.2s)\n[1/68] stable test name\n")
+	want := normalizeLog(first, "/work/browser", "/evidence/a", nil)
+	if got := normalizeLog(second, "/work/browser", "/evidence/b", nil); !bytes.Equal(got, want) {
+		t.Fatalf("approved volatility changed canonical log\n%s\n%s", want, got)
+	}
+	for name, mutation := range map[string][]byte{
+		"test name": bytes.ReplaceAll(second, []byte("stable test name"), []byte("different test name")),
+		"count":     bytes.ReplaceAll(second, []byte("68 passed"), []byte("67 passed")),
+		"error":     append(append([]byte(nil), second...), []byte("meaningful error\n")...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := normalizeLog(mutation, "/work/browser", "/evidence/b", nil); bytes.Equal(got, want) {
+				t.Fatal("meaningful output mutation did not change canonical log")
+			}
+		})
+	}
+	if got := normalizeLog(second, "/work/browser", "/evidence/b", errors.New("exit 1")); bytes.Equal(got, want) || !bytes.HasPrefix(got, []byte("status=FAIL\n")) {
+		t.Fatal("command failure was not retained")
+	}
+}
+
+func TestLockedInstallEvidenceDisablesNetworkAuditAndBindsLockfile(t *testing.T) {
+	if got := strings.Join(lockedInstallArgs, " "); got != "ci --no-audit --no-fund" {
+		t.Fatalf("npm install args=%q", got)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte("lock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+	logPath := filepath.Join(t.TempDir(), "evidence", "logs", "install.log")
+	result := runLockedInstall(context.Background(), dir, logPath)
+	if result.err == nil {
+		t.Fatal("missing npm unexpectedly passed")
+	}
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(payload, []byte("lockfile_sha256=0c030586945fe504b604ecc2e875c38ede400cd5cd73da9730302162e6b02c6f")) || !bytes.HasPrefix(payload, []byte("status=FAIL\n")) {
+		t.Fatalf("locked install transcript=%q", payload)
+	}
+}
+
+func TestRunbookUsesVCSStampedHarnessInvocations(t *testing.T) {
+	payload, err := os.ReadFile(filepath.Join("..", "..", "docs", "runbooks", "m4-ti-match.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("go run ./cmd/m4-match")) {
+		t.Fatal("runbook contains an unstamped harness invocation")
+	}
+	for _, command := range []string{"preflight", "verify", "live", "cleanup"} {
+		if !bytes.Contains(payload, []byte("go run -buildvcs=true ./cmd/m4-match "+command)) {
+			t.Fatalf("runbook lacks VCS-stamped %s invocation", command)
+		}
 	}
 }
 
