@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
+	snapshotproduct "github.com/PaulOctopusZLWB/dota2-ob/internal/snapshotv2/compiled/product"
 )
 
 const acceptedRulesSHA256 = "0c62db7212ed7d6bc0e17351c14571803899ee4ff67ce378cf265c6fd3dafa67"
@@ -42,14 +43,11 @@ func TestEmbeddedReferenceAndAcceptedIdentitiesArePinned(t *testing.T) {
 	assertArtifact(t, catalog.ContentSHA256, "a7815d69b3ffbfe035912c8783639da17cf364ab765302515c4c607acc8177b4")
 	assertArtifact(t, terminology.ContentSHA256, "f94b0aa4baba38873a8e1974abea94bee2c503013fd8ab3bfc4295546dba4116")
 	assertArtifact(t, localization.ContentSHA256, "920569d53c0dd15fe3838b291accd6d63f6f2657cd70166450722f692404ddaa")
-	assertArtifact(t, engine.ContentSHA256, "743ab914de1dbc5c2704ecb1dfaaee6c4f7c16f633df8f9500d8040251e00dd3")
+	assertArtifact(t, engine.ContentSHA256, "61746bc2646361125ff75824018b67290da62d6ff0653c9e1e1f850056a46e96")
 }
 
 func TestEmbeddedReferenceSubstitutionChangesRuntimeIdentity(t *testing.T) {
-	digests, err := ReferenceDigests()
-	if err != nil {
-		t.Fatal(err)
-	}
+	digests := snapshotproduct.SemanticDigests()
 	_, _, _, accepted, err := artifactsFromDigests(digests, insight.RulesArtifact().ContentSHA256)
 	if err != nil {
 		t.Fatal(err)

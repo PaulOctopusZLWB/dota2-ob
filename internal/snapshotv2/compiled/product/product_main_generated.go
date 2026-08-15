@@ -34,7 +34,7 @@ import (
 
 const operatorTokenFilename = "operator.token"
 
-func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
+func main() { os.Exit(Run(os.Args[1:], os.Stderr)) }
 
 type runDependencies struct {
 	newStore     func(string, string) (*session.Store, error)
@@ -59,7 +59,7 @@ func defaultRunDependencies() runDependencies {
 	}
 }
 
-func run(args []string, output io.Writer) int {
+func Run(args []string, output io.Writer) int {
 	return runWithDependencies(args, output, defaultRunDependencies())
 }
 

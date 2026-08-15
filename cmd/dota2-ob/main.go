@@ -35,8 +35,6 @@ import (
 
 const operatorTokenFilename = "operator.token"
 
-func main() { os.Exit(run(os.Args[1:], os.Stderr)) }
-
 type runDependencies struct {
 	newStore             func(string, string) (*session.Store, error)
 	newTokenFile         func(string) (string, string, func(), error)
@@ -70,10 +68,6 @@ func defaultRunDependencies() runDependencies {
 		newBroadcastV3:       newBroadcastRuntimeV3,
 		mapPolicyObservation: capture.MapLiveObservationV1,
 	}
-}
-
-func run(args []string, output io.Writer) int {
-	return runWithDependencies(args, output, defaultRunDependencies())
 }
 
 func runWithDependencies(args []string, output io.Writer, deps runDependencies) int {

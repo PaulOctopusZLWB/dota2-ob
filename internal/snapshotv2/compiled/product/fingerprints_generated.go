@@ -3,6 +3,7 @@ package product
 const (
 	contractsSourceSHA256         = "cb8513c20b816b681e083af043fb4ab13ea765b40b9dc055439e197c6644a8f9"
 	liveMappingSourceSHA256       = "ea481ddba7f714d2f25248d696d0b4d65a8a23b3b901754f96180053fcb1b8a8"
+	productSelectorSourceSHA256   = "dba26a22bdc96d5f47d4c4d18afaa9694166f85d491f73266a723de5f09ab284"
 	presentationCatalogSHA256     = "643bbab16fe6576f5be16ee0e71127a58c799730e6754b5ef99178fd91693183"
 	productMainSourceSHA256       = "658cc654f9284889a07dc9c49a070529283f60b013b526544fc5a3fedb503c5f"
 	productPortsSourceSHA256      = "238b095c9a9196feb438d3180caccf302f3eb646ecf7a21e9ee3c048ea3d3d66"

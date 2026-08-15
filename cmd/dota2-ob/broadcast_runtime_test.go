@@ -181,6 +181,7 @@ func TestProductLineageSourceFingerprintsMatchCompiledIdentities(t *testing.T) {
 	files := map[string]string{
 		"../../internal/contracts/contracts.go":                      contractsSourceSHA256,
 		"../../internal/capture/live_observation.go":                 liveMappingSourceSHA256,
+		"product_selector.go":                                        productSelectorSourceSHA256,
 		"../../internal/presentation/catalog.go":                     presentationCatalogSHA256,
 		"main.go":                                                    productMainSourceSHA256,
 		"broadcast_ports.go":                                         productPortsSourceSHA256,
@@ -230,7 +231,7 @@ func TestProductLineageUsesAcceptedCaptureV3Identities(t *testing.T) {
 	}
 }
 
-func TestSnapshotV2AcceptedCanonicalBytesAndLineageRemainPinned(t *testing.T) {
+func TestSnapshotV2MigratedCanonicalBytesAndLineageRemainPinned(t *testing.T) {
 	now := time.UnixMilli(10_000).UTC()
 	const sessionID = "v2-regression"
 	lineage := testLineage(sessionID)
@@ -256,8 +257,8 @@ func TestSnapshotV2AcceptedCanonicalBytesAndLineageRemainPinned(t *testing.T) {
 	}
 	candidateHash, _ := contracts.CanonicalSHA256(candidate)
 	resultHash, _ := contracts.CanonicalSHA256(result)
-	wantCommits := []string{"2d744d2178b2f9fada4eb8bd947c5a4c19dbe38359d1f260758816d6c55f8a4c", "6111c372b17d8d1b47fd1d3fd433a48ec8fd579f9ce911d134246bc9b396e7ab"}
-	if lineage.MustContentID() != "16b476e58855042ac6474a8bf75d18f3247d4a45a3d35d2267097978d36fe723" || candidate.CandidateID != "596c8f5153b9f8a9d71ab3da1ba19dff53bba2426b2cc378ad99258931f337fb" || candidateHash != "15732db121932440f9c4b6384c68695e5bb25e6f5f933ed9d49ecad78853efef" || resultHash != "7c22fbcced7e36cf6505c2adf7aae31ad53b6eaaf22e2b7d7711fa6d574d2f6e" || !slices.Equal(commitHashes, wantCommits) {
+	wantCommits := []string{"921b64e821b094b20337753137e1c28e39623b973173c92e10e6f90ee5aaaf8b", "8c0adf5a594ba2013d7115715c01f05a75c88e258e3369fdc4f7b3b36248f61a"}
+	if lineage.MustContentID() != "8292e6a8deff171829f1a4a443826b54a6b8ffc38219d3d71e1e0f4daf4e4198" || candidate.CandidateID != "596c8f5153b9f8a9d71ab3da1ba19dff53bba2426b2cc378ad99258931f337fb" || candidateHash != "15732db121932440f9c4b6384c68695e5bb25e6f5f933ed9d49ecad78853efef" || resultHash != "7c22fbcced7e36cf6505c2adf7aae31ad53b6eaaf22e2b7d7711fa6d574d2f6e" || !slices.Equal(commitHashes, wantCommits) {
 		t.Fatalf("accepted V2 bytes changed: lineage=%s candidate_id=%s candidate=%s result=%s commits=%v", lineage.MustContentID(), candidate.CandidateID, candidateHash, resultHash, commitHashes)
 	}
 }

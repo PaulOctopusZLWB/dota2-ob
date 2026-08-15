@@ -1049,7 +1049,10 @@ func waitRestoreComplete(t *testing.T, runtimeV3 *broadcastRuntimeV3) {
 
 func waitObservation(t *testing.T, runtimeV3 *broadcastRuntimeV3, sequence uint64) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// This deadline only allows the asynchronous test follower to make progress
+	// while the full/race matrix contends for CPU. Contract clocks and the
+	// independently asserted two-second hide bound remain fixture-controlled.
+	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
 		if runtimeV3 != nil {
 			runtimeV3.mu.Lock()

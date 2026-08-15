@@ -36,13 +36,13 @@ func TestCompiledV2IsExactGenerationOfIdentityBearingArtifacts(t *testing.T) {
 }
 
 func TestProductionV2SeamCannotCrossIntoCurrentSemantics(t *testing.T) {
-	facade, err := os.ReadFile("../../cmd/dota2-ob/broadcast_runtime.go")
+	selector, err := os.ReadFile("../../cmd/dota2-ob/product_selector.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(facade)
-	if !strings.Contains(text, "internal/snapshotv2/compiled/product") {
-		t.Fatal("production V2 runtime does not select compiled snapshot implementation")
+	text := string(selector)
+	if !strings.Contains(text, "internal/snapshotv2/compiled/product") || !strings.Contains(text, "snapshotproduct.Run(delegated, output)") {
+		t.Fatal("actual binary V2 entry does not select the complete compiled snapshot product")
 	}
 	for _, forbidden := range []string{"internal/insight", "internal/policy\"", "internal/presentation"} {
 		if strings.Contains(text, forbidden) {
@@ -59,6 +59,13 @@ func TestProductionV2SeamCannotCrossIntoCurrentSemantics(t *testing.T) {
 			}
 		}
 	}
+	generated := mustGenerate(t)
+	completePath := string(generated["compiled/product/product_main_generated.go"]) + string(generated["compiled/product/product_ports_generated.go"])
+	for _, required := range []string{"func Run(args []string, output io.Writer) int", "func runWithDependencies(", "loadPolicyLineage(", "newBroadcastRuntime(", "newPolicyProjectionRunner(", "session.NewLiveFollower(", "deps.runLifecycle("} {
+		if !strings.Contains(completePath, required) {
+			t.Fatalf("generated V2 product omits executable semantic %q", required)
+		}
+	}
 }
 
 func mustGenerate(t *testing.T) map[string][]byte {
@@ -71,35 +78,57 @@ func mustGenerate(t *testing.T) map[string][]byte {
 }
 
 func TestSemanticMutationCannotRetainCodeAndIdentity(t *testing.T) {
-	base := mapFS(t)
-	originalCode, originalDigests, err := GenerateCompiled(base, fixedRuntimeDigests(t))
+	originalCode, originalDigests, err := GenerateCompiled(mapFS(t), fixedRuntimeDigests(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mutated := mapFS(t)
-	payload := append([]byte(nil), mutated["reference/policy_engine.go.src"].Data...)
-	payload = append(payload, []byte("\n// semantic mutation\n")...)
-	mutated["reference/policy_engine.go.src"] = &fstest.MapFile{Data: payload}
-	mutatedCode, mutatedDigests, err := GenerateCompiled(mutated, fixedRuntimeDigests(t))
+	originalCatalog, originalTerminology, originalLocalization, originalEngine, err := artifactsFromDigests(originalDigests, "rules")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(originalCode["compiled/policy/engine_generated.go"], mutatedCode["compiled/policy/engine_generated.go"]) {
-		t.Fatal("semantic mutation retained compiled V2 bytes")
+	tests := []struct {
+		name, source, target string
+		fixed                bool
+	}{
+		{name: "actual binary selector", source: "product_selector.go", target: "compiled/product/fingerprints_generated.go", fixed: true},
+		{name: "entry and lifecycle", source: "product_main.go", target: "compiled/product/product_main_generated.go"},
+		{name: "lineage", source: "product_lineage.go", target: "compiled/product/product_lineage_generated.go"},
+		{name: "projection follower and ports", source: "product_ports.go", target: "compiled/product/product_ports_generated.go"},
+		{name: "runtime", source: "product_runtime.go", target: "compiled/product/product_runtime_generated.go"},
+		{name: "recovery", source: "product_recovery.go", target: "compiled/product/product_recovery_generated.go"},
+		{name: "policy", source: "policy_engine.go", target: "compiled/policy/engine_generated.go"},
+		{name: "presentation", source: "presentation_catalog.go", target: "compiled/presentation/catalog_generated.go"},
 	}
-	if originalDigests["policy_engine.go"] == mutatedDigests["policy_engine.go"] {
-		t.Fatal("semantic mutation retained V2 identity input")
-	}
-	originalArtifacts, _, _, originalEngine, err := artifactsFromDigests(originalDigests, "rules")
-	if err != nil {
-		t.Fatal(err)
-	}
-	mutatedArtifacts, _, _, mutatedEngine, err := artifactsFromDigests(mutatedDigests, "rules")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if originalArtifacts == mutatedArtifacts && originalEngine == mutatedEngine {
-		t.Fatal("semantic mutation retained accepted identities")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutatedFS := mapFS(t)
+			fixed := fixedRuntimeDigests(t)
+			if test.fixed {
+				fixed[test.source] = strings.Repeat("a", 64)
+			} else {
+				path := "reference/" + test.source + ".src"
+				payload := append([]byte(nil), mutatedFS[path].Data...)
+				payload = append(payload, []byte("\n// adversarial executable semantic mutation\n")...)
+				mutatedFS[path] = &fstest.MapFile{Data: payload}
+			}
+			mutatedCode, mutatedDigests, generateErr := GenerateCompiled(mutatedFS, fixed)
+			if generateErr != nil {
+				t.Fatal(generateErr)
+			}
+			if bytes.Equal(originalCode[test.target], mutatedCode[test.target]) {
+				t.Fatalf("%s mutation retained compiled V2 bytes", test.source)
+			}
+			if originalDigests[test.source] == mutatedDigests[test.source] {
+				t.Fatalf("%s mutation retained V2 identity input", test.source)
+			}
+			mutatedCatalog, mutatedTerminology, mutatedLocalization, mutatedEngine, artifactErr := artifactsFromDigests(mutatedDigests, "rules")
+			if artifactErr != nil {
+				t.Fatal(artifactErr)
+			}
+			if originalCatalog == mutatedCatalog && originalTerminology == mutatedTerminology && originalLocalization == mutatedLocalization && originalEngine == mutatedEngine {
+				t.Fatalf("%s mutation retained every V2 identity", test.source)
+			}
+		})
 	}
 }
 
@@ -108,6 +137,7 @@ func fixedRuntimeDigests(t *testing.T) map[string]string {
 	paths := map[string]string{
 		"contracts.go":         "../contracts/contracts.go",
 		"live_mapping.go":      "../capture/live_observation.go",
+		"product_selector.go":  "../../cmd/dota2-ob/product_selector.go",
 		"session_highwater.go": "../session/highwater.go",
 		"session_follower.go":  "../session/live_projector.go",
 	}

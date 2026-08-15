@@ -48,6 +48,15 @@ func GenerateCompiled(source fs.FS, fixed map[string]string) (map[string][]byte,
 			generated = strings.ReplaceAll(generated, `"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"`, `"github.com/PaulOctopusZLWB/dota2-ob/internal/snapshotv2/compiled/insight"`)
 			generated = strings.ReplaceAll(generated, `"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"`, `"github.com/PaulOctopusZLWB/dota2-ob/internal/snapshotv2/compiled/policy"`)
 			generated = strings.ReplaceAll(generated, `"github.com/PaulOctopusZLWB/dota2-ob/internal/presentation"`, `"github.com/PaulOctopusZLWB/dota2-ob/internal/snapshotv2/compiled/presentation"`)
+			if item.Source == "product_lineage.go" {
+				generated = strings.Replace(generated,
+					`sourceArtifact("dota2-ob.product.v1", productMainSourceSHA256,`,
+					`sourceArtifact("dota2-ob.product.v1", productSelectorSourceSHA256, productMainSourceSHA256,`, 1)
+			}
+			if item.Source == "product_main.go" {
+				generated = strings.Replace(generated, "func main() { os.Exit(run(", "func main() { os.Exit(Run(", 1)
+				generated = strings.Replace(generated, "func run(args []string, output io.Writer) int", "func Run(args []string, output io.Writer) int", 1)
+			}
 		}
 		formatted, err := format.Source([]byte(generated))
 		if err != nil {
@@ -70,6 +79,7 @@ func generateFingerprints(digests map[string]string) ([]byte, error) {
 	names := []struct{ constant, source string }{
 		{"contractsSourceSHA256", "contracts.go"},
 		{"liveMappingSourceSHA256", "live_mapping.go"},
+		{"productSelectorSourceSHA256", "product_selector.go"},
 		{"presentationCatalogSHA256", "presentation_catalog.go"},
 		{"productMainSourceSHA256", "product_main.go"},
 		{"productPortsSourceSHA256", "product_ports.go"},

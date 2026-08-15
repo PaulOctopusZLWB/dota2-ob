@@ -26,7 +26,7 @@ const (
 var referenceFS embed.FS
 
 var engineOrder = []string{
-	"product_main.go", "product_ports.go", "product_recovery.go",
+	"product_selector.go", "product_main.go", "product_ports.go", "product_recovery.go",
 	"product_runtime.go", "product_lineage.go", "session_highwater.go",
 	"session_follower.go", "insight_engine.go", "policy_engine.go",
 	"policy_application.go",

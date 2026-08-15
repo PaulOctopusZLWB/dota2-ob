@@ -2,7 +2,6 @@ package product
 
 import (
 	"context"
-	"io"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
@@ -11,10 +10,6 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	snapshotinsight "github.com/PaulOctopusZLWB/dota2-ob/internal/snapshotv2/compiled/insight"
 )
-
-// Run executes the complete snapshot-V2 product entry path generated from the
-// identity-bearing product orchestration sources.
-func Run(args []string, output io.Writer) int { return run(args, output) }
 
 // Config is the narrow product-entry configuration for the generated,
 // immutable snapshot-V2 implementation.
@@ -39,6 +34,7 @@ func SemanticDigests() map[string]string {
 	return map[string]string{
 		"contracts.go":            contractsSourceSHA256,
 		"live_mapping.go":         liveMappingSourceSHA256,
+		"product_selector.go":     productSelectorSourceSHA256,
 		"presentation_catalog.go": presentationCatalogSHA256,
 		"product_main.go":         productMainSourceSHA256,
 		"product_ports.go":        productPortsSourceSHA256,

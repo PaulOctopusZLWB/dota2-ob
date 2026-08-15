@@ -18,6 +18,7 @@ func main() {
 	for name, path := range map[string]string{
 		"contracts.go":         "internal/contracts/contracts.go",
 		"live_mapping.go":      "internal/capture/live_observation.go",
+		"product_selector.go":  "cmd/dota2-ob/product_selector.go",
 		"session_highwater.go": "internal/session/highwater.go",
 		"session_follower.go":  "internal/session/live_projector.go",
 	} {
