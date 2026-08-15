@@ -11,7 +11,6 @@ import (
 )
 
 func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
-	_ = ctx
 	abs, err := safeRoot(root, repo)
 	if err != nil {
 		return Readiness{}, err
@@ -51,6 +50,10 @@ func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
 	if evidence.SchemaVersion != SchemaVersion || evidence.Mode != expect || evidence.AcceptedBase != AcceptedFunctionalBase || evidence.AcceptedSpec != AcceptedP4Spec || evidence.ClaimsP4 || !evidence.NonResumable {
 		return Readiness{}, errors.New("evidence identity or safety contract mismatch")
 	}
+	identitySHA, err := candidateIdentitySHA(evidence.CandidateIdentity)
+	if err != nil {
+		return Readiness{}, err
+	}
 	if evidence.FixtureSHA256 != CapturedScheduleSHA256 || evidence.GoldenSHA256 != ProductionGoldenSHA256 {
 		return Readiness{}, errors.New("accepted synthetic evidence identity mismatch")
 	}
@@ -64,6 +67,27 @@ func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
 		if err != nil || hash != artifact.SHA256 || size != artifact.Bytes {
 			return Readiness{}, fmt.Errorf("prepared artifact mismatch: %s", artifact.Path)
 		}
+	}
+	binary := filepath.Join(abs, "application/dota2-ob")
+	currentEnvironment, environmentChecks := inspectEnvironment(ctx)
+	for _, check := range environmentChecks {
+		if !check.Passed {
+			return Readiness{}, fmt.Errorf("current environment capture failed: %s", check.ID)
+		}
+	}
+	if currentEnvironment != evidence.Environment {
+		return Readiness{}, errors.New("current environment does not equal captured environment")
+	}
+	currentIdentity, err := currentCandidateIdentity(ctx, repo, binary, currentEnvironment)
+	if err != nil {
+		return Readiness{}, fmt.Errorf("current candidate identity: %w", err)
+	}
+	currentIdentitySHA, _ := candidateIdentitySHA(currentIdentity)
+	if err := validateIdentityBindings(readiness, evidence, currentIdentity); err != nil || currentIdentitySHA != identitySHA {
+		return Readiness{}, errors.New("current repository, remote, PR, executable, or environment identity changed")
+	}
+	if err := validateTransitiveEvidence(evidence, expect); err != nil {
+		return Readiness{}, err
 	}
 	failures := make([]string, 0)
 	for _, check := range evidence.Checks {
@@ -86,6 +110,71 @@ func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
 		return Readiness{}, errors.New("preflight incorrectly represented as live evidence")
 	}
 	return readiness, nil
+}
+
+func validateIdentityBindings(readiness Readiness, evidence Evidence, current CandidateIdentity) error {
+	if evidence.CandidateCommit == "" || readiness.CandidateCommit != evidence.CandidateCommit || evidence.CandidateParent != RequiredSuccessorParent {
+		return errors.New("candidate commit or sole-parent identity mismatch")
+	}
+	identitySHA, err := candidateIdentitySHA(evidence.CandidateIdentity)
+	if err != nil || identitySHA != readiness.CandidateIdentitySHA256 || evidence.CandidateIdentity.Commit != evidence.CandidateCommit || evidence.CandidateIdentity.SoleParent != RequiredSuccessorParent || evidence.CandidateIdentity.EnvironmentSHA256 != readiness.EnvironmentSHA256 {
+		return errors.New("candidate identity binding mismatch")
+	}
+	currentSHA, err := candidateIdentitySHA(current)
+	if err != nil || currentSHA != identitySHA {
+		return errors.New("current candidate identity mismatch")
+	}
+	return nil
+}
+
+func validateTransitiveEvidence(evidence Evidence, expect string) error {
+	artifactPaths := make(map[string]bool, len(evidence.Artifacts))
+	for _, artifact := range evidence.Artifacts {
+		artifactPaths[artifact.Path] = true
+	}
+	if expect == "preflight" {
+		for _, required := range []string{
+			"evidence/canonical/fault-proof-manifest.json",
+			"evidence/logs/focused_twice.log", "evidence/logs/m4_fault_matrix.log", "evidence/logs/full_go.log",
+			"evidence/logs/full_race.log", "evidence/logs/vet.log", "evidence/logs/build_all.log",
+			"evidence/logs/module_verify.log", "evidence/logs/browser_tests.log", "evidence/logs/obs_overlay_tests.log",
+			"evidence/logs/product-probe.log", "evidence/logs/product-sigkill-restart.log",
+		} {
+			if !artifactPaths[required] {
+				return fmt.Errorf("required transitive log absent: %s", required)
+			}
+		}
+		checks := make(map[string]bool, len(evidence.Checks))
+		for _, check := range evidence.Checks {
+			checks[check.ID] = check.Passed
+		}
+		for _, required := range []string{"accepted_ancestry", "candidate_commit", "candidate_parent", "candidate_identity", "candidate_binary_hash", "captured_schedule", "production_golden", "clean_tree", "clean_tree_final", "isolated_process_state", "focused_twice", "m4_fault_matrix", "full_go", "full_race", "vet", "build_all", "module_verify", "browser_install", "browser_tests", "obs_overlay_install", "obs_overlay_tests", "production_endpoints", "product_sigkill_restart", "privacy_and_source_boundary", "secret_generated_scan", "dependency_boundary", "diff_check"} {
+			if !checks[required] {
+				return fmt.Errorf("required passing readiness check absent: %s", required)
+			}
+		}
+	}
+	faults := make(map[string]bool, len(evidence.Faults))
+	for _, fault := range evidence.Faults {
+		faults[fault] = true
+	}
+	for _, fault := range RequiredFaults {
+		if !faults[fault] {
+			return fmt.Errorf("required fault absent: %s", fault)
+		}
+		if expect == "preflight" {
+			found := false
+			for _, check := range evidence.Checks {
+				if check.ID == "fault_"+fault && check.Passed {
+					found = true
+				}
+			}
+			if !found {
+				return fmt.Errorf("required passing fault check absent: %s", fault)
+			}
+		}
+	}
+	return nil
 }
 
 func Cleanup(root, repo, confirmation string) error {

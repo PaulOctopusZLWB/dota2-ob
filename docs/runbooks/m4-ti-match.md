@@ -23,21 +23,28 @@ the authority and are never pasted into issue comments.
 
 ## Deterministic preflight
 
-Run from the exact candidate checkout with Dota and OBS stopped:
+Run only after the exact clean candidate has been pushed to
+`origin/agent/dota2-fullstack-engineer/DOT-65-ti-match-harness` and is the head
+of draft PR #19. Dota and OBS must be stopped:
 
 ```sh
 go run ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-a
 go run ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
 ```
 
-Preflight checks exact Git ancestry and cleanliness; accepted fixture/golden
-hashes; Go, Node, npm, Zig, kernel, Steam, Dota, and OBS identities; deterministic
-OBS/GSI preparation; the complete production M4 package twice; browser and OBS
-overlay suites; forbidden-source/privacy scans; a real product build; real GSI,
-operator, and overlay endpoints; and orderly product shutdown. Test transcripts
-are retained as noncanonical run logs. `evidence/canonical/evidence-index.json`
-excludes root names, timestamps, PIDs, and durations, so two fresh roots on the
-same candidate/environment must be byte-identical.
+Preflight fails closed unless local HEAD has exactly one parent—the rejected
+`cc31d544...` candidate—and local HEAD, the origin branch, PR #19's head, the
+executing harness VCS revision, and the built product VCS revision are identical.
+It binds the binary hash, Git tree, remote URL, and freshly captured Go, Node,
+npm, Zig, kernel, Steam, Dota, OBS, and GPU identities. It runs the complete
+focused-twice, full Go, uninterrupted race, vet, build, module, browser,
+OBS-overlay, dependency, privacy, source, diff, secret/generated-data, and clean
+tree matrix. It also starts the real product for endpoint/orderly-shutdown proof
+and deliberately `SIGKILL`s and restarts a second product from retained raw
+input. Selected normalized transcripts and the explicit fault-proof manifest
+are content-addressed artifacts. Root names, timestamps, PIDs, and durations are
+normalized, so two fresh roots on the same candidate/environment must be
+byte-identical.
 
 Run a second root and compare:
 
@@ -59,7 +66,7 @@ instruction payload for the single readiness issue.
 Create a private JSON file containing only public match identity:
 
 ```json
-{"tournament":"The International","series":"Upper bracket","game":"Game 1","radiant":"Public Team A","dire":"Public Team B","match_id":"1234567890"}
+{"tournament":"The International 2026","series":"Upper bracket","game":"Game 1","radiant":"Public Team A","dire":"Public Team B","match_id":"1234567890","official_source_url":"https://www.dota2.com.cn/international/2026","confirmed_at":"2026-08-15T10:00:00Z","dota_pid":12345,"dota_executable_sha256":"<sha256 of /proc/12345/exe>","dota_process_start_ticks":123456789}
 ```
 
 Then run the foreground command:
@@ -71,7 +78,10 @@ go run ./cmd/m4-match live \
   --identity /var/tmp/dot65-match-identity.json
 ```
 
-It verifies the exact preflight, creates a new isolated root, seals the accepted
+`confirmed_at` must be the current canonical UTC time (within 15 minutes).
+`dota_pid`, executable hash, and `/proc/<pid>/stat` start ticks bind the manually
+launched Dota process instance; the harness rechecks all three throughout the
+attempt. It verifies the exact preflight, creates a new isolated root, seals the accepted
 live-only artifacts for the match session, installs the unique GSI config,
 starts the exact candidate and isolated OBS profile/collection, and waits for a
 manual preview confirmation. Only after OBS preview and recording are visibly
@@ -82,14 +92,30 @@ performs this script:
 1. Confirm the preview.
 2. Approve, or observe a deterministic ineligible rejection; reject, or observe
    a deterministic ineligible rejection.
-3. Pin and unpin when eligible.
-4. Emergency-hide, confirm claim-free output within two seconds, then clear.
+3. Pin and unpin when eligible. If ineligible, make both attempts so their
+   deterministic durable rejection results prove ineligibility; omission is not
+   evidence.
+4. Emergency-hide, confirm claim-free output within two seconds, keep it hidden
+   through at least one further accepted GSI heartbeat, then clear.
 
-The foreground process samples at five-second cadence and runs until a normal
-post-game GSI state. A missing negative pre-game clock, match identity change,
-gap, disconnect/abandon state, process loss, signal, or missing terminal state
-seals a failed non-resumable attempt. Never splice attempts. Natural DotaTV
-pauses are context only and do not authorize a claim.
+The foreground process samples the complete product/OBS process trees and all
+accepted P4 body, queue, state, resource, cursor, policy, frame, visibility, and
+cross-plane identities at five-second cadence. A separate 100 ms visibility
+trace proves emergency-hide deadline, claim-free output, no stale revival, and
+continued raw capture. Missing telemetry is failure, never zero. Every accepted
+frame must carry the same nonzero public match ID and plausible retained receive/
+game-clock cadence. Missing pre-game arming, identity loss/change, a receive gap,
+clock regression/jump, remake/abandon, Dota process replacement, process loss,
+signal, missing winner/post-game, or incomplete recording seals a failed,
+non-resumable attempt. Never splice attempts.
+
+After normal post-game, product and OBS must stop cleanly, OBS must produce a
+finalized EBML MKV with real frame counters and no partial file, and a fresh
+isolated product is started with no cursor, checkpoint, policy, audit, operator,
+or overlay output. Only `raw.jsonl` plus the canonical durable operator-input
+journal is admitted. The restarted product rebuilds and byte-compares cursor,
+V3 policy, audit, operator, and overlay outputs; copied derived output, assigned
+cursor values, termination errors, or over-bound recovery RSS fail the attempt.
 
 Press `Ctrl-C` once to abort. The command stops product/OBS, removes only its
 unique GSI config, preserves the attempt evidence, and records failure. Killing

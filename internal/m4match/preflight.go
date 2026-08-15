@@ -2,6 +2,7 @@ package m4match
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -76,8 +79,8 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	head, headErr := runText(ctx, repo, "git", "rev-parse", "HEAD")
 	parent, parentErr := runText(ctx, repo, "git", "rev-parse", "HEAD^")
 	evidence.CandidateCommit, evidence.CandidateParent = head, parent
-	add("candidate_commit", headErr == nil && len(head) == 40, "exact immutable candidate recorded")
-	add("candidate_parent", parentErr == nil && parent == AcceptedFunctionalBase, "sole parent is accepted functional base")
+	add("candidate_commit", headErr == nil && len(head) == 40, "exact immutable successor recorded")
+	add("candidate_parent", parentErr == nil && parent == RequiredSuccessorParent, "sole parent is rejected cc31d544 candidate")
 	_, ancestryErr := runText(ctx, repo, "git", "merge-base", "--is-ancestor", AcceptedFunctionalBase, "HEAD")
 	add("accepted_ancestry", ancestryErr == nil, "accepted functional base is an ancestor")
 	status, statusErr := runText(ctx, repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
@@ -104,7 +107,13 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 		name string
 		args []string
 	}{
-		{"m4_fault_matrix", repo, "go", []string{"test", "-count=2", "-timeout=12m", "./cmd/dota2-ob", "./internal/integration/m4"}},
+		{"focused_twice", repo, "go", []string{"test", "-count=2", "-timeout=12m", "./cmd/dota2-ob", "./internal/integration/m4", "./cmd/m4-match", "./internal/m4match"}},
+		{"m4_fault_matrix", repo, "go", []string{"test", "-v", "-count=1", "-timeout=12m", "-run", "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts|TestM4ProductionCompositionFailsClosedForMissingAndSubstitutedBinding|TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers|TestBroadcastRuntimeV3ReadinessDeadlinesNamePhaseAndSequence|TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate", "./cmd/dota2-ob", "./internal/integration/m4"}},
+		{"full_go", repo, "go", []string{"test", "-count=1", "./..."}},
+		{"full_race", repo, "env", []string{"CGO_ENABLED=1", "CC=zig cc", "go", "test", "-race", "-timeout", "30m", "-count=1", "./..."}},
+		{"vet", repo, "go", []string{"vet", "./..."}},
+		{"build_all", repo, "go", []string{"build", "./..."}},
+		{"module_verify", repo, "go", []string{"mod", "verify"}},
 		{"browser_install", filepath.Join(repo, "web/browser"), "npm", []string{"ci"}},
 		{"browser_tests", filepath.Join(repo, "web/browser"), "npm", []string{"test"}},
 		{"obs_overlay_install", filepath.Join(repo, "spikes/obs-overlay"), "npm", []string{"ci"}},
@@ -113,11 +122,6 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	for _, command := range commands {
 		result := runLogged(ctx, command.dir, filepath.Join(root, "evidence/logs", command.id+".log"), command.name, command.args...)
 		add(command.id, result.err == nil, "exit status recorded in noncanonical run log")
-		if command.id == "m4_fault_matrix" {
-			for _, fault := range RequiredFaults {
-				add("fault_"+fault, result.err == nil, "accepted production M4 suite exercises this invariant")
-			}
-		}
 	}
 
 	binary := filepath.Join(root, "application/dota2-ob")
@@ -131,10 +135,64 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 		}
 		endpointErr := probeProduct(ctx, root, binary)
 		add("production_endpoints", endpointErr == nil, "GSI, operator, overlay, and orderly shutdown verified")
+		killErr := probeProductSIGKILLRestart(ctx, root, binary)
+		add("product_sigkill_restart", killErr == nil, "product was deliberately SIGKILLed and restarted from retained raw input")
+		identity, identityErr := currentCandidateIdentity(ctx, repo, binary, env)
+		if identityErr == nil {
+			evidence.CandidateIdentity = identity
+		}
+		add("candidate_identity", identityErr == nil, "local, remote branch, PR head, executing harness/product, tree, and environment identities agree")
 	}
+	faultProofs := map[string]string{
+		"audit_failure":                        "TestBroadcastRuntimeFailsClosedOnCommitFailureAndStaleOutput",
+		"cache_independent_rebuild":            "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts",
+		"candidate_queue_saturation":           "TestBroadcastRuntimeV3QueueSaturationLatchesHealthHideAndRecovers",
+		"checkpoint_partial_frame":             "TestPolicyCheckpointPartialFrameRecovery",
+		"cursor_loss":                          "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts",
+		"gsi_body_bounds":                      "TestObservationResolverUnlinksCachesAndAcceptsMaximumPersistedCapture",
+		"operator_command_revision_and_replay": "TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate",
+		"orderly_restart":                      "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts",
+		"out_of_order_delivery":                "TestBroadcastRuntimeV3DoesNotRewindCausalBaselineAndRestartsAtNewest",
+		"overlay_disconnect":                   "browser and OBS-overlay fail-closed suites",
+		"overlay_state_bounds":                 "browser and OBS-overlay boundary suites",
+		"partial_policy_frame":                 "TestPolicyCommitPartialFrameRecovery",
+		"partial_raw_tail":                     "TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts",
+		"product_sigkill_restart":              "HARNESS_SIGKILL_SENT and HARNESS_RESTART_RECOVERED_RAW_SEQUENCE=1",
+		"stale_input":                          "TestBroadcastRuntimeFailsClosedOnCommitFailureAndStaleOutput",
+		"two_second_fail_closed":               "TestBroadcastRuntimeV3ReadinessDeadlinesNamePhaseAndSequence plus browser deadlines",
+	}
+	for _, fault := range RequiredFaults {
+		passed := build.err == nil
+		if fault == "product_sigkill_restart" {
+			passed = checkPassed(evidence.Checks, "product_sigkill_restart")
+		} else {
+			passed = passed && checkPassed(evidence.Checks, "m4_fault_matrix")
+		}
+		proof, proofExists := faultProofs[fault]
+		add("fault_"+fault, passed && proofExists, "direct proof: "+proof)
+	}
+	faultPayload, _ := canonical(faultProofs)
+	faultPath := filepath.Join(root, "evidence/canonical/fault-proof-manifest.json")
+	if err := writePrivate(faultPath, faultPayload); err != nil {
+		return Readiness{}, err
+	}
+	evidence.Artifacts = append(evidence.Artifacts, Artifact{Path: "evidence/canonical/fault-proof-manifest.json", SHA256: payloadSHA(faultPayload), Bytes: int64(len(faultPayload))})
+	diffOutput, diffErr := runText(ctx, repo, "git", "diff", "--check", RequiredSuccessorParent+"..HEAD")
+	add("diff_check", diffErr == nil && diffOutput == "", "successor diff has no whitespace errors")
+	deps, depsErr := runText(ctx, repo, "go", "list", "-deps", "./cmd/m4-match")
+	add("dependency_boundary", depsErr == nil && !strings.Contains(deps, "/internal/replay") && !strings.Contains(deps, "/internal/history"), "harness imports no replay/history adapter")
 
 	privacyErr := scanPrivacyAndSources(repo)
 	add("privacy_and_source_boundary", privacyErr == nil, "fixture/privacy and forbidden-source scan")
+	secretErr := scanSecretsAndGenerated(repo)
+	add("secret_generated_scan", secretErr == nil, "tracked secret and generated/private-data scan")
+	status, statusErr = runText(ctx, repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
+	add("clean_tree_final", statusErr == nil && status == "", "repository remains clean after complete matrix")
+	logArtifacts, logErr := collectLogArtifacts(root)
+	if logErr != nil {
+		return Readiness{}, logErr
+	}
+	evidence.Artifacts = append(evidence.Artifacts, logArtifacts...)
 	sortEvidence(&evidence)
 	indexPayload, marshalErr := canonical(evidence)
 	if marshalErr != nil {
@@ -150,7 +208,8 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 			failures = append(failures, check.ID)
 		}
 	}
-	readiness := Readiness{SchemaVersion: ReadinessSchemaVersion, Ready: len(failures) == 0, Mode: "preflight", CandidateCommit: head, EvidenceIndexSHA256: payloadSHA(indexPayload), Failures: failures, ClaimsP4: false, HumanInstruction: HumanInstruction}
+	identitySHA, _ := candidateIdentitySHA(evidence.CandidateIdentity)
+	readiness := Readiness{SchemaVersion: ReadinessSchemaVersion, Ready: len(failures) == 0, Mode: "preflight", CandidateCommit: head, CandidateIdentitySHA256: identitySHA, EnvironmentSHA256: evidence.CandidateIdentity.EnvironmentSHA256, EvidenceIndexSHA256: payloadSHA(indexPayload), Failures: failures, ClaimsP4: false, HumanInstruction: HumanInstruction}
 	if err := writeJSON(filepath.Join(root, "evidence/readiness.json"), readiness, 0o600); err != nil {
 		return Readiness{}, err
 	}
@@ -168,8 +227,77 @@ func runLogged(ctx context.Context, dir, logPath, name string, args ...string) c
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = dir
 	output, err := command.CombinedOutput()
-	_ = writePrivate(logPath, output)
+	_ = writePrivate(logPath, normalizeLog(output, dir, filepath.Dir(filepath.Dir(filepath.Dir(logPath))), err))
 	return commandResult{output: output, err: err}
+}
+
+var durationPattern = regexp.MustCompile(`\b[0-9]+(?:\.[0-9]+)?(?:ms|s|m)[0-9]*(?:\.[0-9]+)?s?\b`)
+
+func normalizeLog(output []byte, dir, root string, commandErr error) []byte {
+	text := strings.ReplaceAll(string(output), filepath.Clean(dir), "<WORKDIR>")
+	text = strings.ReplaceAll(text, filepath.Clean(root), "<EVIDENCE_ROOT>")
+	text = durationPattern.ReplaceAllString(text, "<DURATION>")
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for index := range lines {
+		lines[index] = strings.TrimRight(lines[index], " \t")
+	}
+	sort.Strings(lines)
+	status := "PASS"
+	if commandErr != nil {
+		status = "FAIL"
+	}
+	return []byte("status=" + status + "\n" + strings.TrimSpace(strings.Join(lines, "\n")) + "\n")
+}
+
+func checkPassed(checks []Check, id string) bool {
+	for _, check := range checks {
+		if check.ID == id {
+			return check.Passed
+		}
+	}
+	return false
+}
+
+func collectLogArtifacts(root string) ([]Artifact, error) {
+	logs := filepath.Join(root, "evidence/logs")
+	var artifacts []Artifact
+	err := filepath.WalkDir(logs, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !bytes.HasPrefix(payload, []byte("status=")) {
+			payload = normalizeRuntimeEvidenceLog(payload, root)
+			if err := writePrivate(path, payload); err != nil {
+				return err
+			}
+		}
+		hash, size, err := fileSHA(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		artifacts = append(artifacts, Artifact{Path: filepath.ToSlash(relative), SHA256: hash, Bytes: size})
+		return nil
+	})
+	return artifacts, err
+}
+
+var runtimeTimestampPattern = regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} `)
+
+func normalizeRuntimeEvidenceLog(payload []byte, root string) []byte {
+	text := strings.ReplaceAll(string(payload), filepath.Clean(root), "<EVIDENCE_ROOT>")
+	text = runtimeTimestampPattern.ReplaceAllString(text, "<TIME> ")
+	return []byte(strings.TrimSpace(text) + "\n")
 }
 
 func inspectEnvironment(ctx context.Context) (Environment, []Check) {
@@ -185,6 +313,7 @@ func inspectEnvironment(ctx context.Context) (Environment, []Check) {
 	env.NPM = tool("environment_npm", "npm", "--version")
 	env.Zig = tool("environment_zig", "zig", "version")
 	env.Kernel = tool("environment_kernel", "uname", "-srmo")
+	env.ClockTicksPerSecond = tool("environment_clock_ticks", "getconf", "CLK_TCK")
 	env.Steam = tool("environment_steam", "dpkg-query", "-W", "-f=${Version}", "steam-launcher")
 	manifest := filepath.Join(os.Getenv("HOME"), ".local/share/Steam/steamapps/appmanifest_570.acf")
 	payload, err := os.ReadFile(manifest)
@@ -329,6 +458,100 @@ func probeProduct(ctx context.Context, root, binary string) error {
 	return nil
 }
 
+func probeProductSIGKILLRestart(ctx context.Context, root, binary string) error {
+	logPath := filepath.Join(root, "evidence/logs/product-sigkill-restart.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	dataDir := filepath.Join(root, "data/sigkill-sessions")
+	tokenPath := filepath.Join(root, "runtime/sigkill-operator.token")
+	start := func() (*exec.Cmd, chan error, error) {
+		command := exec.CommandContext(ctx, binary, "--policy-mode", "v3-live-only", "--data-dir", dataDir, "--session-id", "dot65-preflight", "--addr", CaptureAddress, "--delivery-addr", DeliveryAddress, "--operator-token-file", tokenPath,
+			"--history-binding-file", filepath.Join(root, "config/policy/history_availability_binding_v1.json"), "--live-only-lineage-file", filepath.Join(root, "config/policy/policy_lineage_manifest_v3.json"), "--live-only-release-file", filepath.Join(root, "config/policy/live_only_release_binding_v1.json"))
+		command.Stdout, command.Stderr = logFile, logFile
+		if err := command.Start(); err != nil {
+			return nil, nil, err
+		}
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		if err := waitHTTP(ctx, CaptureOrigin+"/healthz", 10*time.Second); err != nil {
+			_ = command.Process.Kill()
+			<-done
+			return nil, nil, err
+		}
+		return command, done, nil
+	}
+	first, firstDone, err := start()
+	if err != nil {
+		return err
+	}
+	response, err := (&http.Client{Timeout: 2 * time.Second}).Post(CaptureOrigin+"/gsi", "application/json", strings.NewReader(`{"map":{"clock_time":-120,"game_state":"DOTA_GAMERULES_STATE_PRE_GAME","matchid":9999999999}}`))
+	if err != nil || response.StatusCode != http.StatusOK {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		_ = first.Process.Kill()
+		<-firstDone
+		return errors.New("SIGKILL probe raw input was not accepted")
+	}
+	_ = response.Body.Close()
+	if err := first.Process.Kill(); err != nil {
+		return err
+	}
+	if err := <-firstDone; err == nil {
+		return errors.New("deliberate product SIGKILL unexpectedly reported clean exit")
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		return fmt.Errorf("remove harness-owned stale SIGKILL token: %w", err)
+	}
+	_, _ = fmt.Fprintln(logFile, "HARNESS_SIGKILL_SENT")
+	second, secondDone, err := start()
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		response, requestErr := (&http.Client{Timeout: time.Second}).Get(CaptureOrigin + "/api/status")
+		if requestErr == nil {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+			_ = response.Body.Close()
+			var status struct {
+				Live struct {
+					Projected uint64 `json:"projected_sequence"`
+					HighWater uint64 `json:"high_water"`
+					Lag       uint64 `json:"lag_count"`
+				} `json:"live_projection"`
+			}
+			if response.StatusCode == http.StatusOK && json.Unmarshal(body, &status) == nil && status.Live.HighWater == 1 && status.Live.Projected == 1 && status.Live.Lag == 0 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			_ = second.Process.Kill()
+			<-secondDone
+			return errors.New("SIGKILL restart did not recover retained raw input")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	_, _ = fmt.Fprintln(logFile, "HARNESS_RESTART_RECOVERED_RAW_SEQUENCE=1")
+	if err := second.Process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			return fmt.Errorf("SIGKILL recovery shutdown: %w", err)
+		}
+	case <-time.After(15 * time.Second):
+		_ = second.Process.Kill()
+		<-secondDone
+		return errors.New("SIGKILL recovery process did not stop cleanly")
+	}
+	return nil
+}
+
 func scanPrivacyAndSources(repo string) error {
 	for _, relative := range []string{"internal/integration/m4/testdata/captured_gsi_schedule.json", "internal/integration/m4/testdata/replay_output.golden.json"} {
 		payload, err := os.ReadFile(filepath.Join(repo, relative))
@@ -361,6 +584,34 @@ func scanPrivacyAndSources(repo string) error {
 		})
 		if err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func scanSecretsAndGenerated(repo string) error {
+	tracked, err := runText(context.Background(), repo, "git", "ls-files")
+	if err != nil {
+		return err
+	}
+	for _, relative := range strings.Split(tracked, "\n") {
+		lower := strings.ToLower(filepath.ToSlash(relative))
+		for _, forbidden := range []string{"raw.jsonl", ".dem", ".mkv", ".pcl3", "operator.token", "node_modules/", "test-results/", "obs-studio/"} {
+			if strings.Contains(lower, forbidden) {
+				return fmt.Errorf("tracked generated/private path %s", relative)
+			}
+		}
+		if filepath.Ext(relative) == ".go" || filepath.Ext(relative) == ".json" || filepath.Ext(relative) == ".md" || filepath.Ext(relative) == ".yml" || filepath.Ext(relative) == ".yaml" {
+			payload, readErr := os.ReadFile(filepath.Join(repo, relative))
+			if readErr != nil {
+				return readErr
+			}
+			lowerPayload := strings.ToLower(string(payload))
+			for _, secret := range []string{"-----begin " + "private key-----", "gh" + "p_", "github" + "_pat_", "steam_web" + "_api_key="} {
+				if strings.Contains(lowerPayload, secret) {
+					return fmt.Errorf("secret pattern in %s", relative)
+				}
+			}
 		}
 	}
 	return nil
