@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -19,20 +23,120 @@ func TestProductSelectorIsClosedAndExplicit(t *testing.T) {
 		wantErr   bool
 	}{
 		{name: "default", args: []string{"--doctor"}, mode: productModeSnapshotV2, delegated: []string{"--doctor"}},
-		{name: "snapshot pair", args: []string{"--policy-mode", productModeSnapshotV2, "--doctor"}, mode: productModeSnapshotV2, delegated: []string{"--doctor"}},
-		{name: "live equal", args: []string{"--policy-mode=" + productModeLiveOnlyV3, "--doctor"}, mode: productModeLiveOnlyV3, delegated: []string{"--doctor"}},
+		{name: "double dash separated", args: []string{"--policy-mode", productModeSnapshotV2, "--doctor"}, mode: productModeSnapshotV2, delegated: []string{"--doctor"}},
+		{name: "double dash equals", args: []string{"--policy-mode=" + productModeLiveOnlyV3, "--doctor"}, mode: productModeLiveOnlyV3, delegated: []string{"--doctor"}},
+		{name: "single dash separated", args: []string{"-policy-mode", productModeLiveOnlyV3, "-doctor"}, mode: productModeLiveOnlyV3, delegated: []string{"-doctor"}},
+		{name: "single dash equals", args: []string{"-policy-mode=" + productModeLiveOnlyV3, "-doctor"}, mode: productModeLiveOnlyV3, delegated: []string{"-doctor"}},
+		{name: "terminator stops selection", args: []string{"--", "--policy-mode=" + productModeLiveOnlyV3}, mode: productModeSnapshotV2, delegated: []string{"--", "--policy-mode=" + productModeLiveOnlyV3}},
+		{name: "terminator after parsed flag", args: []string{"-doctor", "--", "-policy-mode=" + productModeLiveOnlyV3}, mode: productModeSnapshotV2, delegated: []string{"-doctor", "--", "-policy-mode=" + productModeLiveOnlyV3}},
+		{name: "positional stops selection", args: []string{"capture", "--policy-mode=" + productModeLiveOnlyV3}, mode: productModeSnapshotV2, delegated: []string{"capture", "--policy-mode=" + productModeLiveOnlyV3}},
+		{name: "repeated last wins", args: []string{"-policy-mode=" + productModeSnapshotV2, "--policy-mode", productModeLiveOnlyV3, "-doctor"}, mode: productModeLiveOnlyV3, delegated: []string{"-doctor"}},
 		{name: "missing", args: []string{"--policy-mode"}, wantErr: true},
 		{name: "unknown", args: []string{"--policy-mode=other"}, wantErr: true},
-		{name: "repeated", args: []string{"--policy-mode=v2-snapshot", "--policy-mode=v3-live-only"}, wantErr: true},
+		{name: "unknown flag before stop", args: []string{"--not-a-product-flag"}, wantErr: true},
+		{name: "unknown flag after positional ignored", args: []string{"capture", "--not-a-product-flag"}, mode: productModeSnapshotV2, delegated: []string{"capture", "--not-a-product-flag"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			mode, delegated, err := selectProductMode(test.args)
-			if (err != nil) != test.wantErr || mode != test.mode || !slices.Equal(delegated, test.delegated) {
-				t.Fatalf("mode=%q delegated=%q err=%v", mode, delegated, err)
+			var output bytes.Buffer
+			options, delegated, err := parseRunOptions(test.args, &output)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error=%v output=%q", err, output.String())
+			}
+			if err == nil && (options.policyMode.value != test.mode || !equalStrings(delegated, test.delegated)) {
+				t.Fatalf("mode=%q delegated=%q", options.policyMode.value, delegated)
 			}
 		})
 	}
+}
+
+func TestProductSelectorExecutableDispatchProbes(t *testing.T) {
+	tests := []struct {
+		name, wantRoute string
+		args            []string
+		wantDelegated   []string
+		wantDoctor      bool
+	}{
+		{name: "review terminator reproduction", args: []string{"--", "--policy-mode=v3-live-only"}, wantRoute: "v2", wantDelegated: []string{"--", "--policy-mode=v3-live-only"}},
+		{name: "review single dash reproduction", args: []string{"-policy-mode=v3-live-only", "-doctor"}, wantRoute: "v3", wantDoctor: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var route string
+			var delegated []string
+			code := runProducts(test.args, &bytes.Buffer{}, func(args []string, _ io.Writer) int {
+				route, delegated = "v2", append([]string(nil), args...)
+				return 22
+			}, func(options runOptions, _ io.Writer) int {
+				route = "v3"
+				if *options.doctorMode != test.wantDoctor {
+					t.Fatalf("doctor=%t want %t", *options.doctorMode, test.wantDoctor)
+				}
+				return 33
+			})
+			if route != test.wantRoute || (route == "v2" && code != 22) || (route == "v3" && code != 33) || !equalStrings(delegated, test.wantDelegated) {
+				t.Fatalf("route=%s code=%d delegated=%q", route, code, delegated)
+			}
+		})
+	}
+}
+
+func TestProductSelectorExecutableProcessProbes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "terminator retains V2", args: []string{"--", "--policy-mode=v3-live-only"}, want: `route=v2 delegated=["--","--policy-mode=v3-live-only"]`},
+		{name: "single dash selects V3 doctor", args: []string{"-policy-mode=v3-live-only", "-doctor"}, want: "route=v3 doctor=true"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(os.Args[0], "-test.run=^TestProductSelectorProbeHelper$")
+			command.Env = append(os.Environ(), "DOTA2_OB_SELECTOR_PROBE=1", "DOTA2_OB_SELECTOR_ARGS="+string(encoded))
+			output, err := command.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), test.want) {
+				t.Fatalf("probe err=%v output=%s", err, output)
+			}
+		})
+	}
+}
+
+func TestProductSelectorProbeHelper(t *testing.T) {
+	if os.Getenv("DOTA2_OB_SELECTOR_PROBE") != "1" {
+		t.Skip("selector executable probe helper")
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(os.Getenv("DOTA2_OB_SELECTOR_ARGS")), &args); err != nil {
+		t.Fatal(err)
+	}
+	code := runProducts(args, os.Stderr, func(delegated []string, _ io.Writer) int {
+		encoded, _ := json.Marshal(delegated)
+		fmt.Printf("route=v2 delegated=%s\n", encoded)
+		return 0
+	}, func(options runOptions, _ io.Writer) int {
+		fmt.Printf("route=v3 doctor=%t\n", *options.doctorMode)
+		return 0
+	})
+	if code != 0 {
+		t.Fatalf("selector probe code=%d", code)
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestActualBinarySelectorIsIdentityBoundAndDelegatesCompleteV2(t *testing.T) {
@@ -45,7 +149,7 @@ func TestActualBinarySelectorIsIdentityBoundAndDelegatesCompleteV2(t *testing.T)
 		t.Fatalf("selector source identity=%s want %s", got, productSelectorSourceSHA256)
 	}
 	text := string(payload)
-	for _, required := range []string{"snapshotproduct.Run(delegated, output)", "runWithDependencies(args, output, defaultRunDependencies())"} {
+	for _, required := range []string{"runProducts(args, output, snapshotproduct.Run", "runWithParsedDependencies(options, output, defaultRunDependencies())"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("actual selector missing delegation %q", required)
 		}

@@ -170,6 +170,59 @@ func TestM4ProductionCompositionFailsClosedForMissingAndSubstitutedBinding(t *te
 	}
 }
 
+func TestM4ProductionCompositionRestartReadinessIsCausal(t *testing.T) {
+	fixture := readM4Schedule(t)
+	root := t.TempDir()
+	artifactDir := t.TempDir()
+	artifacts := testLiveOnlyArtifacts(fixture.SessionID)
+	history := writeCanonicalTestContract(t, artifactDir, "history.json", artifacts.History)
+	lineage := writeCanonicalTestContract(t, artifactDir, "lineage.json", artifacts.Lineage)
+	release := writeCanonicalTestContract(t, artifactDir, "release.json", artifacts.Release)
+	clock := &lockedClock{value: time.UnixMilli(fixture.Updates[0].PolicyTime).UTC()}
+	args := []string{"--addr", "127.0.0.1:43210", "--delivery-addr", "127.0.0.1:43211", "--data-dir", root, "--session-id", fixture.SessionID, "--policy-mode", "v3-live-only", "--history-binding-file", history, "--live-only-lineage-file", lineage, "--live-only-release-file", release}
+
+	runOnce := func(restart bool) {
+		t.Helper()
+		var active *broadcastRuntimeV3
+		deps := defaultRunDependencies()
+		deps.now, deps.policyNow, deps.displayNow, deps.gatewayNow = clock.Now, clock.Now, clock.Now, clock.Now
+		deps.newTokenFile = func(string) (string, string, func(), error) { return m4Token, "", func() {}, nil }
+		deps.listen = func(_, _ string) (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+		deps.newBroadcastV3 = func(config broadcastConfigV3) (*broadcastRuntimeV3, error) {
+			runtimeV3, err := newBroadcastRuntimeV3(config)
+			active = runtimeV3
+			return runtimeV3, err
+		}
+		deps.runLifecycle = func(server lifecycle.Server, listener net.Listener, appender lifecycle.Closer, waiter lifecycle.Waiter, _ <-chan os.Signal, contextFactory lifecycle.ContextFactory) error {
+			if restart {
+				waitRestoreComplete(t, active)
+				last, previous := m4RuntimeBaseline(active)
+				if last != 1 || previous != 1 {
+					t.Fatalf("causal restart baseline=%d/%d want 1/1", last, previous)
+				}
+			} else {
+				paired := server.(*pairedHTTPServer)
+				response := httptest.NewRecorder()
+				paired.capture.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/gsi", bytes.NewReader(fixture.Updates[0].Body)))
+				if response.Code != http.StatusOK {
+					t.Fatalf("restart stress raw append=%d %s", response.Code, response.Body.String())
+				}
+				waitObservation(t, active, 1)
+			}
+			shutdown := make(chan os.Signal, 1)
+			shutdown <- os.Interrupt
+			return lifecycle.Run(server, listener, appender, waiter, shutdown, contextFactory)
+		}
+		var output bytes.Buffer
+		if code := runWithDependencies(args, &output, deps); code != 0 {
+			t.Fatalf("restart=%t code=%d output=%s", restart, code, output.String())
+		}
+	}
+
+	runOnce(false)
+	runOnce(true)
+}
+
 func readM4Schedule(t *testing.T) m4Schedule {
 	t.Helper()
 	path := filepath.Join("..", "..", "internal", "integration", "m4", "testdata", "captured_gsi_schedule.json")
@@ -1032,42 +1085,24 @@ func waitObservationHealth(t *testing.T, handler http.Handler, code string) {
 
 func waitRestoreComplete(t *testing.T, runtimeV3 *broadcastRuntimeV3) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtimeV3 != nil {
-			runtimeV3.mu.Lock()
-			restoring := runtimeV3.restoringProjection
-			runtimeV3.mu.Unlock()
-			if !restoring {
-				return
-			}
-		}
-		runtime.Gosched()
+	if runtimeV3 == nil {
+		t.Fatal("production projection runtime unavailable")
 	}
-	t.Fatal("production projection restore did not complete")
+	select {
+	case <-runtimeV3.RestoreReady():
+	case <-t.Context().Done():
+		t.Fatal("production projection restore did not complete before test cancellation")
+	}
 }
 
 func waitObservation(t *testing.T, runtimeV3 *broadcastRuntimeV3, sequence uint64) {
 	t.Helper()
-	// This deadline only allows the asynchronous test follower to make progress
-	// while the full/race matrix contends for CPU. Contract clocks and the
-	// independently asserted two-second hide bound remain fixture-controlled.
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtimeV3 != nil {
-			runtimeV3.mu.Lock()
-			observed := runtimeV3.app.State().LastObservationSequence
-			runtimeV3.mu.Unlock()
-			if observed >= sequence {
-				return
-			}
-		}
-		runtime.Gosched()
+	if runtimeV3 == nil {
+		t.Fatal("production projection runtime unavailable")
 	}
-	runtimeV3.mu.Lock()
-	last, health, visibility := runtimeV3.app.State().LastObservationSequence, runtimeV3.overlay.HealthCode, runtimeV3.overlay.Visibility
-	runtimeV3.mu.Unlock()
-	t.Fatalf("policy projection did not reach observation %d: last=%d overlay=%s/%s", sequence, last, visibility, health)
+	if err := runtimeV3.WaitObservation(t.Context(), sequence); err != nil {
+		t.Fatalf("policy projection did not reach observation %d: %v", sequence, err)
+	}
 }
 
 func postM4Command(t *testing.T, handler http.Handler, command contracts.OperatorCommandV1) contracts.OperatorCommandResultV1 {

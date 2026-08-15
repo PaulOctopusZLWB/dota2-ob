@@ -257,8 +257,8 @@ func TestSnapshotV2MigratedCanonicalBytesAndLineageRemainPinned(t *testing.T) {
 	}
 	candidateHash, _ := contracts.CanonicalSHA256(candidate)
 	resultHash, _ := contracts.CanonicalSHA256(result)
-	wantCommits := []string{"921b64e821b094b20337753137e1c28e39623b973173c92e10e6f90ee5aaaf8b", "8c0adf5a594ba2013d7115715c01f05a75c88e258e3369fdc4f7b3b36248f61a"}
-	if lineage.MustContentID() != "8292e6a8deff171829f1a4a443826b54a6b8ffc38219d3d71e1e0f4daf4e4198" || candidate.CandidateID != "596c8f5153b9f8a9d71ab3da1ba19dff53bba2426b2cc378ad99258931f337fb" || candidateHash != "15732db121932440f9c4b6384c68695e5bb25e6f5f933ed9d49ecad78853efef" || resultHash != "7c22fbcced7e36cf6505c2adf7aae31ad53b6eaaf22e2b7d7711fa6d574d2f6e" || !slices.Equal(commitHashes, wantCommits) {
+	wantCommits := []string{"f98a1fb81838492ee516940e94d4b15a1d57a8ff716dd415890fb660e51514e2", "9eb044fb3ea3f44c0a8aec8c91b0f3f0871b65ce8e11d645c85944d83fc4b239"}
+	if lineage.MustContentID() != "7a73872f7476ea20e43804bfd441cb93cf4c4fa99c014860b7dd0af07a3e3725" || candidate.CandidateID != "596c8f5153b9f8a9d71ab3da1ba19dff53bba2426b2cc378ad99258931f337fb" || candidateHash != "15732db121932440f9c4b6384c68695e5bb25e6f5f933ed9d49ecad78853efef" || resultHash != "7c22fbcced7e36cf6505c2adf7aae31ad53b6eaaf22e2b7d7711fa6d574d2f6e" || !slices.Equal(commitHashes, wantCommits) {
 		t.Fatalf("accepted V2 bytes changed: lineage=%s candidate_id=%s candidate=%s result=%s commits=%v", lineage.MustContentID(), candidate.CandidateID, candidateHash, resultHash, commitHashes)
 	}
 }

@@ -44,6 +44,9 @@ type broadcastRuntimeV3 struct {
 	previous             *contracts.LiveObservationV1
 	overlay              contracts.OverlayStateV1
 	restoringProjection  bool
+	restoreReady         chan struct{}
+	restoreReadyOnce     sync.Once
+	observationReady     chan struct{}
 	projectionRejected   bool
 	projectionHealthCode string
 	candidateSaturated   bool
@@ -123,11 +126,17 @@ func newBroadcastRuntimeV3(config broadcastConfigV3) (*broadcastRuntimeV3, error
 		_ = store.Close()
 		return nil, err
 	}
-	return &broadcastRuntimeV3{
+	runtime := &broadcastRuntimeV3{
 		app: app, store: store, policyNow: config.PolicyNow, displayNow: config.DisplayNow, artifacts: config.Artifacts,
 		previous: previous, overlay: hidden, restoringProjection: config.ProjectionRestoreRequired, candidateSaturated: saturated,
-		buildOverlay: config.BuildOverlay, evaluateLiveOnly: config.EvaluateLiveOnly, mapObservation: config.MapObservation,
-	}, nil
+		restoreReady:     make(chan struct{}),
+		observationReady: make(chan struct{}, 1),
+		buildOverlay:     config.BuildOverlay, evaluateLiveOnly: config.EvaluateLiveOnly, mapObservation: config.MapObservation,
+	}
+	if !config.ProjectionRestoreRequired {
+		runtime.restoreReadyOnce.Do(func() { close(runtime.restoreReady) })
+	}
+	return runtime, nil
 }
 
 func (r *broadcastRuntimeV3) Close() error {
@@ -179,6 +188,7 @@ func (r *broadcastRuntimeV3) commitCandidatesLocked(observation contracts.LiveOb
 	}
 	copyObservation := observation
 	r.previous = &copyObservation
+	r.signalObservationReadyLocked()
 	if commitHasQueueFull(commit) {
 		r.candidateSaturated = true
 		r.hideLocked("candidate_queue_saturated")
@@ -316,7 +326,39 @@ func (r *broadcastRuntimeV3) CompleteRestore(ctx context.Context) error {
 	defer r.mu.Unlock()
 	r.restoringProjection = false
 	r.republishLocked()
+	r.restoreReadyOnce.Do(func() { close(r.restoreReady) })
 	return nil
+}
+
+// RestoreReady closes exactly when the startup follower has rebuilt through
+// its retained high-water mark and publication has reopened. It replaces
+// observer-side mutex polling with a causal production readiness signal.
+func (r *broadcastRuntimeV3) RestoreReady() <-chan struct{} { return r.restoreReady }
+
+// WaitObservation blocks on a coalescing causal notification instead of
+// contending with projection on the runtime mutex. The application state is
+// authoritative, so a notification is only a wakeup and cannot skip progress.
+func (r *broadcastRuntimeV3) WaitObservation(ctx context.Context, sequence uint64) error {
+	for {
+		r.mu.Lock()
+		observed := r.app.State().LastObservationSequence
+		r.mu.Unlock()
+		if observed >= sequence {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.observationReady:
+		}
+	}
+}
+
+func (r *broadcastRuntimeV3) signalObservationReadyLocked() {
+	select {
+	case r.observationReady <- struct{}{}:
+	default:
+	}
 }
 
 func (r *broadcastRuntimeV3) ProjectionHealth(ctx context.Context, transition session.RejectionTransition) error {

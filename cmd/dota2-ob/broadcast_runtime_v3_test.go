@@ -91,6 +91,44 @@ func TestBroadcastRuntimeV3ProducesOnlyDurableV3TerminalCommit(t *testing.T) {
 	}
 }
 
+func TestBroadcastRuntimeV3RestoreReadinessIsCausalAndOneShot(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	root := t.TempDir()
+	const sessionID = "live-restore-ready"
+	runtime, err := newBroadcastRuntimeV3(broadcastConfigV3{
+		DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"),
+		Artifacts: testLiveOnlyArtifacts(sessionID), Now: func() time.Time { return now }, ProjectionRestoreRequired: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	select {
+	case <-runtime.RestoreReady():
+		t.Fatal("restore readiness opened before follower completion")
+	default:
+	}
+	if err := runtime.BeginRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runtime.RestoreReady():
+		t.Fatal("restore readiness opened at begin")
+	default:
+	}
+	if err := runtime.CompleteRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runtime.RestoreReady():
+	default:
+		t.Fatal("restore readiness did not open at completion")
+	}
+	if err := runtime.CompleteRestore(context.Background()); err != nil {
+		t.Fatalf("idempotent completion: %v", err)
+	}
+}
+
 func TestBroadcastRuntimeV3RecoversAndReturnsExactDurableDuplicate(t *testing.T) {
 	now := time.UnixMilli(10_000).UTC()
 	root := t.TempDir()

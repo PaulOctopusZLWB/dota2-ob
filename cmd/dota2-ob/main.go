@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -89,26 +88,19 @@ func runWithDependencies(args []string, output io.Writer, deps runDependencies) 
 	if deps.mapPolicyObservation == nil {
 		deps.mapPolicyObservation = capture.MapLiveObservationV1
 	}
-	flags := flag.NewFlagSet("dota2-ob", flag.ContinueOnError)
-	flags.SetOutput(output)
-	addr := flags.String("addr", "127.0.0.1:43210", "HTTP listen address")
-	deliveryAddr := flags.String("delivery-addr", "127.0.0.1:43211", "operator/overlay loopback listen address")
-	dataDir := flags.String("data-dir", "./data/sessions", "directory for captured session data")
-	sessionID := flags.String("session-id", "", "explicit safe session identity for sealed policy lineage and restart")
-	diagnosticMode := flags.Bool("diagnostic-mode", false, "enable authenticated legacy capture diagnostics")
-	operatorTokenFile := flags.String("operator-token-file", "", "explicit external 0600 token handoff path for the operator process")
-	policyMode := flags.String("policy-mode", "v2-snapshot", "explicit policy mode: v2-snapshot or v3-live-only")
-	policyLineageFile := flags.String("policy-lineage-file", "", "sealed PolicyLineageManifestV2 for the broadcast policy plane")
-	historyBindingFile := flags.String("history-binding-file", "", "strict canonical HistoryAvailabilityBindingV1 for v3-live-only")
-	liveOnlyLineageFile := flags.String("live-only-lineage-file", "", "strict canonical PolicyLineageManifestV3 for v3-live-only")
-	liveOnlyReleaseFile := flags.String("live-only-release-file", "", "strict canonical LiveOnlyReleaseBindingV1 for v3-live-only")
-	analyzeSession := flags.String("analyze-session", "", "offline: analyze a session directory and exit")
-	doctorMode := flags.Bool("doctor", false, "run one-shot operator readiness checks and exit")
-	gsiConfig := flags.String("gsi-config", "", "explicit Dota 2 GSI config path for doctor mode")
-	staleThreshold := flags.Duration("stale-threshold", 15*time.Second, "duration without accepted GSI before status becomes stale")
-	if err := flags.Parse(args); err != nil {
+	options, _, err := parseRunOptions(args, output)
+	if err != nil {
 		return 2
 	}
+	return runWithParsedDependencies(options, output, deps)
+}
+
+func runWithParsedDependencies(options runOptions, output io.Writer, deps runDependencies) int {
+	addr, deliveryAddr, dataDir, sessionID := options.addr, options.deliveryAddr, options.dataDir, options.sessionID
+	diagnosticMode, operatorTokenFile := options.diagnosticMode, options.operatorTokenFile
+	policyMode, policyLineageFile := &options.policyMode.value, options.policyLineageFile
+	historyBindingFile, liveOnlyLineageFile, liveOnlyReleaseFile := options.historyBindingFile, options.liveOnlyLineageFile, options.liveOnlyReleaseFile
+	analyzeSession, doctorMode, gsiConfig, staleThreshold := options.analyzeSession, options.doctorMode, options.gsiConfig, options.staleThreshold
 	logger := log.New(output, "", log.LstdFlags)
 	if strings.TrimSpace(*analyzeSession) != "" {
 		if err := runAnalyze(*analyzeSession); err != nil {

@@ -41,7 +41,7 @@ func TestProductionV2SeamCannotCrossIntoCurrentSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(selector)
-	if !strings.Contains(text, "internal/snapshotv2/compiled/product") || !strings.Contains(text, "snapshotproduct.Run(delegated, output)") {
+	if !strings.Contains(text, "internal/snapshotv2/compiled/product") || !strings.Contains(text, "runProducts(args, output, snapshotproduct.Run") {
 		t.Fatal("actual binary V2 entry does not select the complete compiled snapshot product")
 	}
 	for _, forbidden := range []string{"internal/insight", "internal/policy\"", "internal/presentation"} {
