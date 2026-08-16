@@ -3,10 +3,10 @@ package m4match
 import "time"
 
 const (
-	SchemaVersion           = "m4_match_evidence.v2"
-	ReadinessSchemaVersion  = "m4_match_readiness.v2"
+	SchemaVersion           = "m4_match_evidence.v3"
+	ReadinessSchemaVersion  = "m4_match_readiness.v3"
 	AcceptedFunctionalBase  = "fa5e7c308ee272722469499ae227b99d1644e2ac"
-	RequiredSuccessorParent = "48f498f72f1fc51602bef35b8a974286993f662c"
+	RequiredSuccessorParent = "9d9e7d93ab74c2c1caf15f1be800917eecc1d05b"
 	AcceptedP4Spec          = "271cc47d503828528b7c69212deb4d22683cb715"
 	CapturedScheduleSHA256  = "2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e"
 	ProductionGoldenSHA256  = "480ef715e7c04c22315ba8d81369708a430abe6706bc29a221220b813c0275bd"
@@ -20,6 +20,7 @@ const (
 	ExpectedRemoteURL       = "https://github.com/PaulOctopusZLWB/dota2-ob.git"
 	ExpectedBranch          = "agent/dota2-fullstack-engineer/DOT-65-ti-match-harness"
 	ExpectedPR              = "19"
+	MaxArmingWindow         = 30 * time.Minute
 )
 
 var RequiredFaults = []string{
@@ -134,6 +135,11 @@ func AcceptedBounds() Bounds {
 	}
 }
 
+func RuntimeCapacityAccepted(schema string, notification, candidate int, healthy bool) bool {
+	bounds := AcceptedBounds()
+	return schema == "runtime_capacity.v2" && healthy && notification == bounds.NotificationCapacity && candidate == bounds.CandidateQueueCapacity
+}
+
 type Evidence struct {
 	SchemaVersion             string                    `json:"schema_version"`
 	Mode                      string                    `json:"mode"`
@@ -163,23 +169,26 @@ type Evidence struct {
 }
 
 type LocalhostGSITrustEvidence struct {
-	ConfigSHA256          string   `json:"config_sha256,omitempty"`
-	ConfigURI             string   `json:"config_uri,omitempty"`
-	ConfigUserOnly        bool     `json:"config_user_only"`
-	ExclusiveListener     bool     `json:"exclusive_listener"`
-	ListenerURI           string   `json:"listener_uri,omitempty"`
-	DotaProcessStable     bool     `json:"dota_process_stable"`
-	KnownProducerAbsent   bool     `json:"known_producer_absent"`
-	IdentityContinuous    bool     `json:"identity_continuous"`
-	Requests              uint64   `json:"requests"`
-	Accepted              uint64   `json:"accepted"`
-	Rejected              uint64   `json:"rejected"`
-	RawRecords            uint64   `json:"raw_records"`
-	TerminalOutcomes      uint64   `json:"terminal_outcomes"`
-	RecordingCoextensive  bool     `json:"recording_coextensive"`
-	PaulConfirmedIdentity bool     `json:"paul_confirmed_identity"`
-	PerRequestAttested    bool     `json:"per_request_sender_attested"`
-	ResidualReasonCodes   []string `json:"residual_reason_codes"`
+	ConfigSHA256           string   `json:"config_sha256,omitempty"`
+	ConfigURI              string   `json:"config_uri,omitempty"`
+	ConfigUserOnly         bool     `json:"config_user_only"`
+	ExclusiveListener      bool     `json:"exclusive_listener"`
+	ListenerProductOwned   bool     `json:"listener_product_owned"`
+	ListenerURI            string   `json:"listener_uri,omitempty"`
+	DotaProcessStable      bool     `json:"dota_process_stable"`
+	KnownProducerAbsent    bool     `json:"known_producer_absent"`
+	CorrelationStartSHA256 string   `json:"correlation_start_sha256,omitempty"`
+	CorrelationEndSHA256   string   `json:"correlation_end_sha256,omitempty"`
+	IdentityContinuous     bool     `json:"identity_continuous"`
+	Requests               uint64   `json:"requests"`
+	Accepted               uint64   `json:"accepted"`
+	Rejected               uint64   `json:"rejected"`
+	RawRecords             uint64   `json:"raw_records"`
+	TerminalOutcomes       uint64   `json:"terminal_outcomes"`
+	RecordingCoextensive   bool     `json:"recording_coextensive"`
+	PaulConfirmedIdentity  bool     `json:"paul_confirmed_identity"`
+	PerRequestAttested     bool     `json:"per_request_sender_attested"`
+	ResidualReasonCodes    []string `json:"residual_reason_codes"`
 }
 
 type Readiness struct {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,11 +14,77 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/insight"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/m4match"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy/commitlog"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
+
+func TestRuntimeOwnedCapacityMismatchFailsM4Acceptance(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "runtime-capacity-mismatch"
+	store, err := session.NewStore(root, session.WithSessionID(sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	config := policy.DefaultConfig()
+	config.QueueLimit = 9
+	runtime, err := newBroadcastRuntimeV3(broadcastConfigV3{DataRoot: root, SessionID: sessionID, RawPath: store.RawPath(), Artifacts: testLiveOnlyArtifacts(sessionID), PolicyConfig: &config, Now: time.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	server := httptest.NewServer(gsi.NewServer(store))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Runtime gsi.RuntimeCapacityStatus `json:"runtime_capacity"`
+	}
+	if json.NewDecoder(response.Body).Decode(&payload) != nil {
+		t.Fatal("decode runtime capacity")
+	}
+	if payload.Runtime.CandidateCapacity != 9 || payload.Runtime.PolicyHealthy != true {
+		t.Fatalf("runtime status=%+v", payload.Runtime)
+	}
+	if m4match.RuntimeCapacityAccepted(payload.Runtime.SchemaVersion, payload.Runtime.NotificationCapacity, payload.Runtime.CandidateCapacity, payload.Runtime.PolicyHealthy) {
+		t.Fatal("real mismatched policy capacity passed M4 acceptance")
+	}
+	const unhealthySession = "runtime-startup-unhealthy"
+	unhealthyRoot := t.TempDir()
+	unhealthyStore, err := session.NewStore(unhealthyRoot, session.WithSessionID(unhealthySession))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unhealthyStore.Close()
+	badArtifacts := testLiveOnlyArtifacts(unhealthySession)
+	badArtifacts.Release.SourceCommit = strings.Repeat("0", 40)
+	if _, err := newBroadcastRuntimeV3(broadcastConfigV3{DataRoot: unhealthyRoot, SessionID: unhealthySession, RawPath: unhealthyStore.RawPath(), Artifacts: badArtifacts, Now: time.Now}); err == nil {
+		t.Fatal("invalid policy startup passed")
+	}
+	unhealthyServer := httptest.NewServer(gsi.NewServer(unhealthyStore))
+	defer unhealthyServer.Close()
+	unhealthyResponse, err := http.Get(unhealthyServer.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unhealthyResponse.Body.Close()
+	var unhealthyPayload struct {
+		Runtime gsi.RuntimeCapacityStatus `json:"runtime_capacity"`
+	}
+	if json.NewDecoder(unhealthyResponse.Body).Decode(&unhealthyPayload) != nil {
+		t.Fatal("decode unhealthy status")
+	}
+	if m4match.RuntimeCapacityAccepted(unhealthyPayload.Runtime.SchemaVersion, unhealthyPayload.Runtime.NotificationCapacity, unhealthyPayload.Runtime.CandidateCapacity, unhealthyPayload.Runtime.PolicyHealthy) {
+		t.Fatal("failed policy startup passed M4 acceptance")
+	}
+}
 
 func TestLiveOnlyArtifactLoaderRequiresCanonicalExactProductCoherence(t *testing.T) {
 	artifacts := testLiveOnlyArtifacts("live-loader")

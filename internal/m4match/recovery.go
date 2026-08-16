@@ -201,7 +201,7 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 	sourceSession := filepath.Join(root, "data/sessions", sessionID)
 	inputRoot := filepath.Join(root, "evidence/recovery-input", sessionID)
 	recoveryRoot := filepath.Join(root, "evidence/recovery-work")
-	if err := os.MkdirAll(filepath.Join(recoveryRoot, "data/sessions", sessionID), 0o700); err != nil {
+	if err := rootMkdirAll(filepath.Join(recoveryRoot, "data/sessions", sessionID), 0o700); err != nil {
 		return proof, nil, err
 	}
 	rawSource := filepath.Join(sourceSession, "raw.jsonl")
@@ -254,11 +254,11 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 		return proof, nil, err
 	}
 	for _, directory := range []string{"runtime", "evidence/canonical", "evidence/logs"} {
-		if err := os.MkdirAll(filepath.Join(recoveryRoot, directory), 0o700); err != nil {
+		if err := rootMkdirAll(filepath.Join(recoveryRoot, directory), 0o700); err != nil {
 			return proof, nil, err
 		}
 	}
-	logFile, err := os.OpenFile(filepath.Join(recoveryRoot, "evidence/logs/product-recovery.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	logFile, err := rootOpenFile(filepath.Join(recoveryRoot, "evidence/logs/product-recovery.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return proof, nil, err
 	}

@@ -18,9 +18,9 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
-	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/policy"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/state"
@@ -48,7 +48,6 @@ type Server struct {
 	projectionDrain     time.Duration
 	projectionOverrides []liveprojection.Projection
 	projectionOptions   []liveprojection.Option
-	runtimeCapacity     RuntimeCapacityStatus
 }
 
 type Option func(*Server)
@@ -63,10 +62,6 @@ type RuntimeCapacityStatus struct {
 	NotificationCapacity int    `json:"notification_capacity"`
 	CandidateCapacity    int    `json:"candidate_queue_capacity"`
 	PolicyHealthy        bool   `json:"policy_healthy"`
-}
-
-func WithRuntimeCapacityStatus(status RuntimeCapacityStatus) Option {
-	return func(server *Server) { server.runtimeCapacity = status }
 }
 
 func WithLatest(latest *state.Latest) Option {
@@ -156,7 +151,6 @@ func WithProjectionDrainTimeout(timeout time.Duration) Option {
 func NewServer(store *session.Store, opts ...Option) *Server {
 	server := &Server{
 		store: store, mux: http.NewServeMux(), projectionDrain: 10 * time.Second,
-		runtimeCapacity: RuntimeCapacityStatus{SchemaVersion: "runtime_capacity.v1", NotificationCapacity: cap(store.HighWater().C()), CandidateCapacity: contracts.MaxPreviewCandidates, PolicyHealthy: true},
 	}
 	server.inflightCond = sync.NewCond(&server.inflightMu)
 	for _, opt := range opts {
@@ -351,11 +345,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if projectionHealth.Degraded {
 		trackerSnapshot.State = operator.StateDegraded
 	}
+	capacity := RuntimeCapacityStatus{SchemaVersion: "runtime_capacity.v2", NotificationCapacity: cap(s.store.HighWater().C())}
+	if policyStatus, ok := policy.RuntimeStatusForSession(s.store.SessionID()); ok {
+		capacity.CandidateCapacity = policyStatus.CandidateCapacity
+		capacity.PolicyHealthy = policyStatus.Healthy && trackerSnapshot.State != operator.StateDegraded
+	}
 	status := struct {
 		operator.Snapshot
 		LiveProjection  liveprojection.Health `json:"live_projection"`
 		RuntimeCapacity RuntimeCapacityStatus `json:"runtime_capacity"`
-	}{Snapshot: trackerSnapshot, LiveProjection: projectionHealth, RuntimeCapacity: s.runtimeCapacity}
+	}{Snapshot: trackerSnapshot, LiveProjection: projectionHealth, RuntimeCapacity: capacity}
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		http.Error(w, "failed to encode status", http.StatusInternalServerError)
 	}

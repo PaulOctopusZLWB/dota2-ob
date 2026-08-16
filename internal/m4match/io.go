@@ -28,17 +28,17 @@ func writeJSON(path string, value any, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := rootMkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, mode)
+	return rootWriteFile(path, payload, mode)
 }
 
 func writePrivate(path string, payload []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := rootMkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, payload, 0o600)
+	return rootWriteFile(path, payload, 0o600)
 }
 
 func fileSHA(path string) (string, int64, error) {

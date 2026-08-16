@@ -3,7 +3,6 @@ package m4match
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -35,7 +34,7 @@ func Prepare(root string, width, height int) ([]Artifact, error) {
 		return nil, fmt.Errorf("output must be 1920x1080 or 2560x1440")
 	}
 	for _, dir := range []string{"application", "cache", "config/dota", "config/obs-studio/basic/profiles/DOT65-P4", "config/obs-studio/basic/scenes", "data/sessions", "evidence/canonical", "evidence/logs", "recordings", "runtime", "tools"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+		if err := rootMkdirAll(filepath.Join(root, dir), 0o700); err != nil {
 			return nil, err
 		}
 	}

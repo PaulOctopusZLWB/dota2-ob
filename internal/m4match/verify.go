@@ -11,12 +11,14 @@ import (
 )
 
 func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
-	abs, err := safeRoot(root, repo)
+	lease, err := acquireExistingRoot(root, repo)
 	if err != nil {
 		return Readiness{}, err
 	}
+	defer lease.Close()
+	abs := lease.abs
 	readinessPath := filepath.Join(abs, "evidence/readiness.json")
-	payload, err := os.ReadFile(readinessPath)
+	payload, err := rootReadFile(readinessPath)
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -32,7 +34,7 @@ func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
 		return Readiness{}, errors.New("readiness contract mismatch")
 	}
 	indexPath := filepath.Join(abs, "evidence/canonical/evidence-index.json")
-	indexPayload, err := os.ReadFile(indexPath)
+	indexPayload, err := rootReadFile(indexPath)
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -233,9 +235,10 @@ func Cleanup(root, repo, confirmation string) error {
 	if confirmation == "" || confirmation != readiness.EvidenceIndexSHA256 {
 		return errors.New("cleanup confirmation must equal the evidence index SHA-256")
 	}
-	checkedAgain, err := safeRoot(abs, repo)
-	if err != nil || checkedAgain != abs {
-		return errors.New("cleanup root changed after verification")
+	lease, err := acquireExistingRoot(abs, repo)
+	if err != nil {
+		return err
 	}
-	return os.RemoveAll(abs)
+	defer lease.Close()
+	return lease.removeAll()
 }

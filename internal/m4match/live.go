@@ -32,39 +32,41 @@ type LiveConfig struct {
 }
 
 type liveBoundary struct {
-	Pregame              bool
-	Zero                 bool
-	Post                 bool
-	Aborted              bool
-	RecordingFinalized   bool
-	OperatorComplete     bool
-	PrivacySafe          bool
-	Reconciled           bool
-	NoCacheRecovery      bool
-	MeasurementsPassed   bool
-	VisibilityPassed     bool
-	OperatorInputBounds  bool
-	CleanShutdown        bool
-	Last                 uint64
-	Frames               uint64
-	ArmedAt              time.Time
-	FirstReceivedAt      time.Time
-	LastReceivedAt       time.Time
-	LastClock            int64
-	WinnerObserved       bool
-	IdentityContinuous   bool
-	DotaProvenance       bool
-	ConfigSHA256         string
-	ConfigUserOnly       bool
-	ExclusiveListener    bool
-	KnownProducerAbsent  bool
-	PaulConfirmed        bool
-	Requests             uint64
-	Accepted             uint64
-	Rejected             uint64
-	RawRecords           uint64
-	TerminalOutcomes     uint64
-	RecordingCoextensive bool
+	Pregame                bool
+	Zero                   bool
+	Post                   bool
+	Aborted                bool
+	RecordingFinalized     bool
+	OperatorComplete       bool
+	PrivacySafe            bool
+	Reconciled             bool
+	NoCacheRecovery        bool
+	MeasurementsPassed     bool
+	VisibilityPassed       bool
+	OperatorInputBounds    bool
+	CleanShutdown          bool
+	Last                   uint64
+	Frames                 uint64
+	ArmedAt                time.Time
+	FirstReceivedAt        time.Time
+	LastReceivedAt         time.Time
+	LastClock              int64
+	WinnerObserved         bool
+	IdentityContinuous     bool
+	DotaProvenance         bool
+	ConfigSHA256           string
+	ConfigUserOnly         bool
+	ExclusiveListener      bool
+	KnownProducerAbsent    bool
+	CorrelationStartSHA256 string
+	CorrelationEndSHA256   string
+	PaulConfirmed          bool
+	Requests               uint64
+	Accepted               uint64
+	Rejected               uint64
+	RawRecords             uint64
+	TerminalOutcomes       uint64
+	RecordingCoextensive   bool
 }
 
 type operatorInputFrame struct {
@@ -81,12 +83,35 @@ type deliveryProxy struct {
 	stopErr error
 }
 
+func readLineBefore(ctx context.Context, input io.Reader, deadline time.Time) (string, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return "", context.DeadlineExceeded
+	}
+	type result struct {
+		line string
+		err  error
+	}
+	completed := make(chan result, 1)
+	go func() { line, err := bufio.NewReader(input).ReadString('\n'); completed <- result{line, err} }()
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-timer.C:
+		return "", context.DeadlineExceeded
+	case got := <-completed:
+		return got.line, got.err
+	}
+}
+
 func startDeliveryProxy(root string) (*deliveryProxy, error) {
 	journalPath := filepath.Join(root, "evidence/raw-operator-input.jsonl")
-	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
+	if err := rootMkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
 		return nil, err
 	}
-	journal, err := os.OpenFile(journalPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	journal, err := rootOpenFile(journalPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +243,12 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	if err != nil || !preflight.Ready {
 		return Readiness{}, errors.New("exact environment preflight is not ready")
 	}
-	preflightIndex, err := os.ReadFile(filepath.Join(config.ReadinessRoot, "evidence/canonical/evidence-index.json"))
+	readinessLease, err := acquireExistingRoot(config.ReadinessRoot, config.RepoRoot)
+	if err != nil {
+		return Readiness{}, err
+	}
+	defer readinessLease.Close()
+	preflightIndex, err := rootReadFile(filepath.Join(readinessLease.abs, "evidence/canonical/evidence-index.json"))
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -230,16 +260,12 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	if err != nil {
 		return Readiness{}, err
 	}
-	root, err := safeRoot(config.DataRoot, config.RepoRoot)
+	lease, err := acquireFreshRoot(config.DataRoot, config.RepoRoot)
 	if err != nil {
 		return Readiness{}, err
 	}
-	if entries, statErr := os.ReadDir(root); statErr == nil && len(entries) != 0 {
-		return Readiness{}, errors.New("live root must be fresh and empty")
-	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return Readiness{}, err
-	}
+	defer lease.Close()
+	root := lease.abs
 	artifacts, err := Prepare(root, 1920, 1080)
 	if err != nil {
 		return Readiness{}, err
@@ -274,16 +300,12 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	if err != nil || configInfo.Mode().Perm() != 0o600 {
 		return Readiness{}, errors.New("installed GSI config is not user-only")
 	}
-	producerAbsent := knownSyntheticProducerAbsent()
-	if !producerAbsent {
-		return Readiness{}, errors.New("known replay, preflight, or synthetic producer is active")
-	}
 	proxy, err := startDeliveryProxy(root)
 	if err != nil {
 		return Readiness{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, proxy.stop()) }()
-	productLog, err := os.OpenFile(filepath.Join(root, "evidence/logs/product-live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	productLog, err := rootOpenFile(filepath.Join(root, "evidence/logs/product-live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -306,12 +328,11 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	if err := waitHTTP(ctx, CaptureOrigin+"/healthz", 15*time.Second); err != nil {
 		return Readiness{}, err
 	}
-	exclusiveListener := listenerIsExclusive(CaptureAddress)
-	if !exclusiveListener {
-		return Readiness{}, errors.New("GSI listener is not exclusive")
+	if err := proveProductListener(CaptureAddress, product.Process.Pid); err != nil {
+		return Readiness{}, err
 	}
 
-	obsLog, err := os.OpenFile(filepath.Join(root, "evidence/logs/obs-live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	obsLog, err := rootOpenFile(filepath.Join(root, "evidence/logs/obs-live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -324,6 +345,10 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	obsDone := make(chan error, 1)
 	go func() { obsDone <- obs.Wait() }()
 	defer func() { retErr = errors.Join(retErr, stopProcess(obs, obsDone, 30*time.Second)) }()
+	startCorrelation, err := waitStableProcessCorrelation(ctx, os.Getpid(), product.Process.Pid, obs.Process.Pid, 20*time.Second)
+	if err != nil {
+		return Readiness{}, err
+	}
 	abortLive := func(reason string) (Readiness, error) {
 		productStopErr := stopProcess(product, productDone, 15*time.Second)
 		obsStopErr := stopProcess(obs, obsDone, 30*time.Second)
@@ -332,35 +357,43 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 		return sealed, errors.Join(sealErr, productStopErr, obsStopErr, proxyStopErr)
 	}
 
+	boundary := liveBoundary{ArmedAt: time.Now().UTC(), IdentityContinuous: true, DotaProvenance: true, ConfigSHA256: configHash, ConfigUserOnly: true, ExclusiveListener: true, KnownProducerAbsent: true, CorrelationStartSHA256: startCorrelation.SHA256}
+	startDeadline := boundary.ArmedAt.Add(MaxArmingWindow)
 	fmt.Fprintf(config.Output, "ARMED candidate=%s match_id=%s operator=%s/operator/ overlay=%s/overlay/\n", preflight.CandidateCommit, identity.MatchID, DeliveryOrigin, DeliveryOrigin)
 	confirmationPhrase := fmt.Sprintf("CONFIRM_PREVIEW %s %s %s %s %s %s DOTA_PID=%d", identity.MatchID, identity.Tournament, identity.Series, identity.Game, identity.Radiant, identity.Dire, identity.DotaPID)
 	fmt.Fprintf(config.Output, "After confirming the isolated OBS preview, recording indicator, official identity, and Dota process, type: %s\n", confirmationPhrase)
-	confirmation, err := bufio.NewReader(config.Input).ReadString('\n')
+	confirmation, err := readLineBefore(ctx, config.Input, startDeadline)
 	if err != nil || strings.TrimSpace(confirmation) != confirmationPhrase {
 		return abortLive("preview_not_confirmed")
 	}
 
 	rawPath := filepath.Join(root, "data/sessions", sessionID, "raw.jsonl")
 	samplesPath := filepath.Join(root, "evidence/samples.jsonl")
-	samples, err := os.OpenFile(samplesPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	samples, err := rootOpenFile(samplesPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Readiness{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, samples.Close()) }()
-	visibilityFile, err := os.OpenFile(filepath.Join(root, "evidence/visibility.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	visibilityFile, err := rootOpenFile(filepath.Join(root, "evidence/visibility.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return Readiness{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, visibilityFile.Close()) }()
-	boundary := liveBoundary{ArmedAt: time.Now().UTC(), IdentityContinuous: true, DotaProvenance: true, ConfigSHA256: configHash, ConfigUserOnly: true, ExclusiveListener: true, KnownProducerAbsent: producerAbsent, PaulConfirmed: true}
+	boundary.PaulConfirmed = true
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	visibilityTicker := time.NewTicker(100 * time.Millisecond)
 	defer visibilityTicker.Stop()
+	startTimer := time.NewTimer(time.Until(startDeadline))
+	defer startTimer.Stop()
 	for !boundary.Post && !boundary.Aborted {
 		select {
 		case <-ctx.Done():
 			boundary.Aborted = true
+		case <-startTimer.C:
+			if !boundary.Pregame {
+				boundary.Aborted = true
+			}
 		case err := <-productDone:
 			if err != nil {
 				boundary.Aborted = true
@@ -371,6 +404,14 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 			boundary, err = inspectBoundaries(rawPath, identity, boundary)
 			if err != nil {
 				boundary.Aborted = true
+			}
+			if boundary.Pregame {
+				if !startTimer.Stop() {
+					select {
+					case <-startTimer.C:
+					default:
+					}
+				}
 			}
 			sample := collectSample(product.Process.Pid, obs.Process.Pid, rawPath, tokenPath, root, sessionID, identity.MatchID)
 			_ = json.NewEncoder(samples).Encode(sample)
@@ -414,6 +455,13 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	finalSample := collectSample(product.Process.Pid, obs.Process.Pid, rawPath, tokenPath, root, sessionID, identity.MatchID)
 	boundary.Requests, boundary.Accepted, boundary.Rejected = finalSample.RequestCount, finalSample.AcceptedCount, finalSample.RejectedCount
 	boundary.RawRecords, boundary.TerminalOutcomes = finalSample.Sequence, finalSample.ProjectedSequence
+	endCorrelation, correlationErr := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid)
+	if correlationErr != nil || endCorrelation.SHA256 != boundary.CorrelationStartSHA256 {
+		boundary.KnownProducerAbsent = false
+		boundary.Aborted = true
+	} else {
+		boundary.CorrelationEndSHA256 = endCorrelation.SHA256
+	}
 	if finalErr != nil {
 		boundary.Aborted = true
 	}
@@ -432,7 +480,7 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	boundary.OperatorInputBounds = validation.OperatorInputBounds
 	boundary.CleanShutdown = productStopErr == nil && obsStopErr == nil && proxyStopErr == nil && validation.RecoveryCleanShutdown
 	boundary.RecordingCoextensive = boundary.ArmedAt.Before(boundary.FirstReceivedAt) && validation.RecordingFinalized
-	if finalErr != nil || validationErr != nil || productStopErr != nil || obsStopErr != nil || proxyStopErr != nil {
+	if finalErr != nil || correlationErr != nil || validationErr != nil || productStopErr != nil || obsStopErr != nil || proxyStopErr != nil {
 		boundary.Aborted = true
 	}
 	result, retErr = sealCompletedLive(root, preflight, preflightEvidence, artifacts, identity, boundary)
@@ -540,38 +588,8 @@ func installGSIConfig(root string) (string, error) {
 	return target, copyFile(filepath.Join(root, "config/dota/gamestate_integration_dota2_ob_m4.cfg"), target, 0o600)
 }
 
-func listenerIsExclusive(address string) bool {
-	listener, err := net.Listen("tcp", address)
-	if err == nil {
-		_ = listener.Close()
-		return false
-	}
-	return true
-}
-
-func knownSyntheticProducerAbsent() bool {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-		payload, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		if err != nil {
-			continue
-		}
-		command := strings.ToLower(strings.ReplaceAll(string(payload), "\x00", " "))
-		if strings.Contains(command, "m4-match preflight") || strings.Contains(command, "m4-match replay") || strings.Contains(command, "synthetic-gsi") {
-			return false
-		}
-	}
-	return true
-}
-
 func validateLocalhostGSITrust(e LocalhostGSITrustEvidence) error {
-	if len(e.ConfigSHA256) != 64 || e.ConfigURI != "http://"+CaptureAddress+"/gsi" || e.ListenerURI != e.ConfigURI || !e.ConfigUserOnly || !e.ExclusiveListener || !e.DotaProcessStable || !e.KnownProducerAbsent || !e.IdentityContinuous || !e.RecordingCoextensive || !e.PaulConfirmedIdentity || e.PerRequestAttested {
+	if len(e.ConfigSHA256) != 64 || e.ConfigURI != "http://"+CaptureAddress+"/gsi" || e.ListenerURI != e.ConfigURI || !e.ConfigUserOnly || !e.ExclusiveListener || !e.ListenerProductOwned || !e.DotaProcessStable || !e.KnownProducerAbsent || len(e.CorrelationStartSHA256) != 64 || e.CorrelationEndSHA256 != e.CorrelationStartSHA256 || !e.IdentityContinuous || !e.RecordingCoextensive || !e.PaulConfirmedIdentity || e.PerRequestAttested {
 		return errors.New("localhost GSI trust identity or provenance mismatch")
 	}
 	if e.Requests == 0 || e.Requests != e.Accepted+e.Rejected || e.Accepted != e.RawRecords || e.RawRecords != e.TerminalOutcomes {
@@ -584,26 +602,26 @@ func validateLocalhostGSITrust(e LocalhostGSITrustEvidence) error {
 }
 
 func copyFile(source, target string, mode os.FileMode) error {
-	in, err := os.Open(source)
+	in, err := rootOpenFile(source, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+	if err := rootMkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	out, err := rootOpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
 	_, copyErr := io.Copy(out, in)
 	closeErr := out.Close()
 	if copyErr != nil {
-		_ = os.Remove(target)
+		_ = rootRemove(target)
 		return copyErr
 	}
 	if closeErr != nil {
-		_ = os.Remove(target)
+		_ = rootRemove(target)
 		return closeErr
 	}
 	return nil
@@ -831,7 +849,7 @@ func collectSample(pid, obsPID int, rawPath, tokenPath, root, expectedSession, e
 			sample.RawWriteFailures, sample.ProjectionFailures = status.RawFailures, status.ProjectionFailures
 			sample.NotificationCapacity = status.RuntimeCapacity.Notification
 			sample.CandidateQueueCapacity = status.RuntimeCapacity.Candidate
-			telemetryOK = telemetryOK && status.RuntimeCapacity.SchemaVersion == "runtime_capacity.v1" && status.RuntimeCapacity.PolicyHealthy
+			telemetryOK = telemetryOK && RuntimeCapacityAccepted(status.RuntimeCapacity.SchemaVersion, status.RuntimeCapacity.Notification, status.RuntimeCapacity.Candidate, status.RuntimeCapacity.PolicyHealthy)
 			sample.ProjectedSequence, sample.Lag = status.Live.Projected, status.Live.Lag
 			sample.CrossPlaneSessionID = status.SessionID
 			telemetryOK = telemetryOK && status.SessionID == expectedSession
@@ -1202,7 +1220,7 @@ func sealLive(root string, preflight Readiness, preflightEvidence Evidence, arti
 	evidence.CandidateIdentity = preflightEvidence.CandidateIdentity
 	evidence.CandidateIdentityEvidence = preflightEvidence.CandidateIdentityEvidence
 	evidence.Environment = preflightEvidence.Environment
-	evidence.LocalhostGSI = LocalhostGSITrustEvidence{ConfigSHA256: boundary.ConfigSHA256, ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: boundary.ConfigUserOnly, ExclusiveListener: boundary.ExclusiveListener, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: boundary.DotaProvenance, KnownProducerAbsent: boundary.KnownProducerAbsent, IdentityContinuous: boundary.IdentityContinuous, Requests: boundary.Requests, Accepted: boundary.Accepted, Rejected: boundary.Rejected, RawRecords: boundary.RawRecords, TerminalOutcomes: boundary.TerminalOutcomes, RecordingCoextensive: boundary.RecordingCoextensive, PaulConfirmedIdentity: boundary.PaulConfirmed, PerRequestAttested: false, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
+	evidence.LocalhostGSI = LocalhostGSITrustEvidence{ConfigSHA256: boundary.ConfigSHA256, ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: boundary.ConfigUserOnly, ExclusiveListener: boundary.ExclusiveListener, ListenerProductOwned: boundary.ExclusiveListener, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: boundary.DotaProvenance, KnownProducerAbsent: boundary.KnownProducerAbsent, CorrelationStartSHA256: boundary.CorrelationStartSHA256, CorrelationEndSHA256: boundary.CorrelationEndSHA256, IdentityContinuous: boundary.IdentityContinuous, Requests: boundary.Requests, Accepted: boundary.Accepted, Rejected: boundary.Rejected, RawRecords: boundary.RawRecords, TerminalOutcomes: boundary.TerminalOutcomes, RecordingCoextensive: boundary.RecordingCoextensive, PaulConfirmedIdentity: boundary.PaulConfirmed, PerRequestAttested: false, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
 	trustOK := validateLocalhostGSITrust(evidence.LocalhostGSI) == nil
 	evidence.Checks = []Check{{"pregame_boundary", boundary.Pregame, "negative game clock observed after complete arming"}, {"game_zero_boundary", boundary.Zero, "clock zero transition observed"}, {"post_game_boundary", boundary.Post && boundary.WinnerObserved, "normal post-game state and winner observed"}, {"recording_finalized", boundary.RecordingFinalized, "clean OBS stop, EBML MKV, frame counters, and no partial recording"}, {"operator_script", boundary.OperatorComplete, "ordered durable command attempts/revisions/audits present"}, {"operator_input_bounds", boundary.OperatorInputBounds, "durable raw operator inputs are present and within 16 KiB"}, {"privacy", boundary.PrivacySafe, "raw payload key scan passed"}, {"reconciliation", boundary.Reconciled, "every raw record reached exactly one terminal cursor outcome"}, {"no_cache_recovery", boundary.NoCacheRecovery, "genuine isolated product restart rebuilt from raw inputs and byte-matched five planes"}, {"measurement_bounds", boundary.MeasurementsPassed, "complete five-second process-tree/body/state/resource plane passed"}, {"visibility_fail_closed", boundary.VisibilityPassed, "100ms samples prove two-second claim-free output, no stale revival, and continued raw capture"}, {"live_identity_continuity", boundary.IdentityContinuous && boundary.DotaProvenance && boundary.Frames > 0, "nonzero match identity and bound Dota process remained stable for every frame"}, {"clean_shutdown", boundary.CleanShutdown, "product, OBS, and recovery product stopped cleanly"}, {"public_match_identity", identity.MatchID != "" && identity.OfficialSourceURL != "", "explicit official public TI identity supplied"}, {"independent_acceptance", false, "live command never self-accepts P4"}}
 	evidence.Checks = append(evidence.Checks, Check{"localhost_gsi_trust_boundary", trustOK, "accepted localhost-GSI trust boundary and residual limitation recorded"})

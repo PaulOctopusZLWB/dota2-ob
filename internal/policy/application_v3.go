@@ -36,7 +36,9 @@ func NewBoundApplicationV3(engine *Engine, log CommitAppenderV3, binding contrac
 		lineage.Rules != engine.config.CandidateRulesArtifact || engine.config.CandidateConfigVersion != lineage.Config.Version || rules != lineage.Rules || log == nil {
 		return nil, ErrCommitFailedHidden
 	}
-	return NewApplicationV3(engine, log), nil
+	application := NewApplicationV3(engine, log)
+	publishRuntimeStatus(engine.state.SessionID, engine.config.QueueLimit, true)
+	return application, nil
 }
 
 func (a *ApplicationV3) State() contracts.PolicyStateV2 { return a.engine.State() }

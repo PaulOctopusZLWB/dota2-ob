@@ -38,18 +38,12 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	if err != nil {
 		return Readiness{}, err
 	}
-	root, err := safeRoot(config.DataRoot, repo)
+	lease, err := acquireFreshRoot(config.DataRoot, repo)
 	if err != nil {
 		return Readiness{}, err
 	}
-	if entries, statErr := os.ReadDir(root); statErr == nil && len(entries) != 0 {
-		return Readiness{}, errors.New("preflight data root must be fresh and empty")
-	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return Readiness{}, statErr
-	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return Readiness{}, err
-	}
+	defer lease.Close()
+	root := lease.abs
 	if config.Width == 0 {
 		config.Width, config.Height = 1920, 1080
 	}
@@ -414,7 +408,7 @@ func discoverProcesses() ([]string, error) {
 
 func probeProduct(ctx context.Context, root, binary string) error {
 	logPath := filepath.Join(root, "evidence/logs/product-probe.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	logFile, err := rootOpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -504,7 +498,7 @@ func probeProduct(ctx context.Context, root, binary string) error {
 
 func probeProductSIGKILLRestart(ctx context.Context, root, binary string) error {
 	logPath := filepath.Join(root, "evidence/logs/product-sigkill-restart.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	logFile, err := rootOpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -547,7 +541,7 @@ func probeProductSIGKILLRestart(ctx context.Context, root, binary string) error 
 	if err := <-firstDone; err == nil {
 		return errors.New("deliberate product SIGKILL unexpectedly reported clean exit")
 	}
-	if err := os.Remove(tokenPath); err != nil {
+	if err := rootRemove(tokenPath); err != nil {
 		return fmt.Errorf("remove harness-owned stale SIGKILL token: %w", err)
 	}
 	_, _ = fmt.Fprintln(logFile, "HARNESS_SIGKILL_SENT")

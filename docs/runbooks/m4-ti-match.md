@@ -33,7 +33,7 @@ go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight
 ```
 
 Preflight fails closed unless local HEAD has exactly one parent—the rejected
-`48f498f...` candidate—and local HEAD, the origin branch, PR #19's head, the
+`9d9e7d93...` candidate—and local HEAD, the origin branch, PR #19's head, the
 executing harness VCS revision, and the built product VCS revision are identical.
 It captures the branch and PR refs together in one bounded remote snapshot both
 before and after the full matrix. Named canonical sub-checks retain non-secret
@@ -110,6 +110,18 @@ notification:
 Stop and abort immediately for a late join, identity contradiction, or any
 agent-reported failure. Dota must already be running before PID binding and
 agent-owned arming; capture and OBS must be armed before the match is joined.
+The harness records the real arming instant before printing `ARMED`, applies a
+hard 30-minute deadline to confirmation and the remaining pregame start window,
+and accepts a retained pregame frame that arrives immediately after `ARMED`
+while Paul is still confirming the preview.
+
+The bound V3 policy application, not the GSI server, publishes its instantiated
+candidate limit and health. Live samples require its observed `64` plus the
+capture channel's independently observed capacity `1`. The harness also proves
+that the capture listener's unique Linux socket inode belongs to the launched
+product and binds stable start/end invocation trees. Unreadable or changed
+correlation evidence fails closed. This does not attest each localhost request
+sender; the residual remains `localhost_gsi_sender_unattested`.
 
 The foreground process samples the complete product/OBS process trees and all
 accepted P4 body, queue, state, resource, cursor, policy, frame, visibility, and
@@ -157,6 +169,11 @@ go run -buildvcs=true ./cmd/m4-match cleanup \
   --data-root /var/tmp/dot65-preflight-a \
   --confirm-index-sha256 '<exact evidence_index_sha256>'
 ```
+
+All harness mutations and cleanup are confined through descriptor-backed
+`os.Root` handles under `/var/tmp`. A component swap cannot redirect a write or
+recursive cleanup to the repository, home, canonical root, or another protected
+target; unsupported confinement fails closed.
 
 Downloaded tools are not required. npm caches and Playwright browsers remain in
 their existing user-managed locations; generated node modules are ignored and

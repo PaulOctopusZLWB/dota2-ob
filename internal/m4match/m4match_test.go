@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -751,7 +752,7 @@ func TestOperatorTerminalSemanticsFailClosed(t *testing.T) {
 }
 
 func TestLocalhostGSITrustBoundaryContradictionsFail(t *testing.T) {
-	valid := LocalhostGSITrustEvidence{ConfigSHA256: strings.Repeat("a", 64), ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: true, ExclusiveListener: true, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: true, KnownProducerAbsent: true, IdentityContinuous: true, Requests: 3, Accepted: 2, Rejected: 1, RawRecords: 2, TerminalOutcomes: 2, RecordingCoextensive: true, PaulConfirmedIdentity: true, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
+	valid := LocalhostGSITrustEvidence{ConfigSHA256: strings.Repeat("a", 64), ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: true, ExclusiveListener: true, ListenerProductOwned: true, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: true, KnownProducerAbsent: true, CorrelationStartSHA256: strings.Repeat("b", 64), CorrelationEndSHA256: strings.Repeat("b", 64), IdentityContinuous: true, Requests: 3, Accepted: 2, Rejected: 1, RawRecords: 2, TerminalOutcomes: 2, RecordingCoextensive: true, PaulConfirmedIdentity: true, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
 	if err := validateLocalhostGSITrust(valid); err != nil {
 		t.Fatal(err)
 	}
@@ -798,6 +799,65 @@ func TestSafeRootRejectsSymlinkComponentsAndCleanupTargets(t *testing.T) {
 	}
 }
 
+func TestOwnedRootWriteAndCleanupRejectPostValidationSwap(t *testing.T) {
+	base, err := os.MkdirTemp("/var/tmp", "dot65-owned-swap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	protected := filepath.Join(base, "protected")
+	if err := os.Mkdir(protected, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(protected, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := filepath.Join(base, "evidence-root")
+	lease, err := acquireFreshRoot(rootPath, filepath.Join(base, "repo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if err := rootMkdirAll(filepath.Join(rootPath, "evidence"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(rootPath, "evidence")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(protected, filepath.Join(rootPath, "evidence")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivate(filepath.Join(rootPath, "evidence", "escaped"), []byte("bad")); err == nil {
+		t.Fatal("swapped write component accepted")
+	}
+	if payload, err := os.ReadFile(sentinel); err != nil || string(payload) != "preserve" {
+		t.Fatal("protected write target changed")
+	}
+	if err := os.Remove(filepath.Join(rootPath, "evidence")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(rootPath, "evidence"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	moved := rootPath + ".moved"
+	if err := os.Rename(rootPath, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(protected, rootPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.removeAll(); err == nil {
+		t.Fatal("swapped cleanup root accepted")
+	}
+	if payload, err := os.ReadFile(sentinel); err != nil || string(payload) != "preserve" {
+		t.Fatal("protected cleanup target changed")
+	}
+	if _, err := os.Stat(moved); err != nil {
+		t.Fatal("owned root was deleted after path swap")
+	}
+}
+
 func TestHumanInstructionIsExactlyFourBoundedActions(t *testing.T) {
 	for _, marker := range []string{"1. Manually launch", "2. After the agent reports ARMED", "3. Execute the prescribed operator script", "4. Remain through normal post-game", "before 0:00", "maximum 30 minutes", "Stop and abort"} {
 		if !strings.Contains(HumanInstruction, marker) {
@@ -806,5 +866,121 @@ func TestHumanInstructionIsExactlyFourBoundedActions(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(HumanInstruction), "install") || strings.Contains(strings.ToLower(HumanInstruction), "troubleshoot") {
 		t.Fatal("human payload contains preparation or troubleshooting")
+	}
+}
+
+func TestProductListenerOwnershipAndBindReason(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address := listener.Addr().String()
+	if err := proveProductListener(address, os.Getpid()); err != nil {
+		t.Fatalf("owned listener rejected: %v", err)
+	}
+	other := exec.Command("sleep", "10")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Process.Kill(); _ = other.Wait() }()
+	if err := proveProductListener(address, other.Process.Pid); err == nil {
+		t.Fatal("non-owned conflicting listener accepted")
+	}
+	if err := proveProductListener("127.0.0.1:not-a-port", os.Getpid()); err == nil || !strings.Contains(err.Error(), "other than EADDRINUSE") {
+		t.Fatalf("non-EADDR bind error accepted: %v", err)
+	}
+}
+
+func TestProcessCorrelationRejectsRenamedLateProducerAndDrift(t *testing.T) {
+	startSleep := func() *exec.Cmd {
+		command := exec.Command("sleep", "30")
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return command
+	}
+	stop := func(command *exec.Cmd) {
+		if command != nil && command.Process != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}
+	product, obs := startSleep(), startSleep()
+	defer stop(product)
+	defer stop(obs)
+	time.Sleep(20 * time.Millisecond)
+	start, err := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamedPath := filepath.Join(t.TempDir(), "renamed-source")
+	if err := os.Symlink("/usr/bin/sleep", renamedPath); err != nil {
+		t.Fatal(err)
+	}
+	renamed := exec.Command(renamedPath, "30")
+	if err := renamed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid); err == nil {
+		t.Fatal("late renamed producer accepted")
+	}
+	stop(renamed)
+	stop(obs)
+	obs = startSleep()
+	end, err := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.SHA256 == start.SHA256 {
+		t.Fatal("process-tree drift was not observable")
+	}
+	if _, err := captureProcessCorrelation(os.Getpid(), 99999999, obs.Process.Pid); err == nil {
+		t.Fatal("unreadable /proc identity accepted")
+	}
+}
+
+func TestArmingDeadlineAndImmediatePostArmedFrame(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	deadline := time.Now().Add(30 * time.Millisecond)
+	if _, err := readLineBefore(context.Background(), reader, deadline); err == nil {
+		t.Fatal("expired confirmation did not abort")
+	}
+	armed := time.Now().UTC()
+	received := armed.Add(time.Millisecond)
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	payload := []byte(`{"map":{"clock_time":-10,"game_state":"DOTA_GAMERULES_STATE_PRE_GAME","matchid":123}}`)
+	frame := fmt.Sprintf(`{"sequence":1,"received_at":%q,"raw_base64":%q}`+"\n", received.Format(time.RFC3339Nano), base64.StdEncoding.EncodeToString(payload))
+	if err := os.WriteFile(path, []byte(frame), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := inspectBoundaryRecords(path, LiveIdentity{MatchID: "123"}, liveBoundary{ArmedAt: armed, IdentityContinuous: true})
+	if err != nil || !boundary.Pregame {
+		t.Fatalf("post-ARMED pre-confirmation frame rejected: %+v %v", boundary, err)
+	}
+}
+
+func TestVerifierRejectsRetainedV2Readiness(t *testing.T) {
+	root, err := os.MkdirTemp("/var/tmp", "dot65-old-v2-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if err := os.MkdirAll(filepath.Join(root, "evidence"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := Readiness{SchemaVersion: "m4_match_readiness.v2", Mode: "preflight", HumanInstruction: HumanInstruction}
+	payload, err := canonical(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "evidence/readiness.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(context.Background(), root, filepath.Join(root, "repo"), "preflight"); err == nil || !strings.Contains(err.Error(), "readiness contract mismatch") {
+		t.Fatalf("old readiness accepted: %v", err)
 	}
 }
