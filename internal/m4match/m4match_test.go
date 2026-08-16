@@ -352,6 +352,52 @@ func TestCandidateIdentityRepositoryAndProductHashFailuresAreNamed(t *testing.T)
 	}
 }
 
+func TestCandidateParentMismatchFailsClosedAtStartAndEnd(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	wrongParent := strings.Repeat("b", 40)
+	root := t.TempDir()
+	binary := filepath.Join(root, "product")
+	if err := os.WriteFile(binary, []byte("product"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, mismatchPhase := range []string{"start", "end"} {
+		t.Run(mismatchPhase, func(t *testing.T) {
+			collector := fakeIdentityCollector(head, nil)
+			baseRun := collector.run
+			parentCapture := 0
+			collector.run = func(ctx context.Context, dir, name string, args ...string) (string, error) {
+				if name == "git" && strings.Join(args, " ") == "rev-list --parents -n 1 HEAD" {
+					parentCapture++
+					if (mismatchPhase == "start" && parentCapture == 1) || (mismatchPhase == "end" && parentCapture == 2) {
+						return head + " " + wrongParent, nil
+					}
+				}
+				return baseRun(ctx, dir, name, args...)
+			}
+			start := collector.captureRepository(context.Background(), root, "start")
+			identity, evidence, _, err := collector.complete(context.Background(), root, binary, Environment{}, start)
+			if err == nil || identity != (CandidateIdentity{}) {
+				t.Fatalf("%s parent mismatch populated composite identity: %#v / %v", mismatchPhase, identity, err)
+			}
+			for _, phase := range []string{"start", "end"} {
+				wantPassed := phase != mismatchPhase
+				found := false
+				for _, check := range evidence.Checks {
+					if check.ID == "sole_parent_"+phase {
+						found = true
+						if check.Passed != wantPassed || (!wantPassed && check.ReasonCode != "sole_parent_mismatch") {
+							t.Fatalf("%s parent check=%#v want passed=%v", phase, check, wantPassed)
+						}
+					}
+				}
+				if !found {
+					t.Fatalf("missing sole_parent_%s evidence", phase)
+				}
+			}
+		})
+	}
+}
+
 func TestIdentityDiagnosticSanitizationIsBounded(t *testing.T) {
 	input := strings.Repeat("https://user:password@example.invalid token=topsecret\n", 500)
 	got := sanitizeIdentityDiagnostic(input)

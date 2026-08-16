@@ -6,7 +6,7 @@ const (
 	SchemaVersion           = "m4_match_evidence.v3"
 	ReadinessSchemaVersion  = "m4_match_readiness.v3"
 	AcceptedFunctionalBase  = "fa5e7c308ee272722469499ae227b99d1644e2ac"
-	RequiredSuccessorParent = "9d9e7d93ab74c2c1caf15f1be800917eecc1d05b"
+	RequiredSuccessorParent = "424ce5f390e77f8391621f552be5f1b6a230acc1"
 	AcceptedP4Spec          = "271cc47d503828528b7c69212deb4d22683cb715"
 	CapturedScheduleSHA256  = "2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e"
 	ProductionGoldenSHA256  = "480ef715e7c04c22315ba8d81369708a430abe6706bc29a221220b813c0275bd"
