@@ -80,6 +80,9 @@ func safeRoot(root, repo string) (string, error) {
 
 func sortEvidence(e *Evidence) {
 	sort.Slice(e.Checks, func(i, j int) bool { return e.Checks[i].ID < e.Checks[j].ID })
+	sort.Slice(e.CandidateIdentityEvidence.Checks, func(i, j int) bool {
+		return e.CandidateIdentityEvidence.Checks[i].ID < e.CandidateIdentityEvidence.Checks[j].ID
+	})
 	sort.Strings(e.Faults)
 	sort.Slice(e.Artifacts, func(i, j int) bool { return e.Artifacts[i].Path < e.Artifacts[j].Path })
 }

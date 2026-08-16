@@ -6,7 +6,7 @@ const (
 	SchemaVersion           = "m4_match_evidence.v1"
 	ReadinessSchemaVersion  = "m4_match_readiness.v1"
 	AcceptedFunctionalBase  = "fa5e7c308ee272722469499ae227b99d1644e2ac"
-	RequiredSuccessorParent = "302d0bbeb9020c85d2c8a028ac6f55bc0b589cc1"
+	RequiredSuccessorParent = "bc38bf3dba0db43c85cb400b9fe3ea91903b2ba7"
 	AcceptedP4Spec          = "afca35603ff839ab1cd09856ddaa2686366b2b86"
 	CapturedScheduleSHA256  = "2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e"
 	ProductionGoldenSHA256  = "480ef715e7c04c22315ba8d81369708a430abe6706bc29a221220b813c0275bd"
@@ -74,6 +74,33 @@ type CandidateIdentity struct {
 	EnvironmentSHA256  string `json:"environment_sha256"`
 }
 
+type CandidateIdentitySubcheck struct {
+	ID         string `json:"id"`
+	Passed     bool   `json:"passed"`
+	ReasonCode string `json:"reason_code"`
+}
+
+type CandidateRepositorySnapshot struct {
+	Commit             string `json:"commit"`
+	SoleParent         string `json:"sole_parent"`
+	RepositoryRootSHA  string `json:"repository_root_sha256"`
+	RemoteURL          string `json:"remote_url"`
+	RemoteBranchCommit string `json:"remote_branch_commit"`
+	PRHeadCommit       string `json:"pr_head_commit"`
+}
+
+type CandidateIdentityEvidence struct {
+	Checks             []CandidateIdentitySubcheck `json:"checks"`
+	Start              CandidateRepositorySnapshot `json:"start"`
+	End                CandidateRepositorySnapshot `json:"end"`
+	BinarySHA256       string                      `json:"binary_sha256"`
+	BinaryVCSRevision  string                      `json:"binary_vcs_revision"`
+	BinaryVCSModified  bool                        `json:"binary_vcs_modified"`
+	HarnessVCSRevision string                      `json:"harness_vcs_revision"`
+	HarnessVCSModified bool                        `json:"harness_vcs_modified"`
+	EnvironmentSHA256  string                      `json:"environment_sha256"`
+}
+
 type Bounds struct {
 	SampleIntervalSeconds    int   `json:"sample_interval_seconds"`
 	NotificationCapacity     int   `json:"notification_capacity"`
@@ -108,29 +135,30 @@ func AcceptedBounds() Bounds {
 }
 
 type Evidence struct {
-	SchemaVersion      string            `json:"schema_version"`
-	Mode               string            `json:"mode"`
-	CandidateCommit    string            `json:"candidate_commit"`
-	CandidateParent    string            `json:"candidate_parent"`
-	CandidateIdentity  CandidateIdentity `json:"candidate_identity"`
-	AcceptedBase       string            `json:"accepted_functional_base"`
-	AcceptedSpec       string            `json:"accepted_p4_spec"`
-	FixtureSHA256      string            `json:"captured_schedule_sha256"`
-	GoldenSHA256       string            `json:"production_golden_sha256"`
-	Environment        Environment       `json:"environment"`
-	Bounds             Bounds            `json:"bounds"`
-	Checks             []Check           `json:"checks"`
-	Faults             []string          `json:"faults_exercised"`
-	Artifacts          []Artifact        `json:"prepared_artifacts"`
-	StartBoundary      string            `json:"start_boundary"`
-	GameZeroBoundary   string            `json:"game_clock_zero_boundary"`
-	PostGameBoundary   string            `json:"post_game_boundary"`
-	RecordingBoundary  string            `json:"recording_finalization_boundary"`
-	OperatorScript     string            `json:"operator_script"`
-	NonResumable       bool              `json:"non_resumable_acceptance"`
-	SyntheticOnly      bool              `json:"synthetic_only"`
-	ClaimsP4           bool              `json:"claims_p4"`
-	ReadinessIssueText string            `json:"readiness_issue_instruction"`
+	SchemaVersion             string                    `json:"schema_version"`
+	Mode                      string                    `json:"mode"`
+	CandidateCommit           string                    `json:"candidate_commit"`
+	CandidateParent           string                    `json:"candidate_parent"`
+	CandidateIdentity         CandidateIdentity         `json:"candidate_identity"`
+	CandidateIdentityEvidence CandidateIdentityEvidence `json:"candidate_identity_evidence"`
+	AcceptedBase              string                    `json:"accepted_functional_base"`
+	AcceptedSpec              string                    `json:"accepted_p4_spec"`
+	FixtureSHA256             string                    `json:"captured_schedule_sha256"`
+	GoldenSHA256              string                    `json:"production_golden_sha256"`
+	Environment               Environment               `json:"environment"`
+	Bounds                    Bounds                    `json:"bounds"`
+	Checks                    []Check                   `json:"checks"`
+	Faults                    []string                  `json:"faults_exercised"`
+	Artifacts                 []Artifact                `json:"prepared_artifacts"`
+	StartBoundary             string                    `json:"start_boundary"`
+	GameZeroBoundary          string                    `json:"game_clock_zero_boundary"`
+	PostGameBoundary          string                    `json:"post_game_boundary"`
+	RecordingBoundary         string                    `json:"recording_finalization_boundary"`
+	OperatorScript            string                    `json:"operator_script"`
+	NonResumable              bool                      `json:"non_resumable_acceptance"`
+	SyntheticOnly             bool                      `json:"synthetic_only"`
+	ClaimsP4                  bool                      `json:"claims_p4"`
+	ReadinessIssueText        string                    `json:"readiness_issue_instruction"`
 }
 
 type Readiness struct {

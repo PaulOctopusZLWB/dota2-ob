@@ -33,8 +33,12 @@ go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight
 ```
 
 Preflight fails closed unless local HEAD has exactly one parent—the rejected
-`302d0bbe...` candidate—and local HEAD, the origin branch, PR #19's head, the
+`bc38bf3d...` candidate—and local HEAD, the origin branch, PR #19's head, the
 executing harness VCS revision, and the built product VCS revision are identical.
+It captures the branch and PR refs together in one bounded remote snapshot both
+before and after the full matrix. Named canonical sub-checks retain non-secret
+observed identities and stable reason codes; transport text is confined to an
+optional noncanonical `diagnostics/candidate-identity.log`.
 It binds the binary hash, Git tree, remote URL, and freshly captured Go, Node,
 npm, Zig, kernel, Steam, Dota, OBS, and GPU identities. It runs the complete
 focused-twice, full Go, uninterrupted race, vet, build, module, browser,

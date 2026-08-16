@@ -139,6 +139,303 @@ func TestRunbookUsesVCSStampedHarnessInvocations(t *testing.T) {
 	}
 }
 
+func TestRemoteSnapshotParserRejectsAbsentDuplicateMalformedAndMismatchedRefs(t *testing.T) {
+	branchRef := "refs/heads/" + ExpectedBranch
+	prRef := "refs/pull/" + ExpectedPR + "/head"
+	head := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	line := func(oid, ref string) string { return oid + "\t" + ref + "\n" }
+	for name, test := range map[string]struct {
+		payload string
+		reason  string
+	}{
+		"branch absent":    {line(head, prRef), "remote_branch_missing"},
+		"branch duplicate": {line(head, branchRef) + line(head, branchRef) + line(head, prRef), "remote_branch_ambiguous"},
+		"pr absent":        {line(head, branchRef), "pr_head_missing"},
+		"pr duplicate":     {line(head, branchRef) + line(head, prRef) + line(head, prRef), "pr_head_ambiguous"},
+		"malformed":        {"not-an-object\t" + branchRef, "remote_malformed"},
+		"unexpected":       {line(head, branchRef) + line(head, prRef) + line(head, "refs/heads/other"), "remote_unexpected_ref"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, reason := parseRemoteSnapshot(test.payload, branchRef, prRef); reason != test.reason {
+				t.Fatalf("reason=%s want=%s", reason, test.reason)
+			}
+		})
+	}
+	branch, pr, reason := parseRemoteSnapshot(line(other, branchRef)+line(head, prRef), branchRef, prRef)
+	if reason != "ok" || branch != other || pr != head {
+		t.Fatalf("valid mismatched identities were not retained: %s %s %s", branch, pr, reason)
+	}
+}
+
+func TestCandidateIdentityEvidenceNamesEveryFailureAndBindsComposite(t *testing.T) {
+	identity, evidence := successfulIdentityFixture()
+	if err := validateCandidateIdentityEvidence(evidence, identity); err != nil {
+		t.Fatal(err)
+	}
+	for index := range evidence.Checks {
+		t.Run(evidence.Checks[index].ID, func(t *testing.T) {
+			mutated := evidence
+			mutated.Checks = append([]CandidateIdentitySubcheck(nil), evidence.Checks...)
+			mutated.Checks[index].Passed = false
+			mutated.Checks[index].ReasonCode = "command_failed"
+			first := validateCandidateIdentityEvidence(mutated, identity)
+			second := validateCandidateIdentityEvidence(mutated, identity)
+			if first == nil || second == nil || first.Error() != second.Error() || !strings.Contains(first.Error(), mutated.Checks[index].ID) {
+				t.Fatalf("failure is not stable and named: %v / %v", first, second)
+			}
+		})
+	}
+	mutated := evidence
+	mutated.End.Commit = strings.Repeat("f", 40)
+	if err := validateCandidateIdentityEvidence(mutated, identity); err == nil {
+		t.Fatal("start/end mutation passed")
+	}
+	mutated = evidence
+	mutated.BinarySHA256 = strings.Repeat("0", 64)
+	if err := validateCandidateIdentityEvidence(mutated, identity); err == nil {
+		t.Fatal("observed product hash mutation passed")
+	}
+}
+
+func TestCandidateIdentityRemoteRetryIsTransportOnlyAndCanonicalEvidenceIsStable(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	root := t.TempDir()
+	binary := filepath.Join(root, "product")
+	if err := os.WriteFile(binary, []byte("product"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	direct := fakeIdentityCollector(head, []fakeRemoteResult{{}, {}})
+	directStart := direct.captureRepository(context.Background(), root, "start")
+	directIdentity, directEvidence, directDiagnostics, err := direct.complete(context.Background(), root, binary, Environment{}, directStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transient := fakeIdentityCollector(head, []fakeRemoteResult{{err: errors.New("transport down"), output: "https://user:secret@example.invalid token=secret"}, {}, {err: errors.New("transport down")}, {}})
+	transientStart := transient.captureRepository(context.Background(), root, "start")
+	transientIdentity, transientEvidence, diagnostics, err := transient.complete(context.Background(), root, binary, Environment{}, transientStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directDiagnostics) != 0 || len(diagnostics) != 2 {
+		t.Fatalf("diagnostics direct=%v transient=%v", directDiagnostics, diagnostics)
+	}
+	if directIdentity != transientIdentity {
+		t.Fatalf("identity differs after transient recovery\n%#v\n%#v", directIdentity, transientIdentity)
+	}
+	directPayload, _ := canonical(directEvidence)
+	transientPayload, _ := canonical(transientEvidence)
+	if !bytes.Equal(directPayload, transientPayload) {
+		t.Fatalf("retry attempts leaked into canonical evidence\n%s\n%s", directPayload, transientPayload)
+	}
+	for _, diagnostic := range diagnostics {
+		if strings.Contains(diagnostic, "secret") || strings.Contains(diagnostic, "https://") {
+			t.Fatalf("diagnostic leaked secret transport text: %q", diagnostic)
+		}
+	}
+}
+
+func TestCandidateIdentityPersistentTransportProductHarnessAndMutationFailClosed(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	root := t.TempDir()
+	binary := filepath.Join(root, "product")
+	if err := os.WriteFile(binary, []byte("product"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, configure := range map[string]func(*identityCollector){
+		"persistent transport": func(collector *identityCollector) {
+			*collector = fakeIdentityCollector(head, []fakeRemoteResult{{err: errors.New("offline")}, {err: errors.New("offline")}, {err: errors.New("offline")}, {err: errors.New("offline")}})
+		},
+		"product vcs mismatch": func(collector *identityCollector) {
+			collector.executable = func(string) (string, bool, error) { return strings.Repeat("b", 40), false, nil }
+		},
+		"product vcs modified": func(collector *identityCollector) {
+			collector.executable = func(string) (string, bool, error) { return head, true, nil }
+		},
+		"harness vcs mismatch": func(collector *identityCollector) {
+			collector.harness = func() (string, bool, error) { return strings.Repeat("b", 40), false, nil }
+		},
+		"harness vcs modified": func(collector *identityCollector) {
+			collector.harness = func() (string, bool, error) { return head, true, nil }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			collector := fakeIdentityCollector(head, []fakeRemoteResult{{}, {}})
+			configure(&collector)
+			start := collector.captureRepository(context.Background(), root, "start")
+			identity, evidence, _, err := collector.complete(context.Background(), root, binary, Environment{}, start)
+			if err == nil || identity != (CandidateIdentity{}) {
+				t.Fatalf("failure populated composite identity: %#v / %v", identity, err)
+			}
+			failed := 0
+			for _, check := range evidence.Checks {
+				if !check.Passed {
+					failed++
+				}
+			}
+			if failed == 0 {
+				t.Fatal("failure lacks named sub-check evidence")
+			}
+		})
+	}
+	mutation := fakeIdentityCollector(head, []fakeRemoteResult{{}, {}})
+	phase := 0
+	baseRun := mutation.run
+	mutation.run = func(ctx context.Context, dir, name string, args ...string) (string, error) {
+		if name == "git" && len(args) == 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+			phase++
+			if phase > 1 {
+				return strings.Repeat("b", 40), nil
+			}
+		}
+		return baseRun(ctx, dir, name, args...)
+	}
+	start := mutation.captureRepository(context.Background(), root, "start")
+	identity, evidence, _, err := mutation.complete(context.Background(), root, binary, Environment{}, start)
+	if err == nil || identity != (CandidateIdentity{}) || checkIdentitySubcheck(evidence.Checks, "repository_remote_stability") {
+		t.Fatalf("start/end mutation did not fail closed: %#v %v", identity, err)
+	}
+}
+
+func TestCandidateIdentityRepositoryAndProductHashFailuresAreNamed(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	root := t.TempDir()
+	binary := filepath.Join(root, "product")
+	if err := os.WriteFile(binary, []byte("product"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	branchRef := "refs/heads/" + ExpectedBranch
+	prRef := "refs/pull/" + ExpectedPR + "/head"
+	for name, test := range map[string]struct {
+		check  string
+		mutate func(identityCommand) identityCommand
+	}{
+		"local head": {"local_head_start", func(base identityCommand) identityCommand {
+			return overrideIdentityCommand(base, "rev-parse HEAD", "short", nil)
+		}},
+		"sole parent": {"sole_parent_start", func(base identityCommand) identityCommand {
+			return overrideIdentityCommand(base, "rev-list --parents -n 1 HEAD", head+" "+other, nil)
+		}},
+		"repository tree": {"repository_tree_start", func(base identityCommand) identityCommand {
+			return overrideIdentityCommand(base, "rev-parse HEAD^{tree}", "invalid", nil)
+		}},
+		"origin": {"origin_start", func(base identityCommand) identityCommand {
+			return overrideIdentityCommand(base, "remote get-url origin", "https://example.invalid/other.git", nil)
+		}},
+		"remote branch mismatch": {"remote_branch_start", func(base identityCommand) identityCommand {
+			return overrideIdentityCommand(base, "ls-remote origin "+branchRef+" "+prRef, other+"\t"+branchRef+"\n"+head+"\t"+prRef, nil)
+		}},
+		"pr head mismatch": {"pr_head_start", func(base identityCommand) identityCommand {
+			return overrideIdentityCommand(base, "ls-remote origin "+branchRef+" "+prRef, head+"\t"+branchRef+"\n"+other+"\t"+prRef, nil)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			collector := fakeIdentityCollector(head, nil)
+			collector.run = test.mutate(collector.run)
+			start := collector.captureRepository(context.Background(), root, "start")
+			identity, evidence, _, err := collector.complete(context.Background(), root, binary, Environment{}, start)
+			if err == nil || identity != (CandidateIdentity{}) || checkIdentitySubcheck(evidence.Checks, test.check) {
+				t.Fatalf("%s did not fail closed: %#v %v %#v", test.check, identity, err, evidence.Checks)
+			}
+		})
+	}
+	collector := fakeIdentityCollector(head, nil)
+	start := collector.captureRepository(context.Background(), root, "start")
+	identity, evidence, _, err := collector.complete(context.Background(), root, filepath.Join(root, "absent"), Environment{}, start)
+	if err == nil || identity != (CandidateIdentity{}) || checkIdentitySubcheck(evidence.Checks, "product_hash") {
+		t.Fatalf("missing product hash did not fail closed: %#v %v", identity, err)
+	}
+}
+
+func TestIdentityDiagnosticSanitizationIsBounded(t *testing.T) {
+	input := strings.Repeat("https://user:password@example.invalid token=topsecret\n", 500)
+	got := sanitizeIdentityDiagnostic(input)
+	if len(got) > 2048 || strings.Count(got, "\n") >= 8 || strings.Contains(got, "password") || strings.Contains(got, "topsecret") || strings.Contains(got, "https://") {
+		t.Fatalf("diagnostic was not bounded and secret-safe: %q", got)
+	}
+}
+
+type fakeRemoteResult struct {
+	output string
+	err    error
+}
+
+func fakeIdentityCollector(head string, remoteResults []fakeRemoteResult) identityCollector {
+	branchRef := "refs/heads/" + ExpectedBranch
+	prRef := "refs/pull/" + ExpectedPR + "/head"
+	remoteIndex := 0
+	collector := identityCollector{
+		executable: func(string) (string, bool, error) { return head, false, nil },
+		harness:    func() (string, bool, error) { return head, false, nil },
+		delay:      func(context.Context) error { return nil },
+	}
+	collector.run = func(_ context.Context, _ string, name string, args ...string) (string, error) {
+		if name != "git" {
+			return "", errors.New("unexpected command")
+		}
+		switch strings.Join(args, " ") {
+		case "rev-parse HEAD":
+			return head, nil
+		case "rev-list --parents -n 1 HEAD":
+			return head + " " + RequiredSuccessorParent, nil
+		case "rev-parse HEAD^{tree}":
+			return strings.Repeat("c", 40), nil
+		case "remote get-url origin":
+			return ExpectedRemoteURL, nil
+		case "ls-remote origin " + branchRef + " " + prRef:
+			if remoteIndex >= len(remoteResults) {
+				return head + "\t" + branchRef + "\n" + head + "\t" + prRef, nil
+			}
+			result := remoteResults[remoteIndex]
+			remoteIndex++
+			if result.output == "" && result.err == nil {
+				result.output = head + "\t" + branchRef + "\n" + head + "\t" + prRef
+			}
+			return result.output, result.err
+		default:
+			return "", errors.New("unexpected git arguments: " + strings.Join(args, " "))
+		}
+	}
+	return collector
+}
+
+func overrideIdentityCommand(base identityCommand, expectedArgs, output string, commandErr error) identityCommand {
+	return func(ctx context.Context, dir, name string, args ...string) (string, error) {
+		if name == "git" && strings.Join(args, " ") == expectedArgs {
+			return output, commandErr
+		}
+		return base(ctx, dir, name, args...)
+	}
+}
+
+func successfulIdentityFixture() (CandidateIdentity, CandidateIdentityEvidence) {
+	head := strings.Repeat("a", 40)
+	tree := strings.Repeat("b", 40)
+	hash := strings.Repeat("c", 64)
+	environment := strings.Repeat("d", 64)
+	snapshot := CandidateRepositorySnapshot{Commit: head, SoleParent: RequiredSuccessorParent, RepositoryRootSHA: tree, RemoteURL: ExpectedRemoteURL, RemoteBranchCommit: head, PRHeadCommit: head}
+	identity := CandidateIdentity{Commit: head, SoleParent: RequiredSuccessorParent, RepositoryRootSHA: tree, RemoteURL: ExpectedRemoteURL, RemoteBranchCommit: head, PRHeadCommit: head, BinarySHA256: hash, BinaryVCSRevision: head, HarnessVCSRevision: head, EnvironmentSHA256: environment}
+	evidence := CandidateIdentityEvidence{Start: snapshot, End: snapshot, BinarySHA256: hash, BinaryVCSRevision: head, HarnessVCSRevision: head, EnvironmentSHA256: environment}
+	for _, id := range []string{
+		"local_head_start", "sole_parent_start", "repository_tree_start", "origin_start", "remote_branch_start", "pr_head_start",
+		"local_head_end", "sole_parent_end", "repository_tree_end", "origin_end", "remote_branch_end", "pr_head_end",
+		"product_vcs", "product_hash", "harness_vcs", "environment_hash", "repository_remote_stability",
+	} {
+		evidence.Checks = append(evidence.Checks, CandidateIdentitySubcheck{ID: id, Passed: true, ReasonCode: "ok"})
+	}
+	return identity, evidence
+}
+
+func checkIdentitySubcheck(checks []CandidateIdentitySubcheck, id string) bool {
+	for _, check := range checks {
+		if check.ID == id {
+			return check.Passed
+		}
+	}
+	return false
+}
+
 func TestBoundariesRequireContinuousIdentityCadenceAndNormalPostgame(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "raw.jsonl")

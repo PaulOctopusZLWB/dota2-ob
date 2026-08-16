@@ -78,9 +78,15 @@ func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
 	if currentEnvironment != evidence.Environment {
 		return Readiness{}, errors.New("current environment does not equal captured environment")
 	}
-	currentIdentity, err := currentCandidateIdentity(ctx, repo, binary, currentEnvironment)
+	currentIdentity, currentIdentityEvidence, _, err := currentCandidateIdentity(ctx, repo, binary, currentEnvironment)
 	if err != nil {
 		return Readiness{}, fmt.Errorf("current candidate identity: %w", err)
+	}
+	if err := validateCandidateIdentityEvidence(currentIdentityEvidence, currentIdentity); err != nil {
+		return Readiness{}, fmt.Errorf("current candidate identity evidence: %w", err)
+	}
+	if err := validateCandidateIdentityEvidence(evidence.CandidateIdentityEvidence, evidence.CandidateIdentity); err != nil {
+		return Readiness{}, fmt.Errorf("captured candidate identity evidence: %w", err)
 	}
 	currentIdentitySHA, _ := candidateIdentitySHA(currentIdentity)
 	if err := validateIdentityBindings(readiness, evidence, currentIdentity); err != nil || currentIdentitySHA != identitySHA {
@@ -110,6 +116,41 @@ func Verify(ctx context.Context, root, repo, expect string) (Readiness, error) {
 		return Readiness{}, errors.New("preflight incorrectly represented as live evidence")
 	}
 	return readiness, nil
+}
+
+func validateCandidateIdentityEvidence(observed CandidateIdentityEvidence, identity CandidateIdentity) error {
+	if len(observed.Checks) == 0 {
+		return errors.New("named candidate identity sub-checks are absent")
+	}
+	seen := make(map[string]bool, len(observed.Checks))
+	for _, check := range observed.Checks {
+		if check.ID == "" || seen[check.ID] || !check.Passed || check.ReasonCode != "ok" {
+			return fmt.Errorf("invalid candidate identity sub-check: %s/%s", check.ID, check.ReasonCode)
+		}
+		seen[check.ID] = true
+	}
+	for _, required := range []string{
+		"local_head_start", "sole_parent_start", "repository_tree_start", "origin_start", "remote_branch_start", "pr_head_start",
+		"local_head_end", "sole_parent_end", "repository_tree_end", "origin_end", "remote_branch_end", "pr_head_end",
+		"product_vcs", "product_hash", "harness_vcs", "environment_hash", "repository_remote_stability",
+	} {
+		if !seen[required] {
+			return fmt.Errorf("candidate identity sub-check absent: %s", required)
+		}
+	}
+	if observed.Start != observed.End {
+		return errors.New("candidate repository start/end evidence differs")
+	}
+	expected := CandidateIdentity{
+		Commit: observed.End.Commit, SoleParent: observed.End.SoleParent, RepositoryRootSHA: observed.End.RepositoryRootSHA,
+		RemoteURL: observed.End.RemoteURL, RemoteBranchCommit: observed.End.RemoteBranchCommit, PRHeadCommit: observed.End.PRHeadCommit,
+		BinarySHA256: observed.BinarySHA256, BinaryVCSRevision: observed.BinaryVCSRevision, BinaryVCSModified: observed.BinaryVCSModified,
+		HarnessVCSRevision: observed.HarnessVCSRevision, HarnessVCSModified: observed.HarnessVCSModified, EnvironmentSHA256: observed.EnvironmentSHA256,
+	}
+	if expected != identity {
+		return errors.New("named candidate identity observations do not bind the composite identity")
+	}
+	return nil
 }
 
 func validateIdentityBindings(readiness Readiness, evidence Evidence, current CandidateIdentity) error {

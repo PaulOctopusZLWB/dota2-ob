@@ -80,7 +80,7 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	parent, parentErr := runText(ctx, repo, "git", "rev-parse", "HEAD^")
 	evidence.CandidateCommit, evidence.CandidateParent = head, parent
 	add("candidate_commit", headErr == nil && len(head) == 40, "exact immutable successor recorded")
-	add("candidate_parent", parentErr == nil && parent == RequiredSuccessorParent, "sole parent is rejected 302d0bbe candidate")
+	add("candidate_parent", parentErr == nil && parent == RequiredSuccessorParent, "sole parent is the exact rejected candidate")
 	_, ancestryErr := runText(ctx, repo, "git", "merge-base", "--is-ancestor", AcceptedFunctionalBase, "HEAD")
 	add("accepted_ancestry", ancestryErr == nil, "accepted functional base is an ancestor")
 	status, statusErr := runText(ctx, repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
@@ -100,6 +100,8 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	}
 	active, processErr := discoverProcesses()
 	add("isolated_process_state", processErr == nil && len(active) == 0, "no pre-existing Dota or OBS process: "+strings.Join(active, ","))
+	identityCollector := defaultIdentityCollector()
+	identityStart := identityCollector.captureRepository(ctx, repo, "start")
 
 	commands := []struct {
 		id            string
@@ -144,11 +146,6 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 		add("production_endpoints", endpointErr == nil, "GSI, operator, overlay, and orderly shutdown verified")
 		killErr := probeProductSIGKILLRestart(ctx, root, binary)
 		add("product_sigkill_restart", killErr == nil, "product was deliberately SIGKILLed and restarted from retained raw input")
-		identity, identityErr := currentCandidateIdentity(ctx, repo, binary, env)
-		if identityErr == nil {
-			evidence.CandidateIdentity = identity
-		}
-		add("candidate_identity", identityErr == nil, "local, remote branch, PR head, executing harness/product, tree, and environment identities agree")
 	}
 	faultProofs := map[string]string{
 		"audit_failure":                        "TestBroadcastRuntimeFailsClosedOnCommitFailureAndStaleOutput",
@@ -195,6 +192,22 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	add("secret_generated_scan", secretErr == nil, "tracked secret and generated/private-data scan")
 	status, statusErr = runText(ctx, repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
 	add("clean_tree_final", statusErr == nil && status == "", "repository remains clean after complete matrix")
+	identity, identityEvidence, identityDiagnostics, identityErr := identityCollector.complete(ctx, repo, binary, env, identityStart)
+	evidence.CandidateIdentityEvidence = identityEvidence
+	if len(identityDiagnostics) != 0 {
+		diagnosticPayload := []byte(strings.TrimSpace(strings.Join(identityDiagnostics, "\n---\n")) + "\n")
+		if diagnosticErr := writePrivate(filepath.Join(root, "diagnostics/candidate-identity.log"), diagnosticPayload); diagnosticErr != nil {
+			return Readiness{}, diagnosticErr
+		}
+	}
+	if identityErr == nil {
+		evidence.CandidateIdentity = identity
+	}
+	identityDetail := "all named local, remote, product, harness, and environment identity sub-checks passed"
+	if identityErr != nil {
+		identityDetail = identityErr.Error()
+	}
+	add("candidate_identity", identityErr == nil, identityDetail)
 	logArtifacts, logErr := collectLogArtifacts(root)
 	if logErr != nil {
 		return Readiness{}, logErr
