@@ -2,12 +2,12 @@
 
 Date: 2026-08-12
 
-Amended: 2026-08-15
+Amended: 2026-08-16
 
 Decision owner: Paul
 
-Status: M0-M3 accepted; M4 functional integration blocked on the executable
-product-identity migration gate below
+Status: M0-M3 and the M4 functional candidate accepted; P4 harness correction
+and independent review remain open
 
 ## Objective
 
@@ -1350,6 +1350,23 @@ and excluded samples are reported, never silently removed.
 
 ### P4 — one complete official TI match
 
+- The capture source is the accepted localhost HTTP GSI boundary. Dota GSI does
+  not provide an authenticated OS-process identity for each request, so a
+  loopback peer address, a concurrently running `dota2` process, payload cadence,
+  and payload match identity do not prove which local process opened the HTTP
+  connection. P4 must not claim cryptographic or process-attested exclusion of
+  a same-user synthetic POST. This limitation does not allow synthetic evidence
+  to count as P4: the live harness must fail closed unless the exact user-only
+  GSI configuration hash/URI and exclusive capture listener are recorded, the
+  bound Dota process instance remains stable, no harness replay/preflight/
+  synthetic producer is active in the live invocation or process tree, public
+  tournament/series/game/team/match identity progresses continuously from
+  pregame through normal post-game, all accepted request/record/outcome counts
+  reconcile, the OBS recording spans the same boundaries, and Paul confirms the
+  public identity and manual steps. Record
+  `localhost_gsi_sender_unattested` as a residual source limitation. Any
+  contradictory correlation evidence fails the attempt; same-user local
+  substitution remains explicitly outside what this interface can disprove.
 - Use one official TI DotaTV game that reaches a normal post-game terminal
   state. Arm the exact candidate, isolated data root, sanitized evidence sink,
   operator UI, native 750x640 Browser Source, and OBS recording before Paul
