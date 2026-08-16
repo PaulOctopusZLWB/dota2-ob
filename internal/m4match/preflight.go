@@ -71,6 +71,7 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 		PostGameBoundary:  "accepted GSI map.game_state equals a normal post-game terminal state and raw/projected/policy identities reconcile",
 		RecordingBoundary: "OBS reports recording stop and finalized MKV exists, is non-empty, and has no active partial file",
 		OperatorScript:    HumanInstruction, NonResumable: true, SyntheticOnly: true, ClaimsP4: false, ReadinessIssueText: HumanInstruction,
+		LocalhostGSI: LocalhostGSITrustEvidence{PerRequestAttested: false, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}},
 	}
 	add := func(id string, passed bool, detail string) {
 		evidence.Checks = append(evidence.Checks, Check{ID: id, Passed: passed, Detail: detail})

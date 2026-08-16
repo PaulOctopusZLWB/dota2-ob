@@ -18,6 +18,7 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
@@ -47,6 +48,7 @@ type Server struct {
 	projectionDrain     time.Duration
 	projectionOverrides []liveprojection.Projection
 	projectionOptions   []liveprojection.Option
+	runtimeCapacity     RuntimeCapacityStatus
 }
 
 type Option func(*Server)
@@ -54,6 +56,17 @@ type Option func(*Server)
 type DiagnosticConfig struct {
 	BearerToken   string
 	AllowedOrigin string
+}
+
+type RuntimeCapacityStatus struct {
+	SchemaVersion        string `json:"schema_version"`
+	NotificationCapacity int    `json:"notification_capacity"`
+	CandidateCapacity    int    `json:"candidate_queue_capacity"`
+	PolicyHealthy        bool   `json:"policy_healthy"`
+}
+
+func WithRuntimeCapacityStatus(status RuntimeCapacityStatus) Option {
+	return func(server *Server) { server.runtimeCapacity = status }
 }
 
 func WithLatest(latest *state.Latest) Option {
@@ -143,6 +156,7 @@ func WithProjectionDrainTimeout(timeout time.Duration) Option {
 func NewServer(store *session.Store, opts ...Option) *Server {
 	server := &Server{
 		store: store, mux: http.NewServeMux(), projectionDrain: 10 * time.Second,
+		runtimeCapacity: RuntimeCapacityStatus{SchemaVersion: "runtime_capacity.v1", NotificationCapacity: cap(store.HighWater().C()), CandidateCapacity: contracts.MaxPreviewCandidates, PolicyHealthy: true},
 	}
 	server.inflightCond = sync.NewCond(&server.inflightMu)
 	for _, opt := range opts {
@@ -339,8 +353,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := struct {
 		operator.Snapshot
-		LiveProjection liveprojection.Health `json:"live_projection"`
-	}{Snapshot: trackerSnapshot, LiveProjection: projectionHealth}
+		LiveProjection  liveprojection.Health `json:"live_projection"`
+		RuntimeCapacity RuntimeCapacityStatus `json:"runtime_capacity"`
+	}{Snapshot: trackerSnapshot, LiveProjection: projectionHealth, RuntimeCapacity: s.runtimeCapacity}
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		http.Error(w, "failed to encode status", http.StatusInternalServerError)
 	}

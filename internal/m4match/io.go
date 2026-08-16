@@ -66,6 +66,10 @@ func safeRoot(root, repo string) (string, error) {
 		return "", errors.New("data root must be an absolute-resolvable non-empty path")
 	}
 	abs = filepath.Clean(abs)
+	allowed := filepath.Clean("/var/tmp")
+	if abs == allowed || !strings.HasPrefix(abs, allowed+string(os.PathSeparator)) {
+		return "", errors.New("data root must be inside the isolated /var/tmp base")
+	}
 	protected := []string{filepath.Clean(repo), "/home/paul-zhang/文档/dota2_ob", "/", filepath.Clean(os.Getenv("HOME"))}
 	for _, candidate := range protected {
 		if candidate == "." || candidate == "" {
@@ -74,6 +78,27 @@ func safeRoot(root, repo string) (string, error) {
 		if abs == candidate || strings.HasPrefix(abs, candidate+string(os.PathSeparator)) {
 			return "", errors.New("data root is inside a protected repository, canonical, home, or filesystem root")
 		}
+	}
+	current := string(os.PathSeparator)
+	for _, component := range strings.Split(strings.TrimPrefix(abs, string(os.PathSeparator)), string(os.PathSeparator)) {
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return "", errors.New("data root component cannot be inspected")
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("data root contains a symlink component")
+		}
+		if !info.IsDir() {
+			return "", errors.New("data root ancestor is not a directory")
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err == nil && resolved != filepath.Dir(abs) {
+		return "", errors.New("data root existing ancestry resolves through a symlink")
 	}
 	return abs, nil
 }

@@ -33,7 +33,7 @@ go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight
 ```
 
 Preflight fails closed unless local HEAD has exactly one parent—the rejected
-`bc38bf3d...` candidate—and local HEAD, the origin branch, PR #19's head, the
+`48f498f...` candidate—and local HEAD, the origin branch, PR #19's head, the
 executing harness VCS revision, and the built product VCS revision are identical.
 It captures the branch and PR refs together in one bounded remote snapshot both
 before and after the full matrix. Named canonical sub-checks retain non-secret
@@ -86,25 +86,30 @@ go run -buildvcs=true ./cmd/m4-match live \
   --identity /var/tmp/dot65-match-identity.json
 ```
 
-`confirmed_at` must be the current canonical UTC time (within 15 minutes).
+`confirmed_at` must be the current canonical UTC time (within the assigned
+start window, which is at most 30 minutes).
 `dota_pid`, executable hash, and `/proc/<pid>/stat` start ticks bind the manually
 launched Dota process instance; the harness rechecks all three throughout the
 attempt. It verifies the exact preflight, creates a new isolated root, seals the accepted
 live-only artifacts for the match session, installs the unique GSI config,
-starts the exact candidate and isolated OBS profile/collection, and waits for a
-manual preview confirmation. Only after OBS preview and recording are visibly
-correct, type the exact confirmation printed by the command. Paul then manually
-launches Dota, joins the identified official DotaTV match before `0:00`, and
-performs this script:
+starts the exact candidate and isolated OBS profile/collection, and waits for
+the single bounded four-action human payload. Paul performs exactly these
+actions; dependency preparation and troubleshooting are not part of the
+notification:
 
-1. Confirm the preview.
-2. Approve, or observe a deterministic ineligible rejection; reject, or observe
-   a deterministic ineligible rejection.
-3. Pin and unpin when eligible. If ineligible, make both attempts so their
-   deterministic durable rejection results prove ineligibility; omission is not
-   evidence.
-4. Emergency-hide, confirm claim-free output within two seconds, keep it hidden
-   through at least one further accepted GSI heartbeat, then clear.
+1. Manually launch Dota 2 within the assigned start window (maximum 30 minutes).
+2. After the agent reports `ARMED`, join the identified official TI DotaTV game
+   before `0:00` and confirm the public tournament, series, game, teams, and
+   match ID printed by the command.
+3. Execute the prescribed operator script: confirm preview; approve or record
+   the prescribed deterministic ineligible terminal result; reject or record
+   it; pin then unpin when eligible; emergency-hide, prove claim-free output
+   within two seconds through another accepted heartbeat, then clear.
+4. Remain through normal post-game and recording finalization.
+
+Stop and abort immediately for a late join, identity contradiction, or any
+agent-reported failure. Dota must already be running before PID binding and
+agent-owned arming; capture and OBS must be armed before the match is joined.
 
 The foreground process samples the complete product/OBS process trees and all
 accepted P4 body, queue, state, resource, cursor, policy, frame, visibility, and

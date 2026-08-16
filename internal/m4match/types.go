@@ -3,14 +3,14 @@ package m4match
 import "time"
 
 const (
-	SchemaVersion           = "m4_match_evidence.v1"
-	ReadinessSchemaVersion  = "m4_match_readiness.v1"
+	SchemaVersion           = "m4_match_evidence.v2"
+	ReadinessSchemaVersion  = "m4_match_readiness.v2"
 	AcceptedFunctionalBase  = "fa5e7c308ee272722469499ae227b99d1644e2ac"
-	RequiredSuccessorParent = "bc38bf3dba0db43c85cb400b9fe3ea91903b2ba7"
-	AcceptedP4Spec          = "afca35603ff839ab1cd09856ddaa2686366b2b86"
+	RequiredSuccessorParent = "48f498f72f1fc51602bef35b8a974286993f662c"
+	AcceptedP4Spec          = "271cc47d503828528b7c69212deb4d22683cb715"
 	CapturedScheduleSHA256  = "2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e"
 	ProductionGoldenSHA256  = "480ef715e7c04c22315ba8d81369708a430abe6706bc29a221220b813c0275bd"
-	HumanInstruction        = "Confirm preview; approve or record deterministic ineligibility; reject or record deterministic ineligibility; pin then unpin when eligible; emergency-hide and clear."
+	HumanInstruction        = "1. Manually launch Dota 2 within the assigned start window (maximum 30 minutes). 2. After the agent reports ARMED, join the identified official TI DotaTV game before 0:00 and confirm its public tournament, series, game, teams, and match ID. 3. Execute the prescribed operator script: confirm preview; approve or record the prescribed deterministic ineligible terminal result; reject or record it; pin then unpin when eligible; emergency-hide then clear. 4. Remain through normal post-game and recording finalization. Stop and abort immediately for a late join, identity contradiction, or agent-reported failure."
 	CaptureAddress          = "127.0.0.1:43910"
 	DeliveryAddress         = "127.0.0.1:43911"
 	ProductDeliveryAddress  = "127.0.0.1:43912"
@@ -159,6 +159,27 @@ type Evidence struct {
 	SyntheticOnly             bool                      `json:"synthetic_only"`
 	ClaimsP4                  bool                      `json:"claims_p4"`
 	ReadinessIssueText        string                    `json:"readiness_issue_instruction"`
+	LocalhostGSI              LocalhostGSITrustEvidence `json:"localhost_gsi_trust"`
+}
+
+type LocalhostGSITrustEvidence struct {
+	ConfigSHA256          string   `json:"config_sha256,omitempty"`
+	ConfigURI             string   `json:"config_uri,omitempty"`
+	ConfigUserOnly        bool     `json:"config_user_only"`
+	ExclusiveListener     bool     `json:"exclusive_listener"`
+	ListenerURI           string   `json:"listener_uri,omitempty"`
+	DotaProcessStable     bool     `json:"dota_process_stable"`
+	KnownProducerAbsent   bool     `json:"known_producer_absent"`
+	IdentityContinuous    bool     `json:"identity_continuous"`
+	Requests              uint64   `json:"requests"`
+	Accepted              uint64   `json:"accepted"`
+	Rejected              uint64   `json:"rejected"`
+	RawRecords            uint64   `json:"raw_records"`
+	TerminalOutcomes      uint64   `json:"terminal_outcomes"`
+	RecordingCoextensive  bool     `json:"recording_coextensive"`
+	PaulConfirmedIdentity bool     `json:"paul_confirmed_identity"`
+	PerRequestAttested    bool     `json:"per_request_sender_attested"`
+	ResidualReasonCodes   []string `json:"residual_reason_codes"`
 }
 
 type Readiness struct {

@@ -233,5 +233,9 @@ func Cleanup(root, repo, confirmation string) error {
 	if confirmation == "" || confirmation != readiness.EvidenceIndexSHA256 {
 		return errors.New("cleanup confirmation must equal the evidence index SHA-256")
 	}
+	checkedAgain, err := safeRoot(abs, repo)
+	if err != nil || checkedAgain != abs {
+		return errors.New("cleanup root changed after verification")
+	}
 	return os.RemoveAll(abs)
 }

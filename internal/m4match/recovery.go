@@ -24,32 +24,45 @@ import (
 )
 
 type attemptValidation struct {
-	SchemaVersion          string   `json:"schema_version"`
-	RawCount               uint64   `json:"raw_count"`
-	CursorSequence         uint64   `json:"cursor_sequence"`
-	PolicyCommits          uint64   `json:"policy_commits"`
-	ObservationCommits     uint64   `json:"observation_commits"`
-	LastObservation        uint64   `json:"last_observation_sequence"`
-	LastStateSHA256        string   `json:"last_state_sha256"`
-	AuditSHA256            []string `json:"audit_sha256"`
-	OperatorActions        []string `json:"operator_actions"`
-	OperatorResults        []string `json:"operator_results"`
-	RecordingFinalized     bool     `json:"recording_finalized"`
-	OperatorComplete       bool     `json:"operator_complete"`
-	PrivacySafe            bool     `json:"privacy_safe"`
-	Reconciled             bool     `json:"reconciled"`
-	NoCacheRecovery        bool     `json:"no_cache_recovery"`
-	MeasurementsPassed     bool     `json:"measurements_passed"`
-	VisibilityPassed       bool     `json:"visibility_passed"`
-	OperatorInputBounds    bool     `json:"operator_input_bounds"`
-	EveryRawTerminal       bool     `json:"every_raw_terminal"`
-	RecoveryCursorSHA256   string   `json:"recovery_cursor_sha256"`
-	RecoveryPolicySHA256   string   `json:"recovery_policy_sha256"`
-	RecoveryAuditSHA256    string   `json:"recovery_audit_sha256"`
-	RecoveryOperatorSHA256 string   `json:"recovery_operator_sha256"`
-	RecoveryOverlaySHA256  string   `json:"recovery_overlay_sha256"`
-	RecoveryMaxRSSBytes    int64    `json:"recovery_max_rss_bytes"`
-	RecoveryCleanShutdown  bool     `json:"recovery_clean_shutdown"`
+	SchemaVersion          string             `json:"schema_version"`
+	RawCount               uint64             `json:"raw_count"`
+	CursorSequence         uint64             `json:"cursor_sequence"`
+	PolicyCommits          uint64             `json:"policy_commits"`
+	ObservationCommits     uint64             `json:"observation_commits"`
+	LastObservation        uint64             `json:"last_observation_sequence"`
+	LastStateSHA256        string             `json:"last_state_sha256"`
+	AuditSHA256            []string           `json:"audit_sha256"`
+	OperatorActions        []string           `json:"operator_actions"`
+	OperatorResults        []string           `json:"operator_results"`
+	OperatorTerminals      []operatorTerminal `json:"operator_terminals"`
+	RecordingFinalized     bool               `json:"recording_finalized"`
+	OperatorComplete       bool               `json:"operator_complete"`
+	PrivacySafe            bool               `json:"privacy_safe"`
+	Reconciled             bool               `json:"reconciled"`
+	NoCacheRecovery        bool               `json:"no_cache_recovery"`
+	MeasurementsPassed     bool               `json:"measurements_passed"`
+	VisibilityPassed       bool               `json:"visibility_passed"`
+	OperatorInputBounds    bool               `json:"operator_input_bounds"`
+	EveryRawTerminal       bool               `json:"every_raw_terminal"`
+	RecoveryCursorSHA256   string             `json:"recovery_cursor_sha256"`
+	RecoveryPolicySHA256   string             `json:"recovery_policy_sha256"`
+	RecoveryAuditSHA256    string             `json:"recovery_audit_sha256"`
+	RecoveryOperatorSHA256 string             `json:"recovery_operator_sha256"`
+	RecoveryOverlaySHA256  string             `json:"recovery_overlay_sha256"`
+	RecoveryMaxRSSBytes    int64              `json:"recovery_max_rss_bytes"`
+	RecoveryCleanShutdown  bool               `json:"recovery_clean_shutdown"`
+}
+
+type operatorTerminal struct {
+	CommandID         string `json:"command_id"`
+	Action            string `json:"action"`
+	TargetCandidateID string `json:"target_candidate_id,omitempty"`
+	TargetRuleID      string `json:"target_rule_id,omitempty"`
+	ExpectedRevision  uint64 `json:"expected_revision"`
+	Status            string `json:"status"`
+	PreviousRevision  uint64 `json:"previous_revision"`
+	ResultingRevision uint64 `json:"resulting_revision"`
+	Reason            string `json:"reason"`
 }
 
 type recoveryProof struct {
@@ -103,7 +116,7 @@ func validateCompletedAttempt(root, sessionID string, productClean, obsClean boo
 	}
 	validation.RecordingFinalized = obsClean && recordingFinalized(filepath.Join(root, "recordings"), filepath.Join(root, "evidence/logs/obs-live.log"))
 	validation.PrivacySafe = scanRawPrivacy(filepath.Join(sessionDir, "raw.jsonl")) == nil
-	validation.OperatorComplete = hasOperatorScript(validation.OperatorActions)
+	validation.OperatorComplete = validateOperatorTerminals(validation.OperatorTerminals) == nil && validateOperatorReplayProof(filepath.Join(root, "evidence/canonical/operator-replay-proof.json")) == nil
 	validation.EveryRawTerminal = validation.RawCount > 0 && validation.CursorSequence == validation.RawCount && validation.LastObservation <= validation.CursorSequence && validation.ObservationCommits > 0
 	validation.Reconciled = validation.EveryRawTerminal
 	validation.MeasurementsPassed = validateSamples(filepath.Join(root, "evidence/samples.jsonl"), root) == nil
@@ -171,6 +184,7 @@ func summarizeAttempt(sessionDir string) (attemptValidation, error) {
 			if commit.Command != nil {
 				result.OperatorActions = append(result.OperatorActions, commit.Command.Action)
 				result.OperatorResults = append(result.OperatorResults, commit.Command.Action+":"+commit.CommandResult.Status+":"+commit.CommandResult.Reason)
+				result.OperatorTerminals = append(result.OperatorTerminals, operatorTerminal{CommandID: commit.Command.CommandID, Action: commit.Command.Action, TargetCandidateID: commit.Command.TargetCandidateID, TargetRuleID: commit.Command.TargetRuleID, ExpectedRevision: commit.Command.ExpectedPolicyRevision, Status: commit.CommandResult.Status, PreviousRevision: commit.CommandResult.PreviousRevision, ResultingRevision: commit.CommandResult.ResultingRevision, Reason: commit.CommandResult.Reason})
 			}
 			for _, audit := range commit.AuditEvents {
 				payload, _ := contracts.MarshalCanonical(audit)
@@ -208,12 +222,28 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 		return proof, nil, errors.New("durable raw operator-input journal is absent or invalid")
 	}
 	committed, err := committedCommands(sourceSession)
-	if err != nil || len(committed) != len(operatorInputs) {
+	uniqueInputs := make([][]byte, 0, len(operatorInputs))
+	seenInput := map[string][]byte{}
+	duplicateSeen := false
+	for _, input := range operatorInputs {
+		var command contracts.OperatorCommandV1
+		_ = contracts.DecodeStrict(input, &command)
+		if prior, ok := seenInput[command.CommandID]; ok {
+			if !bytes.Equal(prior, input) {
+				return proof, nil, errors.New("replayed command ID changed bytes")
+			}
+			duplicateSeen = true
+			continue
+		}
+		seenInput[command.CommandID] = input
+		uniqueInputs = append(uniqueInputs, input)
+	}
+	if err != nil || !duplicateSeen || len(committed) != len(uniqueInputs) {
 		return proof, nil, errors.New("operator input/terminal commit reconciliation failed")
 	}
 	for index, command := range committed {
 		canonicalCommand, _ := contracts.MarshalCanonical(command)
-		if !bytes.Equal(canonicalCommand, operatorInputs[index]) {
+		if !bytes.Equal(canonicalCommand, uniqueInputs[index]) {
 			return proof, nil, errors.New("operator input does not equal committed command in order")
 		}
 	}
@@ -536,41 +566,63 @@ func recordingFinalized(root, obsLog string) bool {
 	return found && rendered > 0 && missed <= rendered && skipped <= rendered
 }
 
+func validateOperatorTerminals(terminals []operatorTerminal) error {
+	required := []string{contracts.ActionApprove, contracts.ActionReject, contracts.ActionPin, contracts.ActionUnpin, contracts.ActionEmergencyHide, contracts.ActionClearEmergencyHide}
+	reasons := map[string]string{contracts.ActionApprove: "approve", contracts.ActionReject: "reject", contracts.ActionPin: "pin", contracts.ActionUnpin: "unpin", contracts.ActionEmergencyHide: "emergency_hide", contracts.ActionClearEmergencyHide: "emergency_hide_cleared"}
+	position := 0
+	for _, terminal := range terminals {
+		if position >= len(required) || terminal.Action != required[position] {
+			continue
+		}
+		if terminal.CommandID == "" || terminal.Status != contracts.CommandAccepted || terminal.PreviousRevision != terminal.ExpectedRevision || terminal.ResultingRevision != terminal.ExpectedRevision+1 {
+			return errors.New("operator terminal status or revision mismatch")
+		}
+		candidateAction := terminal.Action == contracts.ActionApprove || terminal.Action == contracts.ActionReject || terminal.Action == contracts.ActionPin || terminal.Action == contracts.ActionUnpin
+		if candidateAction != (terminal.TargetCandidateID != "") || terminal.TargetRuleID != "" {
+			return errors.New("operator terminal target mismatch")
+		}
+		if terminal.Reason != reasons[terminal.Action] && !(candidateAction && terminal.Reason == "candidate_expired") {
+			return errors.New("operator terminal reason mismatch")
+		}
+		position++
+	}
+	if position != len(required) {
+		return errors.New("operator terminal script incomplete")
+	}
+	return nil
+}
+
+func validateOperatorReplayProof(path string) error {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var proof struct {
+		SchemaVersion     string `json:"schema_version"`
+		CommandID         string `json:"command_id"`
+		RequestSHA256     string `json:"request_sha256"`
+		ResponseSHA256    string `json:"response_sha256"`
+		Status            int    `json:"status"`
+		TransportAttempts int    `json:"transport_attempts"`
+		DurableEffects    int    `json:"durable_effects"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&proof) != nil || proof.SchemaVersion != "operator_replay_proof.v1" || proof.CommandID == "" || len(proof.RequestSHA256) != 64 || len(proof.ResponseSHA256) != 64 || proof.Status < 200 || proof.Status >= 300 || proof.TransportAttempts != 2 || proof.DurableEffects != 1 {
+		return errors.New("operator replay proof invalid")
+	}
+	return nil
+}
+
 func hasOperatorScript(actions []string) bool {
-	required := []string{contracts.ActionApprove, contracts.ActionReject}
+	required := []string{contracts.ActionApprove, contracts.ActionReject, contracts.ActionPin, contracts.ActionUnpin, contracts.ActionEmergencyHide, contracts.ActionClearEmergencyHide}
 	position := 0
 	for _, action := range actions {
 		if position < len(required) && action == required[position] {
 			position++
 		}
 	}
-	if position != len(required) {
-		return false
-	}
-	pin, unpin, hide, clear := -1, -1, -1, -1
-	for index, action := range actions {
-		switch action {
-		case contracts.ActionPin:
-			if pin < 0 {
-				pin = index
-			}
-		case contracts.ActionUnpin:
-			if unpin < 0 {
-				unpin = index
-			}
-		case contracts.ActionEmergencyHide:
-			if hide < 0 {
-				hide = index
-			}
-		case contracts.ActionClearEmergencyHide:
-			if clear < 0 {
-				clear = index
-			}
-		}
-	}
-	// Pin/unpin must either both be attempted in order or both have an explicit
-	// durable ineligibility attempt; a missing pair is never silently accepted.
-	return pin >= 0 && unpin > pin && hide > unpin && clear > hide
+	return position == len(required)
 }
 
 func scanRawPrivacy(path string) error {

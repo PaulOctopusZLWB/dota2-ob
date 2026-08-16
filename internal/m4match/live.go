@@ -32,28 +32,39 @@ type LiveConfig struct {
 }
 
 type liveBoundary struct {
-	Pregame             bool
-	Zero                bool
-	Post                bool
-	Aborted             bool
-	RecordingFinalized  bool
-	OperatorComplete    bool
-	PrivacySafe         bool
-	Reconciled          bool
-	NoCacheRecovery     bool
-	MeasurementsPassed  bool
-	VisibilityPassed    bool
-	OperatorInputBounds bool
-	CleanShutdown       bool
-	Last                uint64
-	Frames              uint64
-	ArmedAt             time.Time
-	FirstReceivedAt     time.Time
-	LastReceivedAt      time.Time
-	LastClock           int64
-	WinnerObserved      bool
-	IdentityContinuous  bool
-	DotaProvenance      bool
+	Pregame              bool
+	Zero                 bool
+	Post                 bool
+	Aborted              bool
+	RecordingFinalized   bool
+	OperatorComplete     bool
+	PrivacySafe          bool
+	Reconciled           bool
+	NoCacheRecovery      bool
+	MeasurementsPassed   bool
+	VisibilityPassed     bool
+	OperatorInputBounds  bool
+	CleanShutdown        bool
+	Last                 uint64
+	Frames               uint64
+	ArmedAt              time.Time
+	FirstReceivedAt      time.Time
+	LastReceivedAt       time.Time
+	LastClock            int64
+	WinnerObserved       bool
+	IdentityContinuous   bool
+	DotaProvenance       bool
+	ConfigSHA256         string
+	ConfigUserOnly       bool
+	ExclusiveListener    bool
+	KnownProducerAbsent  bool
+	PaulConfirmed        bool
+	Requests             uint64
+	Accepted             uint64
+	Rejected             uint64
+	RawRecords           uint64
+	TerminalOutcomes     uint64
+	RecordingCoextensive bool
 }
 
 type operatorInputFrame struct {
@@ -81,6 +92,7 @@ func startDeliveryProxy(root string) (*deliveryProxy, error) {
 	}
 	var mu sync.Mutex
 	var sequence uint64
+	var replayed bool
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, readErr := io.ReadAll(io.LimitReader(request.Body, 1<<20))
 		_ = request.Body.Close()
@@ -90,11 +102,20 @@ func startDeliveryProxy(root string) (*deliveryProxy, error) {
 		}
 		if request.Method == http.MethodPost && request.URL.Path == "/v1/operator/commands" {
 			mu.Lock()
-			sequence++
-			frame := operatorInputFrame{Sequence: sequence, ReceivedAt: time.Now().UTC().Format(time.RFC3339Nano), BodyBase64: base64.StdEncoding.EncodeToString(body), BodySHA256: payloadSHA(body)}
-			payload, marshalErr := canonical(frame)
-			if marshalErr == nil {
-				_, marshalErr = journal.Write(payload)
+			copies := 1
+			if !replayed {
+				copies = 2
+				replayed = true
+			}
+			var marshalErr error
+			for copyIndex := 0; copyIndex < copies && marshalErr == nil; copyIndex++ {
+				sequence++
+				frame := operatorInputFrame{Sequence: sequence, ReceivedAt: time.Now().UTC().Format(time.RFC3339Nano), BodyBase64: base64.StdEncoding.EncodeToString(body), BodySHA256: payloadSHA(body)}
+				var payload []byte
+				payload, marshalErr = canonical(frame)
+				if marshalErr == nil {
+					_, marshalErr = journal.Write(payload)
+				}
 			}
 			if marshalErr == nil {
 				marshalErr = journal.Sync()
@@ -105,28 +126,61 @@ func startDeliveryProxy(root string) (*deliveryProxy, error) {
 				return
 			}
 		}
-		upstream, _ := http.NewRequestWithContext(request.Context(), request.Method, ProductDeliveryOrigin+request.URL.RequestURI(), bytes.NewReader(body))
-		upstream.Header = request.Header.Clone()
-		if upstream.Header.Get("Origin") == DeliveryOrigin {
-			upstream.Header.Set("Origin", ProductDeliveryOrigin)
+		forward := func() (int, http.Header, []byte, error) {
+			upstream, _ := http.NewRequestWithContext(request.Context(), request.Method, ProductDeliveryOrigin+request.URL.RequestURI(), bytes.NewReader(body))
+			upstream.Header = request.Header.Clone()
+			if upstream.Header.Get("Origin") == DeliveryOrigin {
+				upstream.Header.Set("Origin", ProductDeliveryOrigin)
+			}
+			response, err := (&http.Client{Timeout: 5 * time.Second}).Do(upstream)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			defer response.Body.Close()
+			responseBody, bodyErr := io.ReadAll(io.LimitReader(response.Body, AcceptedBounds().OtherAPIBytes+1))
+			if bodyErr != nil || int64(len(responseBody)) > AcceptedBounds().OtherAPIBytes {
+				return 0, nil, nil, errors.New("delivery response bound")
+			}
+			return response.StatusCode, response.Header.Clone(), responseBody, nil
 		}
-		response, err := (&http.Client{Timeout: 5 * time.Second}).Do(upstream)
+		status, headers, responseBody, err := forward()
 		if err != nil {
 			http.Error(writer, "delivery_upstream_unavailable", http.StatusBadGateway)
 			return
 		}
-		defer response.Body.Close()
-		for key, values := range response.Header {
+		if request.Method == http.MethodPost && request.URL.Path == "/v1/operator/commands" {
+			mu.Lock()
+			shouldReplay := sequence == 2
+			mu.Unlock()
+			if shouldReplay {
+				replayStatus, _, replayBody, replayErr := forward()
+				if replayErr != nil || replayStatus != status || !bytes.Equal(replayBody, responseBody) {
+					http.Error(writer, "operator_replay_unstable", http.StatusBadGateway)
+					return
+				}
+				var command struct {
+					CommandID string `json:"command_id"`
+				}
+				if json.Unmarshal(body, &command) != nil || command.CommandID == "" || writeJSON(filepath.Join(root, "evidence/canonical/operator-replay-proof.json"), struct {
+					SchemaVersion     string `json:"schema_version"`
+					CommandID         string `json:"command_id"`
+					RequestSHA256     string `json:"request_sha256"`
+					ResponseSHA256    string `json:"response_sha256"`
+					Status            int    `json:"status"`
+					TransportAttempts int    `json:"transport_attempts"`
+					DurableEffects    int    `json:"durable_effects"`
+				}{"operator_replay_proof.v1", command.CommandID, payloadSHA(body), payloadSHA(responseBody), status, 2, 1}, 0o600) != nil {
+					http.Error(writer, "operator_replay_proof_failed", http.StatusServiceUnavailable)
+					return
+				}
+			}
+		}
+		for key, values := range headers {
 			for _, value := range values {
 				writer.Header().Add(key, strings.ReplaceAll(value, ProductDeliveryOrigin, DeliveryOrigin))
 			}
 		}
-		responseBody, bodyErr := io.ReadAll(io.LimitReader(response.Body, AcceptedBounds().OtherAPIBytes+1))
-		if bodyErr != nil || int64(len(responseBody)) > AcceptedBounds().OtherAPIBytes {
-			http.Error(writer, "delivery_response_bound", http.StatusBadGateway)
-			return
-		}
-		writer.WriteHeader(response.StatusCode)
+		writer.WriteHeader(status)
 		_, _ = writer.Write(responseBody)
 	})
 	listener, err := net.Listen("tcp", DeliveryAddress)
@@ -212,6 +266,18 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 		return Readiness{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, os.Remove(installedConfig)) }()
+	configHash, _, err := fileSHA(installedConfig)
+	if err != nil {
+		return Readiness{}, err
+	}
+	configInfo, err := os.Stat(installedConfig)
+	if err != nil || configInfo.Mode().Perm() != 0o600 {
+		return Readiness{}, errors.New("installed GSI config is not user-only")
+	}
+	producerAbsent := knownSyntheticProducerAbsent()
+	if !producerAbsent {
+		return Readiness{}, errors.New("known replay, preflight, or synthetic producer is active")
+	}
 	proxy, err := startDeliveryProxy(root)
 	if err != nil {
 		return Readiness{}, err
@@ -239,6 +305,10 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	defer func() { retErr = errors.Join(retErr, stopProcess(product, productDone, 15*time.Second)) }()
 	if err := waitHTTP(ctx, CaptureOrigin+"/healthz", 15*time.Second); err != nil {
 		return Readiness{}, err
+	}
+	exclusiveListener := listenerIsExclusive(CaptureAddress)
+	if !exclusiveListener {
+		return Readiness{}, errors.New("GSI listener is not exclusive")
 	}
 
 	obsLog, err := os.OpenFile(filepath.Join(root, "evidence/logs/obs-live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -282,7 +352,7 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 		return Readiness{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, visibilityFile.Close()) }()
-	boundary := liveBoundary{ArmedAt: time.Now().UTC(), IdentityContinuous: true, DotaProvenance: true}
+	boundary := liveBoundary{ArmedAt: time.Now().UTC(), IdentityContinuous: true, DotaProvenance: true, ConfigSHA256: configHash, ConfigUserOnly: true, ExclusiveListener: true, KnownProducerAbsent: producerAbsent, PaulConfirmed: true}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	visibilityTicker := time.NewTicker(100 * time.Millisecond)
@@ -341,6 +411,9 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	}
 	finalArtifacts, finalErr := captureFinalEndpoints(root, tokenPath)
 	artifacts = append(artifacts, finalArtifacts...)
+	finalSample := collectSample(product.Process.Pid, obs.Process.Pid, rawPath, tokenPath, root, sessionID, identity.MatchID)
+	boundary.Requests, boundary.Accepted, boundary.Rejected = finalSample.RequestCount, finalSample.AcceptedCount, finalSample.RejectedCount
+	boundary.RawRecords, boundary.TerminalOutcomes = finalSample.Sequence, finalSample.ProjectedSequence
 	if finalErr != nil {
 		boundary.Aborted = true
 	}
@@ -358,6 +431,7 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	boundary.VisibilityPassed = validation.VisibilityPassed
 	boundary.OperatorInputBounds = validation.OperatorInputBounds
 	boundary.CleanShutdown = productStopErr == nil && obsStopErr == nil && proxyStopErr == nil && validation.RecoveryCleanShutdown
+	boundary.RecordingCoextensive = boundary.ArmedAt.Before(boundary.FirstReceivedAt) && validation.RecordingFinalized
 	if finalErr != nil || validationErr != nil || productStopErr != nil || obsStopErr != nil || proxyStopErr != nil {
 		boundary.Aborted = true
 	}
@@ -464,6 +538,49 @@ func installGSIConfig(root string) (string, error) {
 		return "", errors.New("refusing to overwrite existing DOT-65 GSI config")
 	}
 	return target, copyFile(filepath.Join(root, "config/dota/gamestate_integration_dota2_ob_m4.cfg"), target, 0o600)
+}
+
+func listenerIsExclusive(address string) bool {
+	listener, err := net.Listen("tcp", address)
+	if err == nil {
+		_ = listener.Close()
+		return false
+	}
+	return true
+}
+
+func knownSyntheticProducerAbsent() bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		command := strings.ToLower(strings.ReplaceAll(string(payload), "\x00", " "))
+		if strings.Contains(command, "m4-match preflight") || strings.Contains(command, "m4-match replay") || strings.Contains(command, "synthetic-gsi") {
+			return false
+		}
+	}
+	return true
+}
+
+func validateLocalhostGSITrust(e LocalhostGSITrustEvidence) error {
+	if len(e.ConfigSHA256) != 64 || e.ConfigURI != "http://"+CaptureAddress+"/gsi" || e.ListenerURI != e.ConfigURI || !e.ConfigUserOnly || !e.ExclusiveListener || !e.DotaProcessStable || !e.KnownProducerAbsent || !e.IdentityContinuous || !e.RecordingCoextensive || !e.PaulConfirmedIdentity || e.PerRequestAttested {
+		return errors.New("localhost GSI trust identity or provenance mismatch")
+	}
+	if e.Requests == 0 || e.Requests != e.Accepted+e.Rejected || e.Accepted != e.RawRecords || e.RawRecords != e.TerminalOutcomes {
+		return errors.New("localhost GSI request/record/outcome reconciliation mismatch")
+	}
+	if len(e.ResidualReasonCodes) != 1 || e.ResidualReasonCodes[0] != "localhost_gsi_sender_unattested" {
+		return errors.New("localhost GSI residual limitation mismatch")
+	}
+	return nil
 }
 
 func copyFile(source, target string, mode os.FileMode) error {
@@ -660,8 +777,6 @@ func collectSample(pid, obsPID int, rawPath, tokenPath, root, expectedSession, e
 	sample.OBSBrowserProcesses, sample.OBSBrowserCPUClockTicks = obsTree.BrowserProcesses, obsTree.BrowserCPU
 	sample.ProcessRSSBytes, sample.ProcessFDs, sample.ProcessThreads, sample.ProcessCPUClockTicks = productTree.RSS, productTree.FDs, productTree.Threads, productTree.CPU
 	sample.OBSProcessRSSBytes, sample.OBSProcessFDs = obsTree.RSS, obsTree.FDs
-	sample.NotificationCapacity = AcceptedBounds().NotificationCapacity
-	sample.CandidateQueueCapacity = AcceptedBounds().CandidateQueueCapacity
 	sample.ClockTicksPerSecond, err = clockTicksPerSecond()
 	telemetryOK = telemetryOK && err == nil && sample.ClockTicksPerSecond > 0
 	sample.CrossPlaneMatchID, err = lastRawMatchIdentity(rawPath)
@@ -704,10 +819,19 @@ func collectSample(pid, obsPID int, rawPath, tokenPath, root, expectedSession, e
 				HighWater uint64 `json:"high_water"`
 				Lag       uint64 `json:"lag_count"`
 			} `json:"live_projection"`
+			RuntimeCapacity struct {
+				SchemaVersion string `json:"schema_version"`
+				Notification  int    `json:"notification_capacity"`
+				Candidate     int    `json:"candidate_queue_capacity"`
+				PolicyHealthy bool   `json:"policy_healthy"`
+			} `json:"runtime_capacity"`
 		}
 		if json.Unmarshal(body, &status) == nil {
 			sample.RequestCount, sample.AcceptedCount, sample.RejectedCount = status.Request, status.Accepted, status.Rejected
 			sample.RawWriteFailures, sample.ProjectionFailures = status.RawFailures, status.ProjectionFailures
+			sample.NotificationCapacity = status.RuntimeCapacity.Notification
+			sample.CandidateQueueCapacity = status.RuntimeCapacity.Candidate
+			telemetryOK = telemetryOK && status.RuntimeCapacity.SchemaVersion == "runtime_capacity.v1" && status.RuntimeCapacity.PolicyHealthy
 			sample.ProjectedSequence, sample.Lag = status.Live.Projected, status.Live.Lag
 			sample.CrossPlaneSessionID = status.SessionID
 			telemetryOK = telemetryOK && status.SessionID == expectedSession
@@ -1078,7 +1202,10 @@ func sealLive(root string, preflight Readiness, preflightEvidence Evidence, arti
 	evidence.CandidateIdentity = preflightEvidence.CandidateIdentity
 	evidence.CandidateIdentityEvidence = preflightEvidence.CandidateIdentityEvidence
 	evidence.Environment = preflightEvidence.Environment
+	evidence.LocalhostGSI = LocalhostGSITrustEvidence{ConfigSHA256: boundary.ConfigSHA256, ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: boundary.ConfigUserOnly, ExclusiveListener: boundary.ExclusiveListener, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: boundary.DotaProvenance, KnownProducerAbsent: boundary.KnownProducerAbsent, IdentityContinuous: boundary.IdentityContinuous, Requests: boundary.Requests, Accepted: boundary.Accepted, Rejected: boundary.Rejected, RawRecords: boundary.RawRecords, TerminalOutcomes: boundary.TerminalOutcomes, RecordingCoextensive: boundary.RecordingCoextensive, PaulConfirmedIdentity: boundary.PaulConfirmed, PerRequestAttested: false, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
+	trustOK := validateLocalhostGSITrust(evidence.LocalhostGSI) == nil
 	evidence.Checks = []Check{{"pregame_boundary", boundary.Pregame, "negative game clock observed after complete arming"}, {"game_zero_boundary", boundary.Zero, "clock zero transition observed"}, {"post_game_boundary", boundary.Post && boundary.WinnerObserved, "normal post-game state and winner observed"}, {"recording_finalized", boundary.RecordingFinalized, "clean OBS stop, EBML MKV, frame counters, and no partial recording"}, {"operator_script", boundary.OperatorComplete, "ordered durable command attempts/revisions/audits present"}, {"operator_input_bounds", boundary.OperatorInputBounds, "durable raw operator inputs are present and within 16 KiB"}, {"privacy", boundary.PrivacySafe, "raw payload key scan passed"}, {"reconciliation", boundary.Reconciled, "every raw record reached exactly one terminal cursor outcome"}, {"no_cache_recovery", boundary.NoCacheRecovery, "genuine isolated product restart rebuilt from raw inputs and byte-matched five planes"}, {"measurement_bounds", boundary.MeasurementsPassed, "complete five-second process-tree/body/state/resource plane passed"}, {"visibility_fail_closed", boundary.VisibilityPassed, "100ms samples prove two-second claim-free output, no stale revival, and continued raw capture"}, {"live_identity_continuity", boundary.IdentityContinuous && boundary.DotaProvenance && boundary.Frames > 0, "nonzero match identity and bound Dota process remained stable for every frame"}, {"clean_shutdown", boundary.CleanShutdown, "product, OBS, and recovery product stopped cleanly"}, {"public_match_identity", identity.MatchID != "" && identity.OfficialSourceURL != "", "explicit official public TI identity supplied"}, {"independent_acceptance", false, "live command never self-accepts P4"}}
+	evidence.Checks = append(evidence.Checks, Check{"localhost_gsi_trust_boundary", trustOK, "accepted localhost-GSI trust boundary and residual limitation recorded"})
 	for _, failure := range failures {
 		evidence.Checks = append(evidence.Checks, Check{ID: failure, Passed: false, Detail: "sealed live attempt failure"})
 	}

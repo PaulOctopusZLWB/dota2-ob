@@ -122,6 +122,28 @@ func TestHealthzReturnsOK(t *testing.T) {
 	}
 }
 
+func TestRuntimeCapacityStatusReportsObservedOverride(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("capacity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	want := gsi.RuntimeCapacityStatus{SchemaVersion: "runtime_capacity.v1", NotificationCapacity: 7, CandidateCapacity: 9, PolicyHealthy: false}
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithRuntimeCapacityStatus(want)))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Runtime gsi.RuntimeCapacityStatus `json:"runtime_capacity"`
+	}
+	if json.NewDecoder(response.Body).Decode(&payload) != nil || payload.Runtime != want {
+		t.Fatalf("runtime capacity = %+v", payload.Runtime)
+	}
+}
+
 func TestGSIPostStoresValidJSON(t *testing.T) {
 	root := t.TempDir()
 	store, err := session.NewStore(root, session.WithSessionID("valid-gsi"))

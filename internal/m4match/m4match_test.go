@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -672,7 +673,12 @@ func TestDeliveryProxyPersistsRawOperatorInputBeforeForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	transportCalls, durableEffects := 0, 0
 	upstream := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		transportCalls++
+		if transportCalls == 1 {
+			durableEffects++
+		}
 		if request.Header.Get("Origin") != ProductDeliveryOrigin {
 			t.Errorf("origin=%s", request.Header.Get("Origin"))
 		}
@@ -703,7 +709,102 @@ func TestDeliveryProxyPersistsRawOperatorInputBeforeForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	inputs, err := readOperatorInputs(filepath.Join(root, "evidence/raw-operator-input.jsonl"))
-	if err != nil || len(inputs) != 1 || !bytes.Equal(inputs[0], body) {
+	if err != nil || len(inputs) != 2 || !bytes.Equal(inputs[0], body) || !bytes.Equal(inputs[1], body) {
 		t.Fatalf("inputs=%d err=%v", len(inputs), err)
+	}
+	if transportCalls != 2 || durableEffects != 1 {
+		t.Fatalf("transport=%d durable=%d", transportCalls, durableEffects)
+	}
+	if err := validateOperatorReplayProof(filepath.Join(root, "evidence/canonical/operator-replay-proof.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOperatorTerminalSemanticsFailClosed(t *testing.T) {
+	actions := []string{contracts.ActionApprove, contracts.ActionReject, contracts.ActionPin, contracts.ActionUnpin, contracts.ActionEmergencyHide, contracts.ActionClearEmergencyHide}
+	reasons := []string{"approve", "reject", "pin", "unpin", "emergency_hide", "emergency_hide_cleared"}
+	valid := make([]operatorTerminal, len(actions))
+	for i, action := range actions {
+		valid[i] = operatorTerminal{CommandID: fmt.Sprintf("c%d", i), Action: action, ExpectedRevision: uint64(i), Status: contracts.CommandAccepted, PreviousRevision: uint64(i), ResultingRevision: uint64(i + 1), Reason: reasons[i]}
+		if i < 4 {
+			valid[i].TargetCandidateID = "candidate"
+		}
+	}
+	if err := validateOperatorTerminals(valid); err != nil {
+		t.Fatal(err)
+	}
+	mutations := []func(*operatorTerminal){
+		func(v *operatorTerminal) { v.Status = contracts.CommandRejected },
+		func(v *operatorTerminal) { v.PreviousRevision++ },
+		func(v *operatorTerminal) { v.ResultingRevision++ },
+		func(v *operatorTerminal) { v.TargetCandidateID = "" },
+		func(v *operatorTerminal) { v.Reason = "stale_revision" },
+		func(v *operatorTerminal) { v.TargetRuleID = "wrong" },
+	}
+	for i, mutate := range mutations {
+		copyTerminals := append([]operatorTerminal(nil), valid...)
+		mutate(&copyTerminals[0])
+		if validateOperatorTerminals(copyTerminals) == nil {
+			t.Fatalf("mutation %d accepted", i)
+		}
+	}
+}
+
+func TestLocalhostGSITrustBoundaryContradictionsFail(t *testing.T) {
+	valid := LocalhostGSITrustEvidence{ConfigSHA256: strings.Repeat("a", 64), ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: true, ExclusiveListener: true, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: true, KnownProducerAbsent: true, IdentityContinuous: true, Requests: 3, Accepted: 2, Rejected: 1, RawRecords: 2, TerminalOutcomes: 2, RecordingCoextensive: true, PaulConfirmedIdentity: true, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
+	if err := validateLocalhostGSITrust(valid); err != nil {
+		t.Fatal(err)
+	}
+	mutations := []func(*LocalhostGSITrustEvidence){func(v *LocalhostGSITrustEvidence) { v.KnownProducerAbsent = false }, func(v *LocalhostGSITrustEvidence) { v.IdentityContinuous = false }, func(v *LocalhostGSITrustEvidence) { v.Requests++ }, func(v *LocalhostGSITrustEvidence) { v.PerRequestAttested = true }, func(v *LocalhostGSITrustEvidence) { v.RecordingCoextensive = false }, func(v *LocalhostGSITrustEvidence) { v.ResidualReasonCodes = nil }}
+	for i, mutate := range mutations {
+		changed := valid
+		changed.ResidualReasonCodes = append([]string(nil), valid.ResidualReasonCodes...)
+		mutate(&changed)
+		if validateLocalhostGSITrust(changed) == nil {
+			t.Fatalf("trust mutation %d accepted", i)
+		}
+	}
+}
+
+func TestSafeRootRejectsSymlinkComponentsAndCleanupTargets(t *testing.T) {
+	base, err := os.MkdirTemp("/var/tmp", "dot65-symlink-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(base)
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rootLink := filepath.Join(base, "root-link")
+	if err := os.Symlink(target, rootLink); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := filepath.Join(base, "intermediate")
+	if err := os.Symlink(target, intermediate); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(base, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []string{rootLink, filepath.Join(intermediate, "child"), dangling, filepath.Join(dangling, "child")} {
+		if _, err := safeRoot(candidate, filepath.Join(base, "repo")); err == nil {
+			t.Fatalf("symlink root accepted: %s", candidate)
+		}
+	}
+	if _, err := safeRoot(filepath.Join(base, "ordinary", "child"), filepath.Join(base, "repo")); err != nil {
+		t.Fatalf("ordinary root rejected: %v", err)
+	}
+}
+
+func TestHumanInstructionIsExactlyFourBoundedActions(t *testing.T) {
+	for _, marker := range []string{"1. Manually launch", "2. After the agent reports ARMED", "3. Execute the prescribed operator script", "4. Remain through normal post-game", "before 0:00", "maximum 30 minutes", "Stop and abort"} {
+		if !strings.Contains(HumanInstruction, marker) {
+			t.Fatalf("missing instruction marker %q", marker)
+		}
+	}
+	if strings.Contains(strings.ToLower(HumanInstruction), "install") || strings.Contains(strings.ToLower(HumanInstruction), "troubleshoot") {
+		t.Fatal("human payload contains preparation or troubleshooting")
 	}
 }
