@@ -1,6 +1,7 @@
 package m4match
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -893,24 +895,19 @@ func TestProductListenerOwnershipAndBindReason(t *testing.T) {
 }
 
 func TestProcessCorrelationRejectsRenamedLateProducerAndDrift(t *testing.T) {
-	startSleep := func() *exec.Cmd {
-		command := exec.Command("sleep", "30")
-		if err := command.Start(); err != nil {
-			t.Fatal(err)
-		}
-		return command
+	fixture := startProcessCorrelationFixture(t)
+	defer fixture.close()
+
+	// A child owned by the outer test runner must not contaminate the fixture's
+	// invocation tree. This is the condition that made the complete preflight
+	// flaky when the shared m4match.test process was used as the harness.
+	outerChild := exec.Command("sleep", "30")
+	if err := outerChild.Start(); err != nil {
+		t.Fatal(err)
 	}
-	stop := func(command *exec.Cmd) {
-		if command != nil && command.Process != nil {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-		}
-	}
-	product, obs := startSleep(), startSleep()
-	defer stop(product)
-	defer stop(obs)
-	time.Sleep(20 * time.Millisecond)
-	start, err := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid)
+	defer stopTestProcess(outerChild)
+
+	start, err := captureProcessCorrelation(fixture.command.Process.Pid, fixture.productPID, fixture.obsPID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -918,26 +915,172 @@ func TestProcessCorrelationRejectsRenamedLateProducerAndDrift(t *testing.T) {
 	if err := os.Symlink("/usr/bin/sleep", renamedPath); err != nil {
 		t.Fatal(err)
 	}
-	renamed := exec.Command(renamedPath, "30")
-	if err := renamed.Start(); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(20 * time.Millisecond)
-	if _, err := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid); err == nil {
+	fixture.request("start-renamed " + renamedPath)
+	if _, err := captureProcessCorrelation(fixture.command.Process.Pid, fixture.productPID, fixture.obsPID); err == nil {
 		t.Fatal("late renamed producer accepted")
 	}
-	stop(renamed)
-	stop(obs)
-	obs = startSleep()
-	end, err := captureProcessCorrelation(os.Getpid(), product.Process.Pid, obs.Process.Pid)
+	fixture.request("stop-extra")
+	fixture.request("start-unexpected")
+	if _, err := captureProcessCorrelation(fixture.command.Process.Pid, fixture.productPID, fixture.obsPID); err == nil {
+		t.Fatal("unexpected child inside dedicated fixture accepted")
+	}
+	fixture.request("stop-extra")
+	fixture.obsPID = fixture.requestPID("restart-obs")
+	end, err := captureProcessCorrelation(fixture.command.Process.Pid, fixture.productPID, fixture.obsPID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if end.SHA256 == start.SHA256 {
 		t.Fatal("process-tree drift was not observable")
 	}
-	if _, err := captureProcessCorrelation(os.Getpid(), 99999999, obs.Process.Pid); err == nil {
+	if _, err := captureProcessCorrelation(fixture.command.Process.Pid, 99999999, fixture.obsPID); err == nil {
 		t.Fatal("unreadable /proc identity accepted")
+	}
+}
+
+type processCorrelationFixture struct {
+	t          *testing.T
+	command    *exec.Cmd
+	input      io.WriteCloser
+	output     *bufio.Scanner
+	productPID int
+	obsPID     int
+}
+
+func startProcessCorrelationFixture(t *testing.T) *processCorrelationFixture {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestProcessCorrelationFixtureParent$")
+	command.Env = append(os.Environ(), "DOT65_PROCESS_CORRELATION_FIXTURE=1")
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Stderr = os.Stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &processCorrelationFixture{t: t, command: command, input: input, output: bufio.NewScanner(stdout)}
+	fixture.productPID = fixture.readPID("product")
+	fixture.obsPID = fixture.readPID("obs")
+	return fixture
+}
+
+func (fixture *processCorrelationFixture) readLine() string {
+	fixture.t.Helper()
+	if !fixture.output.Scan() {
+		fixture.t.Fatalf("process-correlation fixture stopped: %v", fixture.output.Err())
+	}
+	return fixture.output.Text()
+}
+
+func (fixture *processCorrelationFixture) readPID(kind string) int {
+	fixture.t.Helper()
+	fields := strings.Fields(fixture.readLine())
+	if len(fields) != 2 || fields[0] != kind {
+		fixture.t.Fatalf("unexpected process-correlation fixture response: %q", strings.Join(fields, " "))
+	}
+	pid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		fixture.t.Fatal(err)
+	}
+	return pid
+}
+
+func (fixture *processCorrelationFixture) request(command string) {
+	fixture.t.Helper()
+	if _, err := fmt.Fprintln(fixture.input, command); err != nil {
+		fixture.t.Fatal(err)
+	}
+	if response := fixture.readLine(); response != "ok" {
+		fixture.t.Fatalf("process-correlation fixture command %q returned %q", command, response)
+	}
+}
+
+func (fixture *processCorrelationFixture) requestPID(command string) int {
+	fixture.t.Helper()
+	if _, err := fmt.Fprintln(fixture.input, command); err != nil {
+		fixture.t.Fatal(err)
+	}
+	return fixture.readPID("obs")
+}
+
+func (fixture *processCorrelationFixture) close() {
+	fixture.t.Helper()
+	if fixture.command.ProcessState != nil {
+		return
+	}
+	fixture.request("stop")
+	_ = fixture.input.Close()
+	if err := fixture.command.Wait(); err != nil {
+		fixture.t.Errorf("process-correlation fixture shutdown: %v", err)
+	}
+}
+
+func stopTestProcess(command *exec.Cmd) {
+	if command != nil && command.Process != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}
+}
+
+func TestProcessCorrelationFixtureParent(t *testing.T) {
+	if os.Getenv("DOT65_PROCESS_CORRELATION_FIXTURE") != "1" {
+		return
+	}
+	start := func(path string) *exec.Cmd {
+		command := exec.Command(path, "30")
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return command
+	}
+	product, obs := start("/usr/bin/sleep"), start("/usr/bin/sleep")
+	var extra *exec.Cmd
+	defer stopTestProcess(product)
+	defer stopTestProcess(obs)
+	defer stopTestProcess(extra)
+	fmt.Printf("product %d\nobs %d\n", product.Process.Pid, obs.Process.Pid)
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 {
+			t.Fatal("empty fixture command")
+		}
+		switch fields[0] {
+		case "start-renamed":
+			if len(fields) != 2 || extra != nil {
+				t.Fatal("invalid start-renamed fixture command")
+			}
+			extra = start(fields[1])
+			fmt.Println("ok")
+		case "start-unexpected":
+			if len(fields) != 1 || extra != nil {
+				t.Fatal("invalid start-unexpected fixture command")
+			}
+			extra = start("/usr/bin/sleep")
+			fmt.Println("ok")
+		case "stop-extra":
+			stopTestProcess(extra)
+			extra = nil
+			fmt.Println("ok")
+		case "restart-obs":
+			stopTestProcess(obs)
+			obs = start("/usr/bin/sleep")
+			fmt.Printf("obs %d\n", obs.Process.Pid)
+		case "stop":
+			fmt.Println("ok")
+			return
+		default:
+			t.Fatalf("unknown fixture command %q", fields[0])
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 
