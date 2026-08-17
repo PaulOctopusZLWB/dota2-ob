@@ -84,6 +84,22 @@ type Output struct {
 	Definitions   []Definition `json:"definitions"`
 	Values        []Value      `json:"values"`
 	Unavailable   []Value      `json:"unavailable"`
+	// ResolutionTable reports, per registry metric, whether it published or
+	// is unavailable and the precise reason, so the reviewer can distinguish a
+	// true source gap from a missing implementation branch.
+	ResolutionTable []Resolution `json:"resolution_table,omitempty"`
+}
+
+// Resolution is one registry metric's resolution for a match.
+type Resolution struct {
+	MetricID          string `json:"metric_id"`
+	CapabilityLevel   string `json:"capability_level"`
+	EpistemicClass    string `json:"epistemic_class"`
+	ReportLevel       string `json:"report_level"`
+	Published         bool   `json:"published"`
+	PublishedPlayers  int    `json:"published_players"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	EvidenceCount     int64  `json:"evidence_count"`
 }
 
 // CanonicalJSON returns the deterministic encoding.
@@ -139,10 +155,19 @@ type Calculator struct {
 	heroDamage      map[string]float64
 	heroHealing     map[string]float64
 	objectiveDamage map[string]float64
+	objectiveExcl   map[string]float64 // non-objective damage excluded (creeps etc.)
 	controlSeconds  map[string]float64
-	heroStateSecs   map[string]int64              // eligible hero-state seconds
+	heroStateSecs   map[string]map[int64]struct{} // distinct eligible second-grid bins
 	damageEvents    []damageEvent                 // for fight_damage_share
 	teams           map[string]map[string]float64 // team_id -> account -> networth (final)
+
+	// evidence: "account\x00metric" -> ordered fact seq ids that produced the
+	// metric's observations (fact_ids -> episode/phase/opportunity -> metric).
+	evidence map[string][]int64
+
+	// factsCoverage is the per-family availability from the match's facts
+	// summary, used to resolve per-metric field gates precisely.
+	factsCoverage map[string]bool
 }
 
 type damageEvent struct {
@@ -152,6 +177,7 @@ type damageEvent struct {
 	Value      float64
 	HeroTarget bool
 	Building   bool
+	FactSeq    int64
 }
 
 // NewCalculator creates a metric calculator bound to the participant list and
@@ -167,9 +193,84 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		xpDelta: map[string]float64{}, netWorthDelta: map[string]float64{},
 		goldEarned: map[string]float64{}, firstItemSec: map[string]float64{},
 		heroDamage: map[string]float64{}, heroHealing: map[string]float64{},
-		objectiveDamage: map[string]float64{}, controlSeconds: map[string]float64{},
-		heroStateSecs: map[string]int64{},
-		teams:         map[string]map[string]float64{},
+		objectiveDamage: map[string]float64{}, objectiveExcl: map[string]float64{},
+		controlSeconds: map[string]float64{},
+		heroStateSecs:  map[string]map[int64]struct{}{},
+		teams:          map[string]map[string]float64{},
+		evidence:       map[string][]int64{},
+		factsCoverage:  map[string]bool{},
+	}
+}
+
+// SetFactsCoverage records which fact families the accepted adapter actually
+// emitted for this match, so per-metric field gates resolve precisely instead
+// of a capability-level blanket reason.
+func (c *Calculator) SetFactsCoverage(covered []string) {
+	c.factsCoverage = map[string]bool{}
+	for _, f := range covered {
+		c.factsCoverage[f] = true
+	}
+}
+
+// MarkDerivedAvailable records a derived artifact (e.g. fight episodes or the
+// phase stream) as available for per-metric field-gate resolution.
+func (c *Calculator) MarkDerivedAvailable(key string) {
+	c.factsCoverage[key] = true
+}
+
+// familyAvailable reports whether a fact family (registry human-readable name
+// or adapter family constant) was emitted for the match. Families the adapter
+// always emits on the gated path (participant binding, calibrated clock) are
+// implicit requirements; adapter families not in the emitted set are absent.
+func (c *Calculator) familyAvailable(family string) bool {
+	for _, f := range adapterFamily(family) {
+		if f == "always" {
+			return true
+		}
+		if c.factsCoverage[f] {
+			return true
+		}
+	}
+	return false
+}
+
+// adapterFamily maps a registry required-fact-family name to the normalized
+// fact-family constants (or "always" for gates the pipeline guarantees). An
+// empty mapping means the family is not produced by the accepted adapter.
+func adapterFamily(name string) []string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "participant binding", "participant_binding", "binding", "owner binding", "ownership", "hero ownership", "player binding":
+		return []string{"always"}
+	case "game clock", "calibrated clock", "calibrated game clock", "game_clock":
+		return []string{"always"}
+	case "hero position", "positions", "position", "hero positions", "enemy positions":
+		return []string{facts.FamilyHeroState}
+	case "alive state", "alive/status", "alive/positions", "health", "status":
+		return []string{facts.FamilyHeroState}
+	case "damage events", "damage/control events", "combat", "combat/control", "damage/control", "hero damage events", "damage":
+		return []string{facts.FamilyCombat}
+	case "heal", "healing event", "healing events":
+		return []string{facts.FamilyCombat}
+	case "item use", "item consumption", "purchase/combine events", "inventory lifecycle", "item", "items":
+		return []string{facts.FamilyItem}
+	case "ability", "ability/item definitions", "casts", "cast/impact", "ability casts", "cooldowns":
+		return []string{facts.FamilyAbility}
+	case "death/respawn", "death_respawn_buyback", "buyback", "buyback event", "death event", "hero death event", "buyback availability":
+		return []string{facts.FamilyDeathRespawn}
+	case "modifier lifecycle", "modifiers", "smoke modifiers", "smoke lifecycle", "modifier":
+		return []string{facts.FamilyModifier}
+	case "objective events", "objectives", "objective", "real building entities", "tower", "buildings":
+		return []string{facts.FamilyObjective}
+	case "ward entity spawn", "ward coordinate/lifecycle", "ward polygon/lifecycle", "ward spawn/death/expiry", "vision":
+		return []string{facts.FamilyVision}
+	case "fight intervals", "fight interval", "fight windows", "fight window", "team fight windows":
+		return []string{"episodes_fight"}
+	case "phase rounds", "phase", "official phase", "phase/threat":
+		return []string{"phases"}
+	default:
+		// Geometry, creep lifecycle, rune state, team shapes, and other
+		// families the accepted adapter does not emit.
+		return nil
 	}
 }
 
@@ -204,15 +305,19 @@ func (c *Calculator) Feed(f *facts.Fact) {
 		switch drb.Kind {
 		case "death":
 			c.deaths[drb.AccountID]++
+			c.addEvidence(drb.AccountID, "death_count", f.Seq)
 			if drb.KillerAccount != "" {
 				c.kills[drb.KillerAccount]++
+				c.addEvidence(drb.KillerAccount, "kill_count", f.Seq)
 			}
 			for _, a := range drb.AssistAccounts {
 				c.assists[a]++
+				c.addEvidence(a, "assist_count", f.Seq)
 			}
 		case "buyback":
 			c.buybacks[drb.AccountID]++
 			c.buybackSeconds[drb.AccountID] = append(c.buybackSeconds[drb.AccountID], f.GameSecond)
+			c.addEvidence(drb.AccountID, "buyback_use_count", f.Seq)
 		}
 	case facts.FamilyCombat:
 		var cf facts.CombatFact
@@ -224,21 +329,30 @@ func (c *Calculator) Feed(f *facts.Fact) {
 		}
 		v := float64(*cf.Value)
 		isHero := cf.TargetAccount != ""
-		isBuilding := !isHero && isBuildingTargetName(cf.TargetName)
+		obj := isObjectiveTarget(cf.TargetName)
 		team := c.teamByAcct[cf.ActorAccount]
 		switch cf.Kind {
 		case "damage":
 			if isHero {
 				c.heroDamage[cf.ActorAccount] += v
-			} else {
+				c.addEvidence(cf.ActorAccount, "hero_damage_total", f.Seq)
+			} else if obj {
+				// Only configured objective entities (tower/rax/ancient/
+				// fort/shrine/Roshan/Tormentor) count as objective damage.
 				c.objectiveDamage[cf.ActorAccount] += v
+				c.addEvidence(cf.ActorAccount, "objective_damage_total", f.Seq)
+			} else {
+				// Lane/neutral creep damage and other non-objective targets
+				// are excluded attribution, preserved separately.
+				c.objectiveExcl[cf.ActorAccount] += v
 			}
 			c.damageEvents = append(c.damageEvents, damageEvent{
 				GameSecond: f.GameSecond, Actor: cf.ActorAccount, Team: team,
-				Value: v, HeroTarget: isHero, Building: isBuilding,
+				Value: v, HeroTarget: isHero, Building: obj, FactSeq: f.Seq,
 			})
 		case "heal":
 			c.heroHealing[cf.ActorAccount] += v
+			c.addEvidence(cf.ActorAccount, "hero_healing_total", f.Seq)
 		}
 	case facts.FamilyEconomy:
 		var es facts.EconomySample
@@ -250,14 +364,17 @@ func (c *Calculator) Feed(f *facts.Fact) {
 		}
 		if es.LastHits != nil && int64(*es.LastHits) > c.lastHits[es.AccountID] {
 			c.lastHits[es.AccountID] = int64(*es.LastHits)
+			c.addEvidence(es.AccountID, "last_hit_count", f.Seq)
 		}
 		if es.Xp != nil && float64(*es.Xp) > c.xpDelta[es.AccountID] {
 			c.xpDelta[es.AccountID] = float64(*es.Xp)
+			c.addEvidence(es.AccountID, "xp_delta", f.Seq)
 		}
 		if es.Networth != nil {
 			nw := float64(*es.Networth)
 			if nw > c.netWorthDelta[es.AccountID] {
 				c.netWorthDelta[es.AccountID] = nw
+				c.addEvidence(es.AccountID, "net_worth_delta", f.Seq)
 			}
 			if c.teams[c.teamByAcct[es.AccountID]] == nil {
 				c.teams[c.teamByAcct[es.AccountID]] = map[string]float64{}
@@ -266,6 +383,7 @@ func (c *Calculator) Feed(f *facts.Fact) {
 		}
 		if es.Gold != nil {
 			c.goldEarned[es.AccountID] += float64(*es.Gold)
+			c.addEvidence(es.AccountID, "gold_earned", f.Seq)
 		}
 	case facts.FamilyItem:
 		var it facts.ItemFact
@@ -283,9 +401,64 @@ func (c *Calculator) Feed(f *facts.Fact) {
 			return
 		}
 		if hs.AccountID != "" && hs.PosX != nil && hs.PosY != nil {
-			c.heroStateSecs[hs.AccountID]++
+			// Count distinct calibrated second-grid bins, not raw samples:
+			// samples arrive at ~0.5s cadence but the metric is seconds.
+			bin := int64(f.GameSecond)
+			if bin >= 0 {
+				if c.heroStateSecs[hs.AccountID] == nil {
+					c.heroStateSecs[hs.AccountID] = map[int64]struct{}{}
+				}
+				c.heroStateSecs[hs.AccountID][bin] = struct{}{}
+				c.addEvidence(hs.AccountID, "opportunity_duration_seconds", f.Seq)
+			}
 		}
 	}
+}
+
+// addEvidence appends a fact seq to the metric's evidence lineage, avoiding
+// unbounded growth for high-frequency facts (bounded to a representative
+// sample of the earliest observations).
+func (c *Calculator) addEvidence(account, metric string, seq int64) {
+	key := account + "\x00" + metric
+	ev := c.evidence[key]
+	if len(ev) < 64 {
+		c.evidence[key] = append(ev, seq)
+	}
+}
+
+// evidenceFor returns the collected fact seq ids for an account+metric.
+func (c *Calculator) evidenceFor(account, metric string) []int64 {
+	return c.evidence[account+"\x00"+metric]
+}
+
+// derivedEvidence resolves episode/phase evidence for metrics computed from
+// the episodes/phases artifacts (e.g. fight_damage_share, fight
+// participation), so the lineage chain is not empty for derived rows.
+func (c *Calculator) derivedEvidence(metricID, acct string, fightParticipation map[string]int64, fightDamageShare map[string]*shareVal, eps *episodes.Output, ph *phase.Output) []int64 {
+	switch metricID {
+	case "fight_participation_count", "fight_damage_share":
+		if eps != nil {
+			var out []int64
+			for i := range eps.Episodes {
+				e := &eps.Episodes[i]
+				if e.Kind != episodes.KindFight {
+					continue
+				}
+				participates := false
+				for _, p := range e.Participants {
+					if p == acct {
+						participates = true
+						break
+					}
+				}
+				if participates {
+					out = append(out, e.EvidenceIDs...)
+				}
+			}
+			return out
+		}
+	}
+	return nil
 }
 
 // Result builds the Output artifact. It resolves every registry metric for
@@ -353,6 +526,28 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 				v.EpistemicClass = ClassUnavailable
 				out.Unavailable = append(out.Unavailable, v)
 			} else {
+				// Fact -> episode/phase/opportunity -> metric evidence lineage.
+				ev := c.evidenceFor(acct, m.ID)
+				if len(ev) == 0 {
+					ev = c.derivedEvidence(m.ID, acct, fightParticipation, fightDamageShare, eps, ph)
+				}
+				if len(ev) == 0 {
+					// No evidence chain means the metric cannot be audited;
+					// fail closed rather than publish an untraceable value.
+					v.EpistemicClass = ClassUnavailable
+					v.UnavailableReason = "no_evidence_lineage"
+					v.Value = nil
+					v.IntValue = nil
+					v.Numerator = nil
+					v.Denominator = nil
+					v.Confidence = 0
+					out.Unavailable = append(out.Unavailable, v)
+					continue
+				}
+				v.EvidenceIDs = append([]int64(nil), ev...)
+				if v.EvidenceCount == 0 {
+					v.EvidenceCount = int64(len(ev))
+				}
 				out.Values = append(out.Values, v)
 			}
 		}
@@ -360,7 +555,7 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 
 	// Match-level metrics.
 	if phaseDuration != nil {
-		out.Values = append(out.Values, phaseDurationValue(reg, c.matchID, phaseDuration))
+		out.Values = append(out.Values, phaseDurationValue(reg, c.matchID, ph, phaseDuration))
 	} else {
 		out.Unavailable = append(out.Unavailable, phaseDurationUnavailable(reg, c.matchID))
 	}
@@ -377,7 +572,50 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 		}
 		return out.Unavailable[i].MetricID < out.Unavailable[j].MetricID
 	})
+	out.ResolutionTable = buildResolutionTable(out)
 	return out
+}
+
+// buildResolutionTable derives the per-metric resolution summary.
+func buildResolutionTable(o *Output) []Resolution {
+	pubByMetric := map[string]int{}
+	evByMetric := map[string]int64{}
+	for _, v := range o.Values {
+		pubByMetric[v.MetricID]++
+		evByMetric[v.MetricID] += v.EvidenceCount
+	}
+	unavByMetric := map[string]string{}
+	classByMetric := map[string]string{}
+	for _, v := range o.Unavailable {
+		if _, ok := unavByMetric[v.MetricID]; !ok {
+			unavByMetric[v.MetricID] = v.UnavailableReason
+		}
+		classByMetric[v.MetricID] = v.EpistemicClass
+	}
+	table := []Resolution{}
+	for i := range o.Definitions {
+		d := &o.Definitions[i]
+		r := Resolution{
+			MetricID: d.ID, CapabilityLevel: d.CapabilityLevel,
+			EpistemicClass: d.EpistemicClass, ReportLevel: d.ReportLevel,
+			PublishedPlayers: pubByMetric[d.ID],
+		}
+		if r.PublishedPlayers > 0 {
+			r.Published = true
+			r.EvidenceCount = evByMetric[d.ID]
+		} else {
+			r.UnavailableReason = unavByMetric[d.ID]
+			if r.UnavailableReason == "" {
+				r.UnavailableReason = "not_applicable_for_any_participant"
+			}
+			if cls, ok := classByMetric[d.ID]; ok {
+				r.EpistemicClass = cls
+			}
+		}
+		table = append(table, r)
+	}
+	sort.Slice(table, func(i, j int) bool { return table[i].MetricID < table[j].MetricID })
+	return table
 }
 
 // computeMetric resolves one registry metric for one player. Published metrics
@@ -396,7 +634,7 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 	case "buyback_use_count":
 		v = c.countValue(c.buybacks[acct], m)
 	case "last_hit_count":
-		if !c.sawEconomy(acct) {
+		if len(c.evidenceFor(acct, "last_hit_count")) == 0 {
 			v.UnavailableReason = "last_hit_state_missing"
 		} else {
 			v = c.countValue(c.lastHits[acct], m)
@@ -404,25 +642,25 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 	case "deny_count":
 		v.UnavailableReason = "deny_counter_not_in_accepted_adapter"
 	case "xp_delta":
-		if !c.sawEconomy(acct) {
+		if len(c.evidenceFor(acct, "xp_delta")) == 0 {
 			v.UnavailableReason = "xp_state_missing"
 		} else {
 			v = c.floatValue(c.xpDelta[acct], m)
 		}
 	case "net_worth_delta":
-		if !c.sawEconomy(acct) {
+		if len(c.evidenceFor(acct, "net_worth_delta")) == 0 {
 			v.UnavailableReason = "networth_state_missing"
 		} else {
 			v = c.floatValue(c.netWorthDelta[acct], m)
 		}
 	case "gold_earned":
-		if !c.sawEconomy(acct) {
+		if len(c.evidenceFor(acct, "gold_earned")) == 0 {
 			v.UnavailableReason = "gold_state_missing"
 		} else {
 			v = c.floatValue(c.goldEarned[acct], m)
 		}
 	case "team_resource_share":
-		if !c.sawEconomy(acct) {
+		if len(c.evidenceFor(acct, "net_worth_delta")) == 0 {
 			v.UnavailableReason = "networth_state_missing"
 		} else if teamNetWorth[team] <= 0 {
 			v.UnavailableReason = "team_networth_missing"
@@ -436,11 +674,27 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 		// is interval-ambiguous (starting items yield pregame negatives).
 		v.UnavailableReason = "inventory_lifecycle_not_in_accepted_adapter"
 	case "objective_damage_total":
-		v = c.floatValue(c.objectiveDamage[acct], m)
+		if c.objectiveDamage[acct] <= 0 && len(c.evidenceFor(acct, "objective_damage_total")) == 0 {
+			v.UnavailableReason = "objective_damage_missing"
+		} else {
+			v = c.floatValue(c.objectiveDamage[acct], m)
+			v.ExcludedCount = int64(c.objectiveExcl[acct])
+			v.EvidenceCount = int64(len(c.evidenceFor(acct, "objective_damage_total")))
+		}
 	case "fight_participation_count":
 		v = c.countValue(fightParticipation[acct], m)
 	case "opportunity_duration_seconds":
-		v = c.countValue(c.heroStateSecs[acct], m)
+		bins := c.heroStateSecs[acct]
+		if len(bins) == 0 {
+			v.UnavailableReason = "position_state_missing"
+		} else {
+			n := int64(len(bins))
+			v = c.countValue(n, m)
+			if phaseDuration != nil {
+				v.Denominator = phaseDuration
+			}
+			v.EvidenceCount = int64(len(c.evidenceFor(acct, "opportunity_duration_seconds")))
+		}
 	case "hero_damage_total":
 		v = c.floatValue(c.heroDamage[acct], m)
 	case "hero_healing_total":
@@ -485,17 +739,24 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 }
 
 // contractReason returns the precise reason for a metric whose required
-// inputs are not produced by the accepted parser, derived from its registry
-// contract rather than a fabricated denominator.
+// inputs are not produced by the accepted adapter. It names the specific
+// required fact families/field gates that are missing for this match (from the
+// actual facts coverage) rather than a blanket capability-level string, so a
+// true source gap is distinguishable from a missing implementation branch.
 func (c *Calculator) contractReason(m *Metric) string {
-	switch m.CapabilityLevel {
-	case CapabilityV3:
-		return "v3_modelled_inputs_not_in_accepted_adapter:" + strings.Join(m.RequiredFactFamilies, "|")
-	case CapabilityV2:
-		return "v2_opportunity_inputs_not_in_accepted_adapter:" + strings.Join(m.RequiredFactFamilies, "|")
-	default:
-		return "required_fact_families_not_available:" + strings.Join(m.RequiredFactFamilies, "|")
+	var missing []string
+	for _, fam := range m.RequiredFactFamilies {
+		if !c.familyAvailable(fam) {
+			missing = append(missing, fam)
+		}
 	}
+	if len(missing) > 0 {
+		return fmt.Sprintf("%s_input_missing_for_%s:%s", strings.ToLower(m.CapabilityLevel), m.ID, strings.Join(missing, "|"))
+	}
+	// All declared families present but the metric is still unsupported by
+	// this adapter's field gates (e.g. lane geometry / creep lifecycle that
+	// the registry lists but the adapter does not emit).
+	return fmt.Sprintf("%s_field_gates_not_met:%s", strings.ToLower(m.CapabilityLevel), strings.Join(m.RequiredFactFamilies, "|"))
 }
 
 func (c *Calculator) countValue(n int64, m *Metric) Value {
@@ -524,7 +785,7 @@ func (c *Calculator) floatValue(f float64, m *Metric) Value {
 }
 
 func (c *Calculator) sawEconomy(acct string) bool {
-	return c.lastHits[acct] > 0 || c.netWorthDelta[acct] > 0 || c.xpDelta[acct] > 0
+	return len(c.evidenceFor(acct, "net_worth_delta")) > 0 || len(c.evidenceFor(acct, "xp_delta")) > 0 || len(c.evidenceFor(acct, "gold_earned")) > 0
 }
 
 type shareVal struct {
@@ -593,15 +854,20 @@ func teamOf(teamByAcct map[string]string, acct string) string {
 	return teamByAcct[acct]
 }
 
-// isBuildingTargetName reports whether a damage target name is a real
-// structure (tower/rax/ancient/fort). Temporary structures and summoned units
-// never count as objective entities.
-func isBuildingTargetName(name string) bool {
+// isObjectiveTarget reports whether a damage target name is a configured
+// objective entity: tower, barracks, ancient/fort, shrine, Roshan, or
+// Tormentor. Temporary structures and summoned units never count as objective
+// entities, and lane/neutral creeps are explicitly excluded (their damage is
+// preserved separately as excluded attribution).
+func isObjectiveTarget(name string) bool {
 	if name == "" {
 		return false
 	}
 	lower := strings.ToLower(name)
-	for _, marker := range []string{"tower", "rax", "ancient", "fort", "shrine"} {
+	for _, marker := range []string{
+		"tower", "rax", "ancient", "fort", "shrine",
+		"roshan", "tormentor",
+	} {
 		if strings.Contains(lower, marker) {
 			return true
 		}
@@ -623,12 +889,20 @@ func (c *Calculator) computePhaseDuration(ph *phase.Output) *float64 {
 	return &total
 }
 
-func phaseDurationValue(reg *Registry, matchID string, dur *float64) Value {
+func phaseDurationValue(reg *Registry, matchID string, ph *phase.Output, dur *float64) Value {
 	v := Value{
 		MetricID: "phase_duration_seconds", Name: "Phase duration (match)",
 		ReportLevel: "match", Unit: "seconds", EpistemicClass: ClassDerived,
 		CapabilityLevel: CapabilityV1, MetricVersion: "1.0.0",
 		Value: dur, SampleCount: 1, Confidence: 1.0, Direction: "context_only",
+	}
+	if ph != nil {
+		var ev []int64
+		for i := range ph.Intervals {
+			ev = append(ev, ph.Intervals[i].EvidenceSeqs...)
+		}
+		v.EvidenceIDs = ev
+		v.EvidenceCount = int64(len(ev))
 	}
 	return v
 }

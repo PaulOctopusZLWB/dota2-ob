@@ -2,8 +2,11 @@
 // overlay store and an immutable audit log. Machine output is never mutated;
 // every human correction retains the machine value, the effective value, the
 // author, reason, timestamp, evidence, and the algorithm version that produced
-// the machine value. Read-only pages can never mutate analytical state; review
-// mutations bind to the loopback server and require a local session token.
+// the machine value. Machine truth is resolved server-side from persisted
+// artifacts — a caller-supplied previous value that disagrees with the machine
+// value is rejected (tamper detection). Read-only pages can never mutate
+// analytical state; review mutations bind to the loopback server and require a
+// local session token.
 package review
 
 import (
@@ -31,6 +34,16 @@ const (
 	KindRoleOverride Kind = "role_override"
 )
 
+// MachineTruth is the authoritative machine-side facts for one correction:
+// the immutable machine value, the replay content identity, and the machine
+// algorithm/rule version that produced it. These are resolved server-side and
+// never accepted from the mutation payload.
+type MachineTruth struct {
+	ReplaySHA256     string          `json:"replay_sha256,omitempty"`
+	AlgorithmVersion string          `json:"algorithm_version"`
+	MachineValue     json.RawMessage `json:"machine_value"`
+}
+
 // Correction is one human review mutation. The machine output remains
 // immutable and inspectable; this record retains the full before/after pair.
 type Correction struct {
@@ -44,7 +57,7 @@ type Correction struct {
 	Reason           string `json:"reason"`
 	AppliedAt        string `json:"applied_at"`
 	AlgorithmVersion string `json:"algorithm_version"`
-	// PreviousValue is the machine (or previously-effective) value.
+	// PreviousValue is the authoritative machine value (resolved server-side).
 	PreviousValue json.RawMessage `json:"previous_value"`
 	// EffectiveValue is the corrected value.
 	EffectiveValue json.RawMessage `json:"effective_value"`
@@ -59,6 +72,7 @@ type Review struct {
 	SchemaVersion string       `json:"schema_version"`
 	RuleVersion   string       `json:"rule_version"`
 	MatchID       string       `json:"match_id"`
+	ReplaySHA256  string       `json:"replay_sha256,omitempty"`
 	Corrections   []Correction `json:"corrections"`
 	// EffectivePhaseIntervals is the phase stream with accepted corrections
 	// applied (machine output preserved separately in phases.json).
@@ -103,9 +117,28 @@ func New(root string) (*Store, error) {
 	return &Store{Root: root}, nil
 }
 
-// Path returns the review document path for a match.
+// Path returns the review document path for a match. The match id is
+// validated so no path can escape the data root (defense in depth beyond the
+// API's catalog gate).
 func (s *Store) Path(matchID string) string {
+	if !ValidMatchID(matchID) {
+		return filepath.Join(s.Root, "matches", "invalid", store.ArtifactCorrections)
+	}
 	return filepath.Join(s.Root, "matches", matchID, store.ArtifactCorrections)
+}
+
+// ValidMatchID rejects match ids that could traverse or escape the matches
+// directory (path separators, dot segments, control chars).
+func ValidMatchID(matchID string) bool {
+	if matchID == "" {
+		return false
+	}
+	for _, r := range matchID {
+		if r == '/' || r == '\\' || r == '.' || r == '\x00' || r < 0x20 {
+			return false
+		}
+	}
+	return true
 }
 
 // AuditPath returns the shared audit log path.
@@ -117,20 +150,7 @@ func (s *Store) AuditPath() string {
 func (s *Store) Load(matchID string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var r Review
-	if err := s.readJSON(s.Path(matchID), &r); err != nil {
-		if os.IsNotExist(err) {
-			return &Review{
-				SchemaVersion: version.CorrectionSchema,
-				RuleVersion:   version.CorrectionRuleVersion,
-				MatchID:       matchID,
-				Corrections:   []Correction{},
-				ReviewStatus:  "pending",
-			}, nil
-		}
-		return nil, err
-	}
-	return &r, nil
+	return s.loadUnlocked(matchID)
 }
 
 // LoadByStore loads a review document via a replay store path (same layout).
@@ -142,15 +162,30 @@ func LoadByStore(st *store.Store, matchID string) (*Review, error) {
 	return s.Load(matchID)
 }
 
-// Add appends one correction and returns its deterministic id. Machine output
-// is preserved by construction: the caller supplies the previous (machine)
-// value and the effective value.
-func (s *Store) Add(matchID string, c Correction) (*Review, error) {
+// AddAuthoritative appends one correction whose machine truth (previous value,
+// replay SHA, algorithm version) was resolved server-side. If the caller
+// supplied a previous value that disagrees with the authoritative machine
+// value, the correction is rejected as tampered. Machine output is preserved
+// by construction.
+func (s *Store) AddAuthoritative(matchID string, c Correction, truth MachineTruth) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, err := s.loadUnlocked(matchID)
 	if err != nil {
 		return nil, err
+	}
+	// Tamper detection: caller-supplied previous value must match machine.
+	if len(c.PreviousValue) > 0 && len(truth.MachineValue) > 0 {
+		if !jsonEqual(c.PreviousValue, truth.MachineValue) {
+			return nil, fmt.Errorf("review: previous value disagrees with machine truth (tamper)")
+		}
+	}
+	// Authoritative fields always come from server-side truth.
+	c.PreviousValue = append(json.RawMessage(nil), truth.MachineValue...)
+	c.ReplaySHA256 = truth.ReplaySHA256
+	c.AlgorithmVersion = truth.AlgorithmVersion
+	if c.AlgorithmVersion == "" {
+		c.AlgorithmVersion = version.PhaseRuleVersion
 	}
 	seq := int64(len(r.Corrections) + 1)
 	c.ID = fmt.Sprintf("corr-%s-%04d", matchID, seq)
@@ -159,10 +194,10 @@ func (s *Store) Add(matchID string, c Correction) (*Review, error) {
 	if c.AppliedAt == "" {
 		c.AppliedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	if c.AlgorithmVersion == "" {
-		c.AlgorithmVersion = version.MetricsRuleVersion
-	}
 	r.Corrections = append(r.Corrections, c)
+	if r.ReplaySHA256 == "" {
+		r.ReplaySHA256 = truth.ReplaySHA256
+	}
 	if r.ReviewStatus == "" || r.ReviewStatus == "pending" {
 		r.ReviewStatus = "in_progress"
 	}
@@ -172,6 +207,28 @@ func (s *Store) Add(matchID string, c Correction) (*Review, error) {
 	if err := s.appendAudit(matchID, AuditEntry{
 		Author: c.Author, Action: "correction_added", MatchID: matchID,
 		CorrectionID: c.ID, Summary: fmt.Sprintf("%s %s", c.Kind, c.EventRef),
+	}); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// SetEffectivePhases persists the applied effective phase overlay (computed
+// from machine intervals + corrections) and audits the update.
+func (s *Store) SetEffectivePhases(matchID string, effective []json.RawMessage, author string) (*Review, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.loadUnlocked(matchID)
+	if err != nil {
+		return nil, err
+	}
+	r.EffectivePhaseIntervals = effective
+	if err := s.writeJSON(s.Path(matchID), r); err != nil {
+		return nil, err
+	}
+	if err := s.appendAudit(matchID, AuditEntry{
+		Author: author, Action: "effective_phase_overlay", MatchID: matchID,
+		Summary: fmt.Sprintf("applied %d intervals", len(effective)),
 	}); err != nil {
 		return nil, err
 	}
@@ -265,4 +322,47 @@ func (s *Store) LoadAudit() (*Audit, error) {
 	entries := append([]AuditEntry(nil), a.Entries...)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Seq > entries[j].Seq })
 	return &Audit{SchemaVersion: a.SchemaVersion, Entries: entries}, nil
+}
+
+// jsonEqual reports deep JSON semantic equality of two raw messages
+// (field-order and formatting insensitive).
+func jsonEqual(a, b json.RawMessage) bool {
+	var av, bv interface{}
+	if err := json.Unmarshal(a, &av); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		return false
+	}
+	return fmt.Sprintf("%#v", av) == fmt.Sprintf("%#v", bv)
+}
+
+// ApplyPhaseOverlay computes the effective phase interval stream by applying
+// phase corrections over the machine intervals. It never mutates the machine
+// intervals; corrections are applied by event_ref match on the machine
+// interval id, replacing the machine interval with the effective value.
+func ApplyPhaseOverlay(machine []json.RawMessage, corrections []Correction) []json.RawMessage {
+	effective := append([]json.RawMessage(nil), machine...)
+	byRef := map[string]int{}
+	for i := range effective {
+		var m map[string]interface{}
+		if err := json.Unmarshal(effective[i], &m); err != nil {
+			continue
+		}
+		if id, ok := m["event_ref"].(string); ok {
+			byRef[id] = i
+		}
+	}
+	for i := range corrections {
+		c := &corrections[i]
+		if c.Kind != KindPhaseInterval {
+			continue
+		}
+		idx, ok := byRef[c.EventRef]
+		if !ok {
+			continue
+		}
+		effective[idx] = append(json.RawMessage(nil), c.EffectiveValue...)
+	}
+	return effective
 }

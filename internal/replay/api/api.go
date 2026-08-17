@@ -191,7 +191,18 @@ func (s *Server) loadReport(matchID string) (*report.Report, error) {
 		}
 		return &rep, nil
 	}
-	return report.Build(s.Store, matchID, s.RoleReg, s.Overrides)
+	return report.Build(s.Store, matchID, s.RoleReg, s.effectiveOverrides())
+}
+
+// effectiveOverrides returns the authoritative data-root override store when
+// present (review mutations write here), falling back to the serve-time
+// overrides.
+func (s *Server) effectiveOverrides() *roles.OverrideFile {
+	var of roles.OverrideFile
+	if err := s.Store.ReadJSONFile(s.Store.Root+"/role-overrides-effective.json", &of); err == nil {
+		return &of
+	}
+	return s.Overrides
 }
 
 // timeline merges the phase stream and episodes into one renderable timeline.
@@ -274,7 +285,18 @@ func (s *Server) tracks(matchID string) tracks {
 	return t
 }
 
-// handlePlayer aggregates one player's matches from the catalog.
+// corpusScoresFor loads the corpus-level scoring catalog (players, teams,
+// per-match rows). Returns nil when absent.
+func (s *Server) corpusScoresFor() *scoring.CorpusScores {
+	var cs scoring.CorpusScores
+	if err := s.Store.ReadJSONFile(s.Store.Root+"/scores-corpus.json", &cs); err != nil {
+		return nil
+	}
+	return &cs
+}
+
+// handlePlayer serves one player's tournament profile (same-role aggregation,
+// radar, totals, subject coverage) plus per-match drilldown rows.
 func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -294,6 +316,15 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 	out := map[string]interface{}{
 		"account_id": accountID,
 		"matches":    []map[string]interface{}{},
+	}
+	// Player-tournament snapshot (the scoring product grain).
+	if cs := s.corpusScoresFor(); cs != nil {
+		for _, ps := range cs.Players {
+			if ps.AccountID == accountID {
+				out["score"] = ps
+				break
+			}
+		}
 	}
 	for _, row := range cat.Matches {
 		rep, err := s.loadReport(row.MatchID)
@@ -319,7 +350,7 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 					if ps.AccountID != accountID {
 						continue
 					}
-					entry["score"] = ps
+					entry["match_metrics"] = ps.Metrics
 					break
 				}
 			}
@@ -329,7 +360,9 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ReportSchema, Data: out})
 }
 
-// handleTeam aggregates one team's matches from the catalog.
+// handleTeam serves one team's tournament profile (derived team scoring
+// registry) plus per-match player drilldown rows. The team score is computed
+// from the persisted corpus catalog, not hard-coded.
 func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -350,11 +383,13 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 		"team_id": teamID,
 		"matches": []map[string]interface{}{},
 	}
-	teamScore := map[string]interface{}{
-		"team_id":   teamID,
-		"axes":      []interface{}{},
-		"published": false,
-		"reasons":   []string{"team_scoring_registry_not_defined"},
+	if cs := s.corpusScoresFor(); cs != nil {
+		for _, ts := range cs.Teams {
+			if ts.TeamID == teamID {
+				out["team_score"] = ts
+				break
+			}
+		}
 	}
 	for _, row := range cat.Matches {
 		rep, err := s.loadReport(row.MatchID)
@@ -382,7 +417,12 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	out["team_score"] = teamScore
+	if _, ok := out["team_score"]; !ok {
+		out["team_score"] = map[string]interface{}{
+			"team_id": teamID, "axes": map[string]interface{}{}, "published": false,
+			"reasons": []string{"team_not_in_persisted_corpus"},
+		}
+	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ReportSchema, Data: out})
 }
 

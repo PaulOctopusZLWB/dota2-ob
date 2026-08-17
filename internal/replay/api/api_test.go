@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -383,7 +384,7 @@ func TestScoresEndpoint404WhenAbsent(t *testing.T) {
 }
 
 // TestReviewMutationWithTokenPersistsCorrection binds a review store + token
-// and verifies a phase correction is persisted with full provenance.
+// and verifies a phase correction is persisted with server-side machine truth.
 func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	st := testStore(t)
 	reg := testRoleRegistry(t)
@@ -396,7 +397,9 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := `{"match_id":"m1","author":"paul","reason":"moved boundary","previous_value":{"global_phase":"laning","start":0,"end":100},"effective_value":{"global_phase":"midgame","start":50,"end":100}}`
+	// The fixture store has a machine phase interval 0-100 (laning); the
+	// correction references it and supplies a matching previous value.
+	body := `{"match_id":"m1","author":"paul","reason":"moved boundary","event_ref":"interval@0-100","previous_value":{"start_game_second":0,"end_game_second":100,"global_phase":"laning","round_index":0,"rule_version":"","event_ref":"interval@0-100"},"effective_value":{"start_game_second":50,"end_game_second":100,"global_phase":"midgame"}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)
@@ -413,6 +416,7 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 				ID               string `json:"id"`
 				Author           string `json:"author"`
 				AlgorithmVersion string `json:"algorithm_version"`
+				ReplaySHA256     string `json:"replay_sha256"`
 				Reason           string `json:"reason"`
 			} `json:"corrections"`
 		} `json:"data"`
@@ -426,6 +430,114 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	c := out.Data.Corrections[0]
 	if c.Author != "paul" || c.Reason == "" || c.AlgorithmVersion == "" || c.ID == "" {
 		t.Fatalf("correction provenance incomplete: %+v", c)
+	}
+	// Effective phase overlay persisted.
+	var reviewData struct {
+		Data struct {
+			EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+			ReplaySHA256            string            `json:"replay_sha256"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/reviews/queue", &reviewData); code != 200 {
+		t.Fatalf("queue status %d", code)
+	}
+}
+
+// TestReviewMutationRejectsTamperedMachineValue proves a fabricated previous
+// value is rejected with 409 (server-side machine truth wins).
+func TestReviewMutationRejectsTamperedMachineValue(t *testing.T) {
+	st := testStore(t)
+	reg := testRoleRegistry(t)
+	reg2, sc := testContracts(t)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"match_id":"m1","author":"paul","reason":"x","event_ref":"interval@0-100","previous_value":{"global_phase":"decisive"},"effective_value":{"global_phase":"midgame"}}`
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
+	req.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("tampered correction status=%d want 409", resp.StatusCode)
+	}
+}
+
+// TestRoleOverridePersistsToAuthoritativeStore proves a role override is
+// written to the data-root override store (effective) and audited.
+func TestRoleOverridePersistsToAuthoritativeStore(t *testing.T) {
+	st := testStore(t)
+	reg := testRoleRegistry(t)
+	reg2, sc := testContracts(t)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"match_id":"m1","account_id":"1000","nominal_role":"2","author":"paul","reason":"role swap observed"}`
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/roles/overrides", strings.NewReader(body))
+	req.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("override status=%d", resp.StatusCode)
+	}
+	var of struct {
+		Overrides []struct {
+			MatchID     string `json:"match_id"`
+			AccountID   string `json:"account_id"`
+			NominalRole string `json:"nominal_role"`
+			Reason      string `json:"reason"`
+			AppliedAt   string `json:"applied_at"`
+		} `json:"overrides"`
+	}
+	if err := st.ReadJSONFile(st.Root+"/role-overrides-effective.json", &of); err != nil {
+		t.Fatalf("effective override file missing: %v", err)
+	}
+	if len(of.Overrides) != 1 || of.Overrides[0].NominalRole != "2" || of.Overrides[0].Reason == "" || of.Overrides[0].AppliedAt == "" {
+		t.Fatalf("override not effective: %+v", of.Overrides)
+	}
+}
+
+// TestMutationRejectsTraversalMatchID proves out-of-root writes are blocked.
+func TestMutationRejectsTraversalMatchID(t *testing.T) {
+	st := testStore(t)
+	reg := testRoleRegistry(t)
+	reg2, sc := testContracts(t)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"match_id":"../../escaped","author":"paul","reason":"x","event_ref":"interval@0-100","previous_value":{"global_phase":"laning"},"effective_value":{"global_phase":"midgame"}}`
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
+	req.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("traversal status=%d want 400", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(st.Root, "..", "escaped", "corrections.json")); err == nil {
+		t.Fatal("traversal write escaped the data root")
 	}
 }
 

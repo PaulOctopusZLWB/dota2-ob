@@ -128,7 +128,7 @@ func TestFightDamageShare(t *testing.T) {
 	calc.Feed(dmg("b1", "a1", 100, 107))
 	eps := &episodes.Output{
 		Episodes: []episodes.Episode{
-			{Kind: episodes.KindFight, StartGameSecond: 100, EndGameSecond: 120, Participants: []string{"a1", "a2", "b1"}},
+			{Kind: episodes.KindFight, StartGameSecond: 100, EndGameSecond: 120, Participants: []string{"a1", "a2", "b1"}, EvidenceIDs: []int64{101, 102, 103}},
 		},
 	}
 	out := calc.Result(eps, nil)
@@ -205,6 +205,131 @@ func TestRegistryResolutionComplete(t *testing.T) {
 	}
 }
 
+// TestObjectiveDamageOnlyConfiguredTargets proves objective_damage_total only
+// counts configured objective entities (tower/rax/ancient/fort/shrine/Roshan/
+// Tormentor); lane/neutral creep damage is excluded attribution, never summed
+// into the objective total.
+func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
+	dmg := func(actor, target string, val int64, seq int64) *facts.Fact {
+		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetName: target, Value: &val})}
+	}
+	calc.Feed(dmg("a1", "npc_dota_goodguys_tower1_mid", 5000, 1))
+	calc.Feed(dmg("a1", "npc_dota_goodguys_rax_melee_top", 3000, 2))
+	calc.Feed(dmg("a1", "npc_dota_roshan", 2500, 3))
+	// Lane/neutral creeps must NOT count as objective damage.
+	calc.Feed(dmg("a1", "npc_dota_creep_lane", 999999, 4))
+	calc.Feed(dmg("a1", "npc_dota_neutral", 888888, 5))
+	out := calc.Result(nil, nil)
+	var obj *Value
+	for i := range out.Values {
+		if out.Values[i].MetricID == "objective_damage_total" && out.Values[i].AccountID == "a1" {
+			obj = &out.Values[i]
+		}
+	}
+	if obj == nil {
+		t.Fatal("objective_damage_total not published for a1")
+	}
+	if *obj.Value != 10500 {
+		t.Fatalf("objective_damage_total=%v want 10500 (tower+rax+roshan only)", *obj.Value)
+	}
+	if obj.ExcludedCount != 1888887 {
+		t.Fatalf("excluded=%d want 1888887 (creep+neutral damage preserved separately)", obj.ExcludedCount)
+	}
+	if len(obj.EvidenceIDs) == 0 {
+		t.Fatal("objective_damage_total has no evidence lineage")
+	}
+}
+
+// TestOpportunityDurationCountsSecondsNotSamples proves opportunity seconds
+// counts distinct calibrated second-grid bins, so ~0.5s-cadence samples in the
+// same second contribute one eligible second, never more.
+func TestOpportunityDurationCountsSecondsNotSamples(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1"})
+	pos := func(sec float64, seq int64) *facts.Fact {
+		x, y := 1.0, 2.0
+		return &facts.Fact{Family: facts.FamilyHeroState, GameSecond: sec, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.HeroStateSample{AccountID: "a1", PosX: &x, PosY: &y})}
+	}
+	// Two samples at 0.0, one at 0.5, one at 1.0 → only seconds 0 and 1.
+	calc.Feed(pos(0.0, 1))
+	calc.Feed(pos(0.4, 2))
+	calc.Feed(pos(0.6, 3))
+	calc.Feed(pos(1.0, 4))
+	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 2}}}
+	out := calc.Result(nil, ph)
+	var v *Value
+	for i := range out.Values {
+		if out.Values[i].MetricID == "opportunity_duration_seconds" && out.Values[i].AccountID == "a1" {
+			v = &out.Values[i]
+		}
+	}
+	if v == nil {
+		t.Fatal("opportunity_duration_seconds not published")
+	}
+	if *v.Value != 2 {
+		t.Fatalf("opportunity_duration_seconds=%v want 2 distinct eligible seconds", *v.Value)
+	}
+}
+
+// TestPublishedEvidenceLineageNonEmpty proves every published value carries a
+// non-empty evidence_ids chain (fact/episode/phase lineage).
+func TestPublishedEvidenceLineageNonEmpty(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
+	dmg := func(actor, target string, val int64, seq int64) *facts.Fact {
+		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetAccount: target, Value: &val})}
+	}
+	calc.Feed(dmg("a1", "b1", 100, 1))
+	eps := &episodes.Output{Episodes: []episodes.Episode{
+		{Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"a1", "b1"}, EvidenceIDs: []int64{1}},
+	}}
+	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{1}}}}
+	out := calc.Result(eps, ph)
+	for _, v := range out.Values {
+		if v.ReportLevel == "player" && len(v.EvidenceIDs) == 0 {
+			t.Fatalf("published metric %s/%s has empty evidence_ids", v.AccountID, v.MetricID)
+		}
+	}
+}
+
+// TestResolutionTableComplete proves the output carries a 52-row resolution
+// table (one per registry metric) distinguishing published from unavailable.
+func TestResolutionTableComplete(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
+	calc.SetFactsCoverage([]string{"combat_event"})
+	v := int64(50)
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, Seq: 1, SourceSeq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "b1", Value: &v})})
+	out := calc.Result(nil, nil)
+	if len(out.ResolutionTable) != 52 {
+		t.Fatalf("resolution table rows=%d want 52", len(out.ResolutionTable))
+	}
+	pub := 0
+	for _, r := range out.ResolutionTable {
+		if r.MetricID == "" {
+			t.Fatal("resolution row missing metric id")
+		}
+		if r.Published {
+			pub++
+		} else if r.UnavailableReason == "" {
+			t.Fatalf("unavailable metric %s missing reason", r.MetricID)
+		}
+	}
+	if pub == 0 {
+		t.Fatal("no published metrics")
+	}
+}
+
 func TestRateMetricsDenominatorReconciliation(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
@@ -217,7 +342,7 @@ func TestRateMetricsDenominatorReconciliation(t *testing.T) {
 	calc.Feed(dmg("a1", "b1", 100, 108))
 	calc.Feed(dmg("b1", "a1", 50, 106))
 	eps := &episodes.Output{Episodes: []episodes.Episode{
-		{Kind: episodes.KindFight, StartGameSecond: 100, EndGameSecond: 120, Participants: []string{"a1", "b1"}},
+		{Kind: episodes.KindFight, StartGameSecond: 100, EndGameSecond: 120, Participants: []string{"a1", "b1"}, EvidenceIDs: []int64{101, 102}},
 	}}
 	out := calc.Result(eps, nil)
 	byAcct := map[string]map[string]Value{}

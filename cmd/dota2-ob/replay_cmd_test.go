@@ -282,6 +282,33 @@ func TestProbeMissingRoleRegistryFailsClosed(t *testing.T) {
 	}
 }
 
+// TestLoopbackOnlyListen proves the serve command rejects non-loopback binds.
+func TestLoopbackOnlyListen(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:43211", "localhost:43211", "[::1]:43211", "127.0.0.2:43211", "0.0.0.0:43211", ":43211", "192.168.1.5:43211"} {
+		ok := loopbackOnly(addr)
+		expect := strings.HasPrefix(addr, "127.") || strings.HasPrefix(addr, "localhost") || strings.HasPrefix(addr, "[::1]") || addr == ":43211" && false
+		_ = expect
+		if !ok && (strings.HasPrefix(addr, "127.") || strings.HasPrefix(addr, "localhost") || strings.HasPrefix(addr, "[::1]")) {
+			t.Fatalf("loopback address %q rejected", addr)
+		}
+		if ok && (strings.HasPrefix(addr, "0.0.0.0") || strings.HasPrefix(addr, "192.168.")) {
+			t.Fatalf("public address %q accepted", addr)
+		}
+	}
+	// Empty host (":43211") is treated as loopback by convention? We reject
+	// it because it binds all interfaces; assert it is NOT loopback-only here
+	// by calling the helper directly.
+	if loopbackOnly(":43211") {
+		t.Fatal("wildcard :43211 should not be loopback-only")
+	}
+	if loopbackOnly("0.0.0.0:43211") {
+		t.Fatal("0.0.0.0 should not be loopback-only")
+	}
+	if !loopbackOnly("127.0.0.1:43211") || !loopbackOnly("[::1]:43211") {
+		t.Fatal("loopback addresses should be allowed")
+	}
+}
+
 // TestScoreRequiresManifest proves the score subcommand fails closed without
 // the contract inputs.
 func TestScoreRequiresManifest(t *testing.T) {

@@ -75,13 +75,36 @@ async function load() {
     const matches = data.matches || [];
     document.getElementById("status").textContent = `${matches.length} 场队伍比赛`;
 
-    let s = `<div class="panel"><h3 style="margin-top:0">队伍评分</h3>`;
+    let s = `<div class="panel"><h3 style="margin-top:0">队伍评分（衍生队伍注册表）</h3>`;
     const ts = data.team_score;
-    if (ts && ts.published) {
-      s += `<p class="num" style="font-size:32px;font-weight:800">${Math.round(ts.value * 100) / 100}</p>`;
+    if (ts && ts.official_total && ts.official_total.published) {
+      s += `<p class="num" style="font-size:32px;font-weight:800">${Math.round(ts.official_total.value * 100) / 100}</p>
+        <p class="hint">队伍总分 · 队伍官方总分 · 有效比赛 ${esc(ts.subject_coverage.eligible_matches)} 场 · 语料 ${esc(ts.subject_coverage.corpus_matches)} 场</p>`;
+      s += `<table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>`;
+      for (const ax of Object.keys(ts.official_axes || {})) {
+        const a = ts.official_axes[ax];
+        if (a.published) {
+          s += `<tr><td>${esc(a.display_name_zh || ax)}</td><td class="num">${Math.round(a.value * 100) / 100}</td><td><span class="badge ok">已发布</span></td><td class="hint">覆盖 ${a.coverage.published_count}/${a.coverage.metric_count}</td></tr>`;
+        } else {
+          s += `<tr><td>${esc(a.display_name_zh || ax)}</td><td class="hint">—</td><td><span class="badge warn">已抑制</span></td><td class="hint">${esc(a.reason || "")}</td></tr>`;
+        }
+      }
+      s += `</tbody></table>`;
     } else {
-      const reasons = (ts && ts.reasons || []).map(r => `<li>${esc(r)}</li>`).join("");
-      s += `<div class="hint">队伍总分已抑制：独立队伍评分注册表尚未定义。<ul>${reasons}</ul></div>`;
+      const reasons = (ts && ts.official_total && ts.official_total.reasons || []).map(r => `<li>${esc(r)}</li>`).join("");
+      s += `<div class="hint">队伍官方总分已抑制（未达到发布闸门）。<ul>${reasons || "<li>语料中无该队伍记录</li>"}</ul></div>`;
+      if (ts && ts.official_axes) {
+        s += `<table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>`;
+        for (const ax of Object.keys(ts.official_axes)) {
+          const a = ts.official_axes[ax];
+          if (a.published) {
+            s += `<tr><td>${esc(a.display_name_zh || ax)}</td><td class="num">${Math.round(a.value * 100) / 100}</td><td><span class="badge ok">已发布</span></td><td class="hint">覆盖 ${a.coverage.published_count}/${a.coverage.metric_count}</td></tr>`;
+          } else {
+            s += `<tr><td>${esc(a.display_name_zh || ax)}</td><td class="hint">—</td><td><span class="badge warn">已抑制</span></td><td class="hint">${esc(a.reason || "")}</td></tr>`;
+          }
+        }
+        s += `</tbody></table>`;
+      }
     }
     s += `</div>`;
     c.insertAdjacentHTML("beforeend", s);
@@ -89,20 +112,18 @@ async function load() {
     for (const m of matches) {
       let players = "";
       for (const p of (m.players || [])) {
-        const official = p.official_total;
-        const totalVal = official && official.published ? Math.round(official.value * 100) / 100 : "抑制";
+        const metrics = Object.keys(p.metrics || {}).map(k => `${esc(k)}=${Math.round(p.metrics[k].value * 100) / 100}`).join(" · ");
         players += `<tr>
           <td><a href="player.html?id=${esc(p.account_id)}">${esc(p.account_id)}</a></td>
           <td><span class="role">${esc(p.nominal_role || "-")}</span></td>
-          <td class="num">${esc(totalVal)}</td>
-          <td class="hint">${esc(official && official.published ? "" : (official && official.reasons || []).join("; "))}</td>
+          <td class="hint">${esc(metrics)}</td>
         </tr>`;
       }
       c.insertAdjacentHTML("beforeend", `
         <div class="panel">
           <h3 style="margin-top:0"><a href="match.html?id=${esc(m.match_id)}">比赛 ${esc(m.match_id)}</a>
             <span class="hint">${esc(m.side || "")} · ${esc(m.status || "")}</span></h3>
-          <table><thead><tr><th>选手</th><th>角色</th><th>官方总分</th><th>抑制原因</th></tr></thead><tbody>${players || `<tr><td colspan="4" class="hint">无评分快照</td></tr>`}</tbody></table>
+          <table><thead><tr><th>选手</th><th>角色</th><th>指标</th></tr></thead><tbody>${players || `<tr><td colspan="3" class="hint">无评分快照</td></tr>`}</tbody></table>
         </div>`);
     }
     if (matches.length === 0) {

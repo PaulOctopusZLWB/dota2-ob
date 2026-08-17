@@ -1,12 +1,15 @@
 // Package scoring implements the eight-axis role radar and the official and
 // experimental total-score computation exactly from the frozen machine-readable
 // scoring contract (docs/specs/ti2026-radar-scoring-v1.json). Metrics are
-// normalized to same-role empirical mid-rank percentiles over the frozen TI
-// 2026 corpus; axes and totals use versioned role-specific weights. Axes and
-// totals are suppressed when mandatory inputs, match count, or coverage gates
+// aggregated by their declared numerator/denominator rule first, then player
+// tournament records are normalized to same-role empirical mid-rank
+// percentiles over the frozen TI 2026 corpus. Axes and totals use versioned
+// role-specific weights. Axes and totals are suppressed when mandatory inputs,
+// the subject's eligible match/opportunity coverage, or the coverage gates
 // fail — an unavailable metric is never imputed as 0 or 50. Official scores
 // never contain V3 inputs; the experimental V3 layer is a separately named
-// dashed value.
+// dashed value. Team-match and team-tournament scores are computed under a
+// documented derived team registry.
 package scoring
 
 import (
@@ -15,6 +18,9 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
 )
 
 // Contract is the frozen radar/score contract.
@@ -73,6 +79,14 @@ type AxisDef struct {
 
 // SchemaVersion is the frozen contract version.
 const SchemaVersion = "ti2026.radar-score.v1"
+
+// TeamScoringVersion identifies the derived team scoring registry. The frozen
+// player contract does not define a separate team registry; team scores are a
+// documented derivation: metrics are pooled to team level, then team axes use
+// the contract's axis structure with role-averaged component weights and the
+// contract's axis weights. Team totals use the contract's official-total
+// formula and gates.
+const TeamScoringVersion = "ti2026.scoring.team.v1"
 
 // LoadContract reads and validates the frozen scoring contract.
 func LoadContract(path string) (*Contract, error) {
@@ -161,7 +175,6 @@ func MidRankPercentile(v float64, cohort []float64) float64 {
 	}
 	xs := append([]float64(nil), cohort...)
 	sort.Float64s(xs)
-	// Count how many are strictly below v and how many equal v.
 	below := 0
 	eq := 0
 	for _, x := range xs {
@@ -171,7 +184,6 @@ func MidRankPercentile(v float64, cohort []float64) float64 {
 			eq++
 		}
 	}
-	// Mid-rank: for the block of equal values, rank = below + (eq+1)/2.
 	midrank := float64(below) + float64(eq+1)/2.0
 	return 100.0 * (midrank - 0.5) / float64(len(xs))
 }
@@ -190,10 +202,28 @@ func Invert(pct float64) float64 {
 	return 100.0 - pct
 }
 
-// MetricValue is one published player-match metric input to scoring.
+// MetricValue is one published metric observation with the numerator/
+// denominator/opportunity fields needed for declared-rule aggregation.
 type MetricValue struct {
 	MetricID             string    `json:"metric_id"`
 	Value                float64   `json:"value"`
+	Numerator            *float64  `json:"numerator,omitempty"`
+	Denominator          *float64  `json:"denominator,omitempty"`
+	OpportunityCount     int64     `json:"opportunity_count,omitempty"`
+	Direction            Direction `json:"direction"`
+	OfficialEligible     bool      `json:"official_eligible"`
+	ExperimentalEligible bool      `json:"experimental_eligible"`
+}
+
+// AggregatedMetric is one metric aggregated over a subject's eligible records
+// using its declared rule.
+type AggregatedMetric struct {
+	MetricID             string    `json:"metric_id"`
+	Value                float64   `json:"value"`
+	Numerator            float64   `json:"numerator,omitempty"`
+	Denominator          float64   `json:"denominator,omitempty"`
+	OpportunityCount     int64     `json:"opportunity_count,omitempty"`
+	EligibleMatches      int       `json:"eligible_matches"`
 	Direction            Direction `json:"direction"`
 	OfficialEligible     bool      `json:"official_eligible"`
 	ExperimentalEligible bool      `json:"experimental_eligible"`
@@ -208,7 +238,34 @@ type PlayerMatch struct {
 	Metrics     map[string]MetricValue `json:"metrics"`
 }
 
-// AxisResult is one axis of a player's radar.
+// PlayerTournament is one player's records aggregated across its eligible
+// matches within a fixed nominal role (the scoring subject grain).
+type PlayerTournament struct {
+	AccountID       string                      `json:"account_id"`
+	TeamID          string                      `json:"team_id,omitempty"`
+	NominalRole     string                      `json:"nominal_role"`
+	EligibleMatches int                         `json:"eligible_matches"`
+	MatchIDs        []string                    `json:"match_ids"`
+	Metrics         map[string]AggregatedMetric `json:"metrics"`
+}
+
+// TeamMatch is one team's metrics pooled across its five players in one match.
+type TeamMatch struct {
+	MatchID     string                      `json:"match_id"`
+	TeamID      string                      `json:"team_id"`
+	Metrics     map[string]AggregatedMetric `json:"metrics"`
+	PlayerCount int                         `json:"player_count"`
+}
+
+// TeamTournament is one team's metrics aggregated across its eligible matches.
+type TeamTournament struct {
+	TeamID          string                      `json:"team_id"`
+	EligibleMatches int                         `json:"eligible_matches"`
+	MatchIDs        []string                    `json:"match_ids"`
+	Metrics         map[string]AggregatedMetric `json:"metrics"`
+}
+
+// AxisResult is one axis of a subject's radar.
 type AxisResult struct {
 	Axis       string                     `json:"axis"`
 	DisplayZh  string                     `json:"display_name_zh"`
@@ -251,9 +308,10 @@ type TotalResult struct {
 	Coverage     Coverage           `json:"coverage"`
 }
 
-// PlayerScore is the full scoring snapshot for one player in one match.
+// PlayerScore is the full scoring snapshot for one player (player-tournament
+// grain). SubjectCoverage reports the subject's own eligible match count, never
+// the global corpus count.
 type PlayerScore struct {
-	MatchID              string                      `json:"match_id"`
 	AccountID            string                      `json:"account_id"`
 	TeamID               string                      `json:"team_id,omitempty"`
 	NominalRole          string                      `json:"nominal_role"`
@@ -263,7 +321,7 @@ type PlayerScore struct {
 	ExperimentalAxes     map[string]AxisResult       `json:"experimental_axes"`
 	OfficialTotal        *TotalResult                `json:"official_total"`
 	ExperimentalTotal    *TotalResult                `json:"experimental_total"`
-	CorpusMatches        int                         `json:"corpus_matches"`
+	SubjectCoverage      SubjectCoverage             `json:"subject_coverage"`
 	ComparisonPopulation string                      `json:"comparison_population"`
 }
 
@@ -278,31 +336,251 @@ type PercentileResult struct {
 	CohortSize           int       `json:"cohort_size"`
 }
 
-// Corpus holds the collection of player-match inputs across all matches and
-// the computed per-role per-metric cohorts for percentile normalization.
-type Corpus struct {
-	Contract *Contract
-	Matches  map[string][]*PlayerMatch // match_id -> players
-	Players  []*PlayerMatch            // flat, all matches
-	Cohorts  map[string][]float64      // "role\x00metric" -> published raw values
+// SubjectCoverage reports the scoring subject's own coverage.
+type SubjectCoverage struct {
+	EligibleMatches  int      `json:"eligible_matches"`
+	MatchIDs         []string `json:"match_ids"`
+	PublishedMetrics int      `json:"published_metrics"`
+	CorpusMatches    int      `json:"corpus_matches"`
 }
 
-// NewCorpus builds a corpus from the contract and player-match inputs.
-func NewCorpus(c *Contract, players []*PlayerMatch) *Corpus {
+// TeamScore is the team-tournament scoring snapshot.
+type TeamScore struct {
+	TeamID               string                      `json:"team_id"`
+	ScoringVersion       string                      `json:"scoring_version"`
+	MetricPercentiles    map[string]PercentileResult `json:"metric_percentiles"`
+	OfficialAxes         map[string]AxisResult       `json:"official_axes"`
+	OfficialTotal        *TotalResult                `json:"official_total"`
+	SubjectCoverage      SubjectCoverage             `json:"subject_coverage"`
+	ComparisonPopulation string                      `json:"comparison_population"`
+}
+
+// Corpus holds the player-match inputs, the player-tournament aggregation,
+// the team aggregation, and the percentile cohorts.
+type Corpus struct {
+	Contract    *Contract
+	MetricReg   *metrics.Registry
+	Matches     map[string][]*PlayerMatch        // match_id -> players
+	Players     []*PlayerMatch                   // flat per-match rows
+	Tournaments map[string]*PlayerTournament     // account\x00role -> aggregate
+	TeamMatches map[string]map[string]*TeamMatch // team_id -> match_id -> team
+	Teams       map[string]*TeamTournament       // team_id -> aggregate
+	Cohorts     map[string][]float64             // "role\x00metric" -> tournament aggregate values
+	TeamCohorts map[string][]float64             // "team\x00metric" -> team aggregate values
+}
+
+// NewCorpus builds a corpus from the contract, metric registry, and
+// player-match inputs. Aggregation happens here using each metric's declared
+// rule from the frozen registry.
+func NewCorpus(c *Contract, mreg *metrics.Registry, players []*PlayerMatch) *Corpus {
 	cor := &Corpus{
-		Contract: c,
-		Matches:  map[string][]*PlayerMatch{},
-		Players:  players,
-		Cohorts:  map[string][]float64{},
+		Contract: c, MetricReg: mreg,
+		Matches:     map[string][]*PlayerMatch{},
+		Players:     players,
+		Tournaments: map[string]*PlayerTournament{},
+		TeamMatches: map[string]map[string]*TeamMatch{},
+		Teams:       map[string]*TeamTournament{},
+		Cohorts:     map[string][]float64{},
+		TeamCohorts: map[string][]float64{},
 	}
 	for _, p := range players {
 		cor.Matches[p.MatchID] = append(cor.Matches[p.MatchID], p)
-		for mid, mv := range p.Metrics {
-			key := p.NominalRole + "\x00" + mid
-			cor.Cohorts[key] = append(cor.Cohorts[key], mv.Value)
+	}
+	cor.buildTournaments()
+	cor.buildTeams()
+	cor.buildCohorts()
+	return cor
+}
+
+// AggregateRuleOf returns the declared aggregation rule for a metric id.
+func (c *Corpus) AggregateRuleOf(id string) string {
+	if c.MetricReg == nil {
+		return ""
+	}
+	if m := c.MetricReg.Find(id); m != nil {
+		return m.AggregationRule
+	}
+	return ""
+}
+
+// aggregateValues combines per-match metric observations using the metric's
+// declared rule. Supported rule families: rate (sum numerator / sum
+// denominator), sum, max, and percentile-recompute (aggregate raw then
+// recompute — handled by the caller on the pooled value).
+func (c *Corpus) aggregateValues(mid string, vals []MetricValue) (AggregatedMetric, bool) {
+	if len(vals) == 0 {
+		return AggregatedMetric{}, false
+	}
+	rule := c.AggregateRuleOf(mid)
+	agg := AggregatedMetric{MetricID: mid, Direction: vals[0].Direction, OfficialEligible: vals[0].OfficialEligible, ExperimentalEligible: vals[0].ExperimentalEligible}
+	var num, den float64
+	var numOK, denOK bool
+	maxV := math.Inf(-1)
+	sumV := 0.0
+	for _, v := range vals {
+		agg.EligibleMatches++
+		agg.OpportunityCount += v.OpportunityCount
+		if v.Numerator != nil {
+			num += *v.Numerator
+			numOK = true
+		}
+		if v.Denominator != nil {
+			den += *v.Denominator
+			denOK = true
+		}
+		if v.Value > maxV {
+			maxV = v.Value
+		}
+		sumV += v.Value
+	}
+	low := strings.ToLower(rule)
+	switch {
+	case strings.Contains(low, "sum numerator divided by sum denominator"):
+		if denOK && den > 0 {
+			agg.Value = num / den
+			agg.Numerator = num
+			agg.Denominator = den
+			return agg, true
+		}
+		return agg, false
+	case strings.Contains(low, "never average stored percentiles"):
+		// Aggregate raw values first; recompute percentile in caller.
+		agg.Numerator = num
+		agg.Denominator = den
+		if denOK && den > 0 {
+			agg.Value = num / den
+		} else {
+			agg.Value = sumV / float64(len(vals))
+		}
+		return agg, true
+	case strings.Contains(low, "max"):
+		agg.Value = maxV
+		agg.Numerator = maxV
+		return agg, true
+	case strings.Contains(low, "sum eligible non-overlapping seconds"):
+		agg.Value = sumV
+		agg.Numerator = sumV
+		agg.Denominator = den
+		return agg, true
+	default: // sum counts / sum signed raw values
+		agg.Value = sumV
+		if numOK {
+			agg.Numerator = num
+		} else {
+			agg.Numerator = sumV
+		}
+		return agg, true
+	}
+}
+
+// buildTournaments aggregates each player's metrics across its matches within
+// its fixed nominal role.
+func (c *Corpus) buildTournaments() {
+	byKey := map[string][]*PlayerMatch{}
+	for _, p := range c.Players {
+		key := p.AccountID + "\x00" + p.NominalRole
+		byKey[key] = append(byKey[key], p)
+	}
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		rows := byKey[key]
+		pt := &PlayerTournament{
+			AccountID: rows[0].AccountID, TeamID: rows[0].TeamID, NominalRole: rows[0].NominalRole,
+			EligibleMatches: len(rows), Metrics: map[string]AggregatedMetric{},
+		}
+		for _, r := range rows {
+			pt.MatchIDs = append(pt.MatchIDs, r.MatchID)
+		}
+		byMetric := map[string][]MetricValue{}
+		for _, r := range rows {
+			for mid, mv := range r.Metrics {
+				byMetric[mid] = append(byMetric[mid], mv)
+			}
+		}
+		for mid, vals := range byMetric {
+			if agg, ok := c.aggregateValues(mid, vals); ok {
+				pt.Metrics[mid] = agg
+			}
+		}
+		sort.Strings(pt.MatchIDs)
+		c.Tournaments[key] = pt
+	}
+}
+
+// buildTeams pools player metrics to team-match and team-tournament level.
+func (c *Corpus) buildTeams() {
+	// team_id -> match_id -> []player match rows
+	rows := map[string]map[string][]*PlayerMatch{}
+	for _, p := range c.Players {
+		if p.TeamID == "" {
+			continue
+		}
+		if rows[p.TeamID] == nil {
+			rows[p.TeamID] = map[string][]*PlayerMatch{}
+		}
+		rows[p.TeamID][p.MatchID] = append(rows[p.TeamID][p.MatchID], p)
+	}
+	for tid, byMatch := range rows {
+		c.TeamMatches[tid] = map[string]*TeamMatch{}
+		tt := &TeamTournament{TeamID: tid, Metrics: map[string]AggregatedMetric{}}
+		teamAgg := map[string][]MetricValue{}
+		for matchID, players := range byMatch {
+			tm := &TeamMatch{MatchID: matchID, TeamID: tid, Metrics: map[string]AggregatedMetric{}, PlayerCount: len(players)}
+			byMetric := map[string][]MetricValue{}
+			for _, p := range players {
+				for mid, mv := range p.Metrics {
+					byMetric[mid] = append(byMetric[mid], mv)
+				}
+			}
+			for mid, vals := range byMetric {
+				if agg, ok := c.aggregateValues(mid, vals); ok {
+					tm.Metrics[mid] = agg
+					teamAgg[mid] = append(teamAgg[mid], MetricValue{
+						MetricID: mid, Value: agg.Value,
+						Numerator: &agg.Numerator, Denominator: &agg.Denominator,
+						OpportunityCount: agg.OpportunityCount,
+						Direction:        agg.Direction, OfficialEligible: agg.OfficialEligible,
+						ExperimentalEligible: agg.ExperimentalEligible,
+					})
+				}
+			}
+			c.TeamMatches[tid][matchID] = tm
+		}
+		tt.EligibleMatches = len(byMatch)
+		mids := make([]string, 0, len(byMatch))
+		for m := range byMatch {
+			mids = append(mids, m)
+		}
+		sort.Strings(mids)
+		tt.MatchIDs = mids
+		for mid, vals := range teamAgg {
+			if agg, ok := c.aggregateValues(mid, vals); ok {
+				tt.Metrics[mid] = agg
+			}
+		}
+		c.Teams[tid] = tt
+	}
+}
+
+// buildCohorts derives the percentile populations: one value per subject
+// (player tournament / team tournament) per metric.
+func (c *Corpus) buildCohorts() {
+	for _, pt := range c.Tournaments {
+		for mid, am := range pt.Metrics {
+			key := pt.NominalRole + "\x00" + mid
+			c.Cohorts[key] = append(c.Cohorts[key], am.Value)
 		}
 	}
-	return cor
+	for _, tt := range c.Teams {
+		for mid, am := range tt.Metrics {
+			key := "team\x00" + mid
+			c.TeamCohorts[key] = append(c.TeamCohorts[key], am.Value)
+		}
+	}
 }
 
 // MatchCount returns the number of distinct matches in the corpus.
@@ -310,45 +588,64 @@ func (c *Corpus) MatchCount() int {
 	return len(c.Matches)
 }
 
-// Cohort returns the raw values for a role+metric cohort (may be empty).
+// Cohort returns the tournament values for a role+metric cohort (may be empty).
 func (c *Corpus) Cohort(role, metricID string) []float64 {
 	return c.Cohorts[role+"\x00"+metricID]
 }
 
-// ScorePlayer computes the full scoring snapshot for one player given the
-// corpus. It applies every suppression gate in the contract and never imputes.
-func (c *Corpus) ScorePlayer(p *PlayerMatch) *PlayerScore {
+// TeamCohort returns the team-tournament values for a metric cohort.
+func (c *Corpus) TeamCohort(metricID string) []float64 {
+	return c.TeamCohorts["team\x00"+metricID]
+}
+
+// Tournament returns the player-tournament aggregate for account+role.
+func (c *Corpus) Tournament(account, role string) *PlayerTournament {
+	return c.Tournaments[account+"\x00"+role]
+}
+
+// ScorePlayer computes the player-tournament scoring snapshot. The subject's
+// own eligible match count is reported in SubjectCoverage; the minimum-match
+// gate uses that subject coverage, not the global corpus count.
+func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 	cv := c.Contract
+	pt := c.Tournament(account, role)
+	if pt == nil {
+		return nil
+	}
 	ps := &PlayerScore{
-		MatchID: p.MatchID, AccountID: p.AccountID, TeamID: p.TeamID, NominalRole: p.NominalRole,
-		ScoringVersion:       cv.SchemaVersion,
-		MetricPercentiles:    map[string]PercentileResult{},
-		OfficialAxes:         map[string]AxisResult{},
-		ExperimentalAxes:     map[string]AxisResult{},
-		CorpusMatches:        c.MatchCount(),
+		AccountID: pt.AccountID, TeamID: pt.TeamID, NominalRole: pt.NominalRole,
+		ScoringVersion:    cv.SchemaVersion,
+		MetricPercentiles: map[string]PercentileResult{},
+		OfficialAxes:      map[string]AxisResult{},
+		ExperimentalAxes:  map[string]AxisResult{},
+		SubjectCoverage: SubjectCoverage{
+			EligibleMatches: pt.EligibleMatches, MatchIDs: pt.MatchIDs,
+			PublishedMetrics: len(pt.Metrics), CorpusMatches: c.MatchCount(),
+		},
 		ComparisonPopulation: cv.ComparisonPopulation,
 	}
 
-	// Step 1: normalize every published metric to a same-role percentile.
-	for mid, mv := range p.Metrics {
-		cohort := c.Cohort(p.NominalRole, mid)
+	// Step 1: normalize every published tournament metric to a same-role
+	// percentile computed from the aggregated tournament cohort.
+	for mid, am := range pt.Metrics {
+		cohort := c.Cohort(pt.NominalRole, mid)
 		if len(cohort) < cv.MinimumMatches {
 			continue // not enough cohort; metric cannot normalize
 		}
-		pct := MidRankPercentile(mv.Value, cohort)
-		if mv.Direction == LowerBetter {
+		pct := MidRankPercentile(am.Value, cohort)
+		if am.Direction == LowerBetter {
 			pct = Invert(pct)
 		}
 		ps.MetricPercentiles[mid] = PercentileResult{
-			MetricID: mid, RawValue: mv.Value, Percentile: pct, Direction: mv.Direction,
-			OfficialEligible: mv.OfficialEligible, ExperimentalEligible: mv.ExperimentalEligible,
+			MetricID: mid, RawValue: am.Value, Percentile: pct, Direction: am.Direction,
+			OfficialEligible: am.OfficialEligible, ExperimentalEligible: am.ExperimentalEligible,
 			CohortSize: len(cohort),
 		}
 	}
 
 	// Step 2: official axes from official_axis_components_by_role.
-	ps.OfficialAxes = c.computeOfficialAxes(p)
-	ps.OfficialTotal = c.computeOfficialTotal(ps)
+	ps.OfficialAxes = c.computeOfficialAxes(pt, ps.MetricPercentiles, pt.NominalRole)
+	ps.OfficialTotal = c.computeOfficialTotal(ps, pt)
 
 	// Step 3: experimental V3 dashed layer.
 	ps.ExperimentalAxes = c.computeExperimentalAxes(ps)
@@ -357,10 +654,49 @@ func (c *Corpus) ScorePlayer(p *PlayerMatch) *PlayerScore {
 	return ps
 }
 
-func (c *Corpus) computeOfficialAxes(p *PlayerMatch) map[string]AxisResult {
+// ScoreTeam computes the team-tournament scoring snapshot using the derived
+// team registry.
+func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
+	cv := c.Contract
+	tt := c.Teams[teamID]
+	if tt == nil {
+		return nil
+	}
+	ts := &TeamScore{
+		TeamID: teamID, ScoringVersion: TeamScoringVersion,
+		MetricPercentiles: map[string]PercentileResult{},
+		OfficialAxes:      map[string]AxisResult{},
+		SubjectCoverage: SubjectCoverage{
+			EligibleMatches: tt.EligibleMatches, MatchIDs: tt.MatchIDs,
+			PublishedMetrics: len(tt.Metrics), CorpusMatches: c.MatchCount(),
+		},
+		ComparisonPopulation: "team cohort within the frozen TI 2026 corpus (derived team registry)",
+	}
+	for mid, am := range tt.Metrics {
+		cohort := c.TeamCohort(mid)
+		if len(cohort) < cv.MinimumMatches {
+			continue
+		}
+		pct := MidRankPercentile(am.Value, cohort)
+		if am.Direction == LowerBetter {
+			pct = Invert(pct)
+		}
+		ts.MetricPercentiles[mid] = PercentileResult{
+			MetricID: mid, RawValue: am.Value, Percentile: pct, Direction: am.Direction,
+			OfficialEligible: am.OfficialEligible, ExperimentalEligible: am.ExperimentalEligible,
+			CohortSize: len(cohort),
+		}
+	}
+	ts.OfficialAxes = c.computeTeamAxes(tt, ts.MetricPercentiles)
+	ts.OfficialTotal = c.computeTeamTotal(ts, tt)
+	return ts
+}
+
+// computeOfficialAxes builds axes from the tournament metric percentiles.
+func (c *Corpus) computeOfficialAxes(pt *PlayerTournament, pcts map[string]PercentileResult, role string) map[string]AxisResult {
 	cv := c.Contract
 	out := map[string]AxisResult{}
-	comps := cv.OfficialAxisComponentsByRole[p.NominalRole]
+	comps := cv.OfficialAxisComponentsByRole[role]
 	for _, axis := range cv.AxisNames() {
 		ar := AxisResult{Axis: axis, DisplayZh: cv.AxisDisplayNameZh(axis), Components: map[string]ComponentResult{}, Suppressed: true}
 		cm := comps[axis]
@@ -374,26 +710,100 @@ func (c *Corpus) computeOfficialAxes(p *PlayerMatch) map[string]AxisResult {
 		ar.Coverage.MetricCount = len(cm)
 		mandatoryMissing := false
 		for mid, w := range cm {
-			pr, ok := p.Metrics[mid]
-			pct, ok2 := c.percentileOf(p, mid)
 			cr := ComponentResult{MetricID: mid, Weight: w}
+			pr, ok := pt.Metrics[mid]
+			pct, ok2 := pcts[mid]
 			if !ok || !pr.OfficialEligible || !ok2 {
-				cr.UnavailableReason = c.missingReason(p, mid, pr, ok, ok2, "official")
+				cr.UnavailableReason = c.missingReason(pt, mid, pr, ok, ok2, "official")
 				mandatoryMissing = true
 			} else {
 				v := pr.Value
-				pv := pct
+				pv := pct.Percentile
 				cr.RawValue = &v
 				cr.Percentile = &pv
 				cr.Published = true
-				weightedSum += w * pct
+				weightedSum += w * pv
 				weightTotal += w
 				ar.Coverage.PublishedCount++
 			}
 			ar.Components[mid] = cr
 		}
 		if mandatoryMissing || weightTotal == 0 {
-			ar.Reason = c.missingMetricPolicyReason(p, cm, ar)
+			ar.Reason = c.missingMetricPolicyReason(cm, ar)
+			out[axis] = ar
+			continue
+		}
+		val := weightedSum / weightTotal
+		ar.Published = true
+		ar.Suppressed = false
+		ar.Value = &val
+		out[axis] = ar
+	}
+	return out
+}
+
+// computeTeamAxes builds team axes from team-tournament metric percentiles.
+// Component weights are the role-average of the contract's per-role component
+// weights for each official metric, normalized to sum 1 per axis (documented
+// derived team registry).
+func (c *Corpus) computeTeamAxes(tt *TeamTournament, pcts map[string]PercentileResult) map[string]AxisResult {
+	cv := c.Contract
+	out := map[string]AxisResult{}
+	// Derive per-axis component weight as mean over roles of the role weight.
+	for _, axis := range cv.AxisNames() {
+		ar := AxisResult{Axis: axis, DisplayZh: cv.AxisDisplayNameZh(axis), Components: map[string]ComponentResult{}, Suppressed: true}
+		// Collect all official-eligible metrics on this axis across roles.
+		metricWeights := map[string]float64{}
+		seen := map[string]bool{}
+		for _, role := range []string{"1", "2", "3", "4", "5"} {
+			cm := cv.OfficialAxisComponentsByRole[role][axis]
+			for mid, w := range cm {
+				if !seen[mid] {
+					metricWeights[mid] = w
+					seen[mid] = true
+				} else {
+					metricWeights[mid] = (metricWeights[mid] + w) / 2
+				}
+			}
+		}
+		if len(metricWeights) == 0 {
+			ar.Reason = "no_team_components_defined"
+			out[axis] = ar
+			continue
+		}
+		// Normalize to sum 1.
+		total := 0.0
+		for _, w := range metricWeights {
+			total += w
+		}
+		for mid, w := range metricWeights {
+			metricWeights[mid] = w / total
+		}
+		weightedSum := 0.0
+		weightTotal := 0.0
+		ar.Coverage.MetricCount = len(metricWeights)
+		mandatoryMissing := false
+		for mid, w := range metricWeights {
+			cr := ComponentResult{MetricID: mid, Weight: w}
+			am, ok := tt.Metrics[mid]
+			pct, ok2 := pcts[mid]
+			if !ok || !am.OfficialEligible || !ok2 {
+				cr.UnavailableReason = c.missingReason(tt, mid, am, ok, ok2, "official")
+				mandatoryMissing = true
+			} else {
+				v := am.Value
+				pv := pct.Percentile
+				cr.RawValue = &v
+				cr.Percentile = &pv
+				cr.Published = true
+				weightedSum += w * pv
+				weightTotal += w
+				ar.Coverage.PublishedCount++
+			}
+			ar.Components[mid] = cr
+		}
+		if mandatoryMissing || weightTotal == 0 {
+			ar.Reason = c.missingMetricPolicyReason(metricWeights, ar)
 			out[axis] = ar
 			continue
 		}
@@ -407,7 +817,7 @@ func (c *Corpus) computeOfficialAxes(p *PlayerMatch) map[string]AxisResult {
 }
 
 // percentileOf returns the normalized percentile for a metric (if it exists).
-func (c *Corpus) percentileOf(p *PlayerMatch, mid string) (float64, bool) {
+func (c *Corpus) percentileOf(p *PlayerTournament, mid string) (float64, bool) {
 	pr, ok := p.Metrics[mid]
 	if !ok {
 		return 0, false
@@ -424,11 +834,12 @@ func (c *Corpus) percentileOf(p *PlayerMatch, mid string) (float64, bool) {
 }
 
 // missingReason builds a precise reason for a missing component.
-func (c *Corpus) missingReason(p *PlayerMatch, mid string, pr MetricValue, ok, ok2 bool, layer string) string {
+func (c *Corpus) missingReason(subject interface {
+}, mid string, am AggregatedMetric, ok, ok2 bool, layer string) string {
 	if !ok {
 		return "metric_not_published:" + mid
 	}
-	if !pr.OfficialEligible && layer == "official" {
+	if !am.OfficialEligible && layer == "official" {
 		return "metric_not_official_eligible:" + mid
 	}
 	if !ok2 {
@@ -438,7 +849,7 @@ func (c *Corpus) missingReason(p *PlayerMatch, mid string, pr MetricValue, ok, o
 }
 
 // missingMetricPolicyReason summarizes which components failed.
-func (c *Corpus) missingMetricPolicyReason(p *PlayerMatch, cm map[string]float64, ar AxisResult) string {
+func (c *Corpus) missingMetricPolicyReason(cm map[string]float64, ar AxisResult) string {
 	var fails []string
 	for mid := range cm {
 		cr := ar.Components[mid]
@@ -461,8 +872,9 @@ func joinComma(xs []string) string {
 	return out
 }
 
-// computeOfficialTotal applies the official total gate.
-func (c *Corpus) computeOfficialTotal(ps *PlayerScore) *TotalResult {
+// computeOfficialTotal applies the official total gate. The subject's own
+// eligible match count drives the minimum-match gate.
+func (c *Corpus) computeOfficialTotal(ps *PlayerScore, pt *PlayerTournament) *TotalResult {
 	cv := c.Contract
 	role := ps.NominalRole
 	tr := &TotalResult{
@@ -470,8 +882,8 @@ func (c *Corpus) computeOfficialTotal(ps *PlayerScore) *TotalResult {
 		Suppressed: true,
 	}
 	reasons := []string{}
-	if c.MatchCount() < cv.MinimumMatches {
-		reasons = append(reasons, fmt.Sprintf("corpus_matches=%d_less_than_%d", c.MatchCount(), cv.MinimumMatches))
+	if pt.EligibleMatches < cv.MinimumMatches {
+		reasons = append(reasons, fmt.Sprintf("subject_matches=%d_less_than_%d", pt.EligibleMatches, cv.MinimumMatches))
 	}
 	mandatory := cv.MandatoryAxesByRole[role]
 	mandatoryAll := true
@@ -515,6 +927,64 @@ func (c *Corpus) computeOfficialTotal(ps *PlayerScore) *TotalResult {
 	return tr
 }
 
+// computeTeamTotal applies the official total gate to a team snapshot.
+func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResult {
+	cv := c.Contract
+	tr := &TotalResult{
+		ID: "official_team_total_v1", Name: "队伍官方总分", Weights: map[string]float64{},
+		Suppressed: true,
+	}
+	reasons := []string{}
+	if tt.EligibleMatches < cv.MinimumMatches {
+		reasons = append(reasons, fmt.Sprintf("team_matches=%d_less_than_%d", tt.EligibleMatches, cv.MinimumMatches))
+	}
+	// Team mandatory axes: all eight (derived team registry has no role split).
+	published := []string{}
+	totalW := 0.0
+	sum := 0.0
+	for _, ax := range cv.AxisNames() {
+		a := ts.OfficialAxes[ax]
+		if !a.Published {
+			reasons = append(reasons, "mandatory_axis_unavailable:"+ax)
+			continue
+		}
+		// Team axis weight = mean of role axis weights (derived registry).
+		w := c.teamAxisWeight(ax)
+		published = append(published, ax)
+		sum += w * *a.Value
+		totalW += w
+		tr.Weights[ax] = w
+	}
+	if len(published) < cv.MinimumPublishableAxes {
+		reasons = append(reasons, fmt.Sprintf("publishable_axes=%d_less_than_%d", len(published), cv.MinimumPublishableAxes))
+	}
+	if len(reasons) > 0 || totalW == 0 {
+		tr.Reasons = reasons
+		if len(reasons) == 0 {
+			tr.Reasons = []string{"team_total_suppressed_no_publishable_axes"}
+		}
+		return tr
+	}
+	val := sum / totalW
+	tr.Published = true
+	tr.Suppressed = false
+	tr.Value = &val
+	tr.AxesIncluded = published
+	return tr
+}
+
+// teamAxisWeight returns the mean of the contract's per-role axis weights.
+func (c *Corpus) teamAxisWeight(axis string) float64 {
+	var s float64
+	n := 0
+	for _, role := range []string{"1", "2", "3", "4", "5"} {
+		w := c.Contract.AxisWeightsByRole[role][axis]
+		s += w
+		n++
+	}
+	return s / float64(n)
+}
+
 // computeExperimentalAxes builds the dashed V3 axes.
 func (c *Corpus) computeExperimentalAxes(ps *PlayerScore) map[string]AxisResult {
 	cv := c.Contract
@@ -522,7 +992,6 @@ func (c *Corpus) computeExperimentalAxes(ps *PlayerScore) map[string]AxisResult 
 	for _, axis := range cv.AxisNames() {
 		ar := AxisResult{Axis: axis, DisplayZh: cv.AxisDisplayNameZh(axis), Components: map[string]ComponentResult{}, Suppressed: true}
 		official := ps.OfficialAxes[axis]
-		// Official base required; dashed layer never fabricates from nothing.
 		if !official.Published {
 			ar.Reason = "official_axis_unavailable"
 			out[axis] = ar

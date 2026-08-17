@@ -409,7 +409,9 @@ func cmdBatch(args []string, output io.Writer) int {
 
 // cmdScore computes the corpus radar/score snapshots from persisted metrics.
 // It is deterministic and rebuildable; scores are not part of any match's
-// canonical tree (metrics + contracts are the recomputable source).
+// canonical tree (metrics + contracts are the recomputable source). It
+// consumes the authoritative data-root role-override store when present, so a
+// review override is picked up on recomputation.
 func cmdScore(args []string, output io.Writer) int {
 	fs := flag.NewFlagSet("replay score", flag.ContinueOnError)
 	manifest := fs.String("manifest", "", "probe manifest path (for contract lookup)")
@@ -436,7 +438,14 @@ func cmdScore(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "rebuild_catalog_failed: %v\n", err)
 		return 1
 	}
-	cs, err := scoring.ComputeAndPersist(st, ri.ScoringContract, ri.Registry, ri.Overrides)
+	// Consume the authoritative data-root override store when present (review
+	// mutations write here), so recomputation reflects effective roles.
+	effectiveOverrides := ri.Overrides
+	var of roles.OverrideFile
+	if err := st.ReadJSONFile(st.Root+"/role-overrides-effective.json", &of); err == nil {
+		effectiveOverrides = &of
+	}
+	cs, err := scoring.ComputeAndPersist(st, ri.ScoringContract, ri.MetricRegistry, ri.Registry, effectiveOverrides)
 	if err != nil {
 		fmt.Fprintf(output, "score_compute_failed: %v\n", err)
 		return 1
@@ -524,6 +533,10 @@ func runServe(args []string, output io.Writer) int {
 		fmt.Fprintln(output, "serve requires --manifest (role registry is a publication gate)")
 		return 2
 	}
+	if !loopbackOnly(*listen) {
+		fmt.Fprintf(output, "serve requires a loopback listen host (got %q); use 127.0.0.1 or ::1\n", *listen)
+		return 2
+	}
 	st, err := store.New(*dataRoot)
 	if err != nil {
 		fmt.Fprintf(output, "store_init_failed: %v\n", err)
@@ -545,6 +558,32 @@ func runServe(args []string, output io.Writer) int {
 		WithSessionToken(*sessionToken)
 	handler := serveHandler(srv)
 	return listenAndServe(*listen, handler, output)
+}
+
+// loopbackOnly reports whether the listen address is bound to the local
+// loopback interface (IPv4 127.0.0.0/8 or IPv6 ::1). Wildcard and public binds
+// are rejected to keep the review mutations and data loopback-only.
+func loopbackOnly(addr string) bool {
+	host := addr
+	// Strip the port. IPv6 literals are bracketed: [::1]:43211.
+	if strings.HasPrefix(host, "[") {
+		if i := strings.IndexByte(host, ']'); i >= 0 {
+			host = host[1:i]
+		}
+	} else if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.Trim(host, " ")
+	if host == "" {
+		return false // ":port" binds all interfaces
+	}
+	if host == "localhost" {
+		return true
+	}
+	if strings.HasPrefix(host, "127.") {
+		return true
+	}
+	return host == "::1"
 }
 
 func serveHandler(srv *api.Server) http.Handler {

@@ -207,8 +207,8 @@ function render(r) {
     c.insertAdjacentHTML("beforeend", `<div class="panel"><h3 style="margin-top:0">队伍</h3><table>${teamRows}</table></div>`);
   }
 
-  // 评分与雷达（官方实线 + V3 虚线）
-  loadScores(r);
+// 评分与雷达（官方实线 + V3 虚线）
+loadScores(r);
 }
 
 async function loadScores(r) {
@@ -219,36 +219,20 @@ async function loadScores(r) {
     const env = await resp.json();
     const ms = env.data;
     if (!ms || !ms.players || !ms.players.length) return;
-    const PHRASE_ZH = { laning: "对线", resources: "资源", tempo: "节奏", map: "地图", vision: "视野", fight: "团战", objectives: "目标转化", endgame: "终局决策" };
     let rows = "";
     for (const p of ms.players) {
       const name = (r.participants || []).find(x => x.account_id === p.account_id);
-      const ot = p.official_total;
-      const et = p.experimental_total;
-      const off = ot && ot.published ? Math.round(ot.value * 100) / 100 : "抑制";
-      const exp = et && et.published ? Math.round(et.value * 100) / 100 : "抑制";
-      const pubAxes = Object.values(p.official_axes || {}).filter(a => a.published).length;
-      const rows2 = Object.keys(p.official_axes || {}).map(a => {
-        const ax = p.official_axes[a];
-        if (!ax) return "";
-        if (ax.published) return `<td class="num" title="${esc(ax.reason || "")}">${Math.round(ax.value * 100) / 100}</td>`;
-        return `<td class="hint" title="${esc(ax.reason || "")}">—</td>`;
-      }).join("");
+      const metrics = Object.keys(p.metrics || {}).map(k => `${esc(k)}=${Math.round(p.metrics[k].value * 100) / 100}`).join(" · ");
       rows += `<tr>
         <td><a href="player.html?id=${esc(p.account_id)}">${esc(name ? name.player_name : p.account_id)}</a></td>
         <td><span class="role">${esc(p.nominal_role || "-")}</span></td>
-        <td class="num">${esc(off)}</td>
-        <td class="num">${esc(exp)}</td>
-        <td class="hint">${esc(pubAxes)}/8</td>
-        ${rows2}
+        <td class="hint">${esc(metrics || "-")}</td>
       </tr>`;
     }
-    const headers = ["对线","资源","节奏","地图","视野","团战","目标转化","终局决策"];
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
-        <h3 style="margin-top:0">评分快照（官方总分 / 实验总分 / 轴覆盖）</h3>
-        <p class="hint">官方实线雷达使用通过发布闸门的 V1/V2 指标；V3 仅作虚线实验层，绝不进入官方值。抑制的轴/总分显示原因。</p>
-        <table><thead><tr><th>选手</th><th>角色</th><th>官方总分</th><th>实验总分(V3)</th><th>轴覆盖</th>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>
+        <h3 style="margin-top:0">本场指标明细（选手锦标赛评分见选手档案）</h3>
+        <table><thead><tr><th>选手</th><th>角色</th><th>指标</th></tr></thead><tbody>${rows}</tbody></table>
       </div>`);
   } catch (e) {
     // scores are optional; ignore load errors

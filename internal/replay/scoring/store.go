@@ -11,34 +11,38 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
 
-// MatchScores is the persisted per-match scoring snapshot: one PlayerScore
-// per participant with a role and at least one published metric.
+// MatchScores is the persisted per-match scoring snapshot: one PlayerMatch row
+// per participant (the per-match grain for drilldown).
 type MatchScores struct {
 	SchemaVersion string         `json:"schema_version"`
 	RuleVersion   string         `json:"rule_version"`
 	MatchID       string         `json:"match_id"`
-	Players       []*PlayerScore `json:"players"`
+	Players       []*PlayerMatch `json:"players"`
 }
 
-// CorpusScores is the corpus-level scoring catalog (rebuildable).
+// CorpusScores is the corpus-level scoring catalog (rebuildable): player
+// tournament snapshots within fixed roles, team tournament snapshots, and the
+// per-match rows for drilldown.
 type CorpusScores struct {
 	SchemaVersion        string                  `json:"schema_version"`
 	RuleVersion          string                  `json:"rule_version"`
 	ContractVersion      string                  `json:"contract_version"`
+	TeamScoringVersion   string                  `json:"team_scoring_version"`
 	ComparisonPopulation string                  `json:"comparison_population"`
 	CorpusMatches        int                     `json:"corpus_matches"`
+	Players              []*PlayerScore          `json:"players"`
+	Teams                []*TeamScore            `json:"teams"`
 	Matches              map[string]*MatchScores `json:"matches"`
 }
 
 // BuildCorpusFromStore loads every verified match's report + metrics from the
-// store and builds the scoring corpus. Matches that are not verified or have
-// no metrics are excluded from the comparison population (their absence is
-// disclosed by the API coverage, never silently imputed).
-func BuildCorpusFromStore(st *store.Store, c *Contract, roleReg *roles.Registry, overrides *roles.OverrideFile) (*Corpus, error) {
+// store and builds the scoring corpus (player-match rows). Matches that are not
+// verified or have no metrics are excluded from the comparison population.
+func BuildCorpusFromStore(st *store.Store, c *Contract, mreg *metrics.Registry, roleReg *roles.Registry, overrides *roles.OverrideFile) (*Corpus, error) {
 	var cat store.Catalog
 	if err := st.ReadJSONFile(st.CatalogPath(), &cat); err != nil {
 		if os.IsNotExist(err) {
-			return NewCorpus(c, nil), nil
+			return NewCorpus(c, mreg, nil), nil
 		}
 		return nil, fmt.Errorf("scoring: read catalog: %w", err)
 	}
@@ -71,17 +75,27 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, roleReg *roles.Registry,
 			if byAcct[v.AccountID] == nil {
 				byAcct[v.AccountID] = map[string]MetricValue{}
 			}
-			byAcct[v.AccountID][v.MetricID] = MetricValue{
+			mv := MetricValue{
 				MetricID: v.MetricID, Value: *v.Value,
 				Direction:            Direction(v.Direction),
 				OfficialEligible:     v.OfficialScoreEligible,
 				ExperimentalEligible: v.ExperimentalScoreEligible,
+				OpportunityCount:     v.OpportunityCount,
 			}
+			if v.Numerator != nil {
+				f := *v.Numerator
+				mv.Numerator = &f
+			}
+			if v.Denominator != nil {
+				f := *v.Denominator
+				mv.Denominator = &f
+			}
+			byAcct[v.AccountID][v.MetricID] = mv
 		}
-		for acct, mv := range byAcct {
+		for acct, mvs := range byAcct {
 			players = append(players, &PlayerMatch{
 				MatchID: row.MatchID, AccountID: acct, TeamID: teamByAcct[acct], NominalRole: roleByAcct[acct],
-				Metrics: mv,
+				Metrics: mvs,
 			})
 		}
 	}
@@ -91,7 +105,7 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, roleReg *roles.Registry,
 		}
 		return players[i].AccountID < players[j].AccountID
 	})
-	return NewCorpus(c, players), nil
+	return NewCorpus(c, mreg, players), nil
 }
 
 // reportLite is the report subset the scorer needs (participants with roles).
@@ -103,11 +117,11 @@ type reportLite struct {
 	} `json:"participants"`
 }
 
-// ComputeAndPersist computes scores for every player in every verified match
-// and writes per-match scores.json artifacts plus a corpus scores catalog.
-// It is deterministic and rebuildable from persisted metrics.
-func ComputeAndPersist(st *store.Store, c *Contract, roleReg *roles.Registry, overrides *roles.OverrideFile) (*CorpusScores, error) {
-	cor, err := BuildCorpusFromStore(st, c, roleReg, overrides)
+// ComputeAndPersist computes player-tournament and team-tournament scores from
+// persisted metrics and writes per-match rows plus the corpus catalog. It is
+// deterministic and rebuildable.
+func ComputeAndPersist(st *store.Store, c *Contract, mreg *metrics.Registry, roleReg *roles.Registry, overrides *roles.OverrideFile) (*CorpusScores, error) {
+	cor, err := BuildCorpusFromStore(st, c, mreg, roleReg, overrides)
 	if err != nil {
 		return nil, err
 	}
@@ -115,17 +129,42 @@ func ComputeAndPersist(st *store.Store, c *Contract, roleReg *roles.Registry, ov
 		SchemaVersion:        version.ScoreSchema,
 		RuleVersion:          version.ScoreRuleVersion,
 		ContractVersion:      c.SchemaVersion,
+		TeamScoringVersion:   TeamScoringVersion,
 		ComparisonPopulation: c.ComparisonPopulation,
 		CorpusMatches:        cor.MatchCount(),
 		Matches:              map[string]*MatchScores{},
+		Players:              []*PlayerScore{},
+		Teams:                []*TeamScore{},
 	}
-	// Group corpus by match, preserving deterministic order.
-	byMatch := map[string][]*PlayerMatch{}
-	for _, p := range cor.Players {
-		byMatch[p.MatchID] = append(byMatch[p.MatchID], p)
+
+	// Player tournament snapshots (one per account+role).
+	keys := make([]string, 0, len(cor.Tournaments))
+	for k := range cor.Tournaments {
+		keys = append(keys, k)
 	}
-	ids := make([]string, 0, len(byMatch))
-	for id := range byMatch {
+	sort.Strings(keys)
+	for _, k := range keys {
+		pt := cor.Tournaments[k]
+		if ps := cor.ScorePlayer(pt.AccountID, pt.NominalRole); ps != nil {
+			cs.Players = append(cs.Players, ps)
+		}
+	}
+
+	// Team tournament snapshots.
+	tids := make([]string, 0, len(cor.Teams))
+	for t := range cor.Teams {
+		tids = append(tids, t)
+	}
+	sort.Strings(tids)
+	for _, tid := range tids {
+		if ts := cor.ScoreTeam(tid); ts != nil {
+			cs.Teams = append(cs.Teams, ts)
+		}
+	}
+
+	// Per-match rows for drilldown.
+	ids := make([]string, 0, len(cor.Matches))
+	for id := range cor.Matches {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -134,14 +173,11 @@ func ComputeAndPersist(st *store.Store, c *Contract, roleReg *roles.Registry, ov
 			SchemaVersion: version.ScoreSchema,
 			RuleVersion:   version.ScoreRuleVersion,
 			MatchID:       matchID,
-			Players:       []*PlayerScore{},
+			Players:       []*PlayerMatch{},
 		}
-		pm := byMatch[matchID]
+		pm := cor.Matches[matchID]
 		sort.Slice(pm, func(i, j int) bool { return pm[i].AccountID < pm[j].AccountID })
-		for _, p := range pm {
-			ps := cor.ScorePlayer(p)
-			ms.Players = append(ms.Players, ps)
-		}
+		ms.Players = append(ms.Players, pm...)
 		if err := st.WriteJSON(matchID, store.ArtifactScores, ms); err != nil {
 			return nil, fmt.Errorf("scoring: persist %s: %w", matchID, err)
 		}

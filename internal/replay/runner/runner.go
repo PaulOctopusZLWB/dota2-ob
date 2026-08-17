@@ -325,7 +325,7 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		return nil, err
 	}
 
-	metOut, err := buildMetrics(factsPath, mt.MatchID, accounts, accountName, teamByAcct, roleByAcct, teamOfSide, opts.MetricRegistry, epOut, phaseOut)
+	metOut, err := buildMetrics(factsPath, mt.MatchID, accounts, accountName, teamByAcct, roleByAcct, teamOfSide, opts.MetricRegistry, epOut, phaseOut, factsSummary)
 	if err != nil {
 		return nil, fmt.Errorf("runner: metrics: %w", err)
 	}
@@ -669,7 +669,7 @@ func floatValue(p *int64) float64 {
 	return float64(*p)
 }
 
-func buildMetrics(factsPath, matchID string, accounts []string, accountName, teamByAcct map[string]string, roleByAcct, teamOfSide map[string]string, reg *metrics.Registry, epOut *episodes.Output, phaseOut *phase.Output) (*metrics.Output, error) {
+func buildMetrics(factsPath, matchID string, accounts []string, accountName, teamByAcct map[string]string, roleByAcct, teamOfSide map[string]string, reg *metrics.Registry, epOut *episodes.Output, phaseOut *phase.Output, fs *facts.Summary) (*metrics.Output, error) {
 	rf, err := os.Open(factsPath)
 	if err != nil {
 		return nil, err
@@ -679,6 +679,22 @@ func buildMetrics(factsPath, matchID string, accounts []string, accountName, tea
 	calc.SetRegistry(reg)
 	calc.SetRoles(roleByAcct)
 	calc.SetTeamOfSide(teamOfSide)
+	if fs != nil {
+		var covered []string
+		for _, c := range fs.Families {
+			if c.Available {
+				covered = append(covered, c.Family)
+			}
+		}
+		calc.SetFactsCoverage(covered)
+	}
+	// Derived artifacts that feed V2 metrics: fight episodes and phases.
+	if hasFightEpisodes(epOut) {
+		calc.MarkDerivedAvailable("episodes_fight")
+	}
+	if phaseOut != nil && len(phaseOut.Intervals) > 0 {
+		calc.MarkDerivedAvailable("phases")
+	}
 	r := facts.NewReader(rf)
 	for {
 		f, err := r.Next()
@@ -695,6 +711,20 @@ func buildMetrics(factsPath, matchID string, accounts []string, accountName, tea
 		return nil, err
 	}
 	return out, nil
+}
+
+// hasFightEpisodes reports whether the episodes artifact produced fight
+// intervals (the derived input for fight-based V2 metrics).
+func hasFightEpisodes(epOut *episodes.Output) bool {
+	if epOut == nil {
+		return false
+	}
+	for i := range epOut.Episodes {
+		if epOut.Episodes[i].Kind == episodes.KindFight {
+			return true
+		}
+	}
+	return false
 }
 
 func teamIDFor(mt *archive.Match, side string) string {

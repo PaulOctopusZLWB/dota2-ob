@@ -88,7 +88,8 @@ function radarPoints(axes, values, cx, cy, r) {
   let pts = [];
   for (let i = 0; i < n; i++) {
     const ang = -Math.PI / 2 + (2 * Math.PI * i) / n;
-    const v = Math.max(0, Math.min(100, values[axes[i]] == null ? 0 : values[axes[i]]));
+    const raw = values == null ? 0 : values[axes[i]];
+    const v = Math.max(0, Math.min(100, raw == null ? 0 : raw));
     const x = cx + r * (v / 100) * Math.cos(ang);
     const y = cy + r * (v / 100) * Math.sin(ang);
     pts.push(x + "," + y);
@@ -97,6 +98,7 @@ function radarPoints(axes, values, cx, cy, r) {
 }
 
 // renderRadar draws solid (official) and dashed (experimental) layers.
+// axisLabels is optional; when null the canonical AXIS_ZH labels are used.
 function renderRadar(official, experimental, axisLabels) {
   const cx = 160, cy = 160, r = 110;
   const n = AXES.length;
@@ -117,12 +119,12 @@ function renderRadar(official, experimental, axisLabels) {
     const lx = (cx + (r + 18) * Math.cos(ang)).toFixed(1);
     const ly = (cy + (r + 18) * Math.sin(ang)).toFixed(1);
     const anchor = Math.cos(ang) > 0 ? "start" : Math.cos(ang) < 0 ? "end" : "middle";
-    grid += `<text x="${lx}" y="${ly}" fill="#a4aaa0" font-size="10" text-anchor="${anchor}" dominant-baseline="middle">${esc(axisLabels[i] || AXIS_ZH[AXES[i]] || AXES[i])}</text>`;
+    const label = axisLabels && axisLabels[i] ? axisLabels[i] : (AXIS_ZH[AXES[i]] || AXES[i]);
+    grid += `<text x="${lx}" y="${ly}" fill="#a4aaa0" font-size="10" text-anchor="${anchor}" dominant-baseline="middle">${esc(label)}</text>`;
   }
-  // Experimental dashed layer first (behind), then official solid.
   let exp = "";
   if (experimental) {
-    exp = `<polygon points="${radarPoints(AXES, experimental, cx, cy, r)}" fill="rgba(127,179,217,0.12)" stroke="${"#7fb3d9"}" stroke-width="1.6" stroke-dasharray="5 4"/>`;
+    exp = `<polygon points="${radarPoints(AXES, experimental, cx, cy, r)}" fill="rgba(127,179,217,0.12)" stroke="#7fb3d9" stroke-width="1.6" stroke-dasharray="5 4"/>`;
   }
   let off = "";
   if (official) {
@@ -133,7 +135,7 @@ function renderRadar(official, experimental, axisLabels) {
   </svg>`;
 }
 
-// scoreValues extracts published axis values from a PlayerScore object.
+// scoreValues extracts published axis values from a scoring snapshot.
 function scoreValues(ps, layer) {
   const src = layer === "experimental" ? ps.experimental_axes : ps.official_axes;
   const out = {};
@@ -141,10 +143,10 @@ function scoreValues(ps, layer) {
     const ax = src && src[a];
     if (ax && ax.published && ax.value != null) out[a] = ax.value;
   }
-  return out;
+  return Object.keys(out).length ? out : null;
 }
 
-// axisCoverageRow renders the per-axis decomposition table.
+// axisRows renders the per-axis decomposition table.
 function axisRows(ps, layer) {
   const src = layer === "experimental" ? ps.experimental_axes : ps.official_axes;
   let rows = "";
@@ -207,9 +209,9 @@ async function load() {
     const c = document.getElementById("content");
     c.innerHTML = "";
     const matches = data.matches || [];
+    const ps = data.score;
     document.getElementById("status").textContent = `${matches.length} 场比赛`;
 
-    // Profile header with role provenance from the first match.
     let header = `<div class="panel"><h3 style="margin-top:0">选手概览</h3><table>`;
     if (matches[0]) {
       const m0 = matches[0];
@@ -217,20 +219,22 @@ async function load() {
         <tr><th>名义角色</th><td><span class="role">${esc(m0.nominal_role || "-")}</span>${esc(m0.role_source || "")}</td></tr>
         <tr><th>角色来源</th><td>${esc(m0.role_source || "-")} ${m0.role_source_url ? `<a href="${esc(safeUrl(m0.role_source_url))}" target="_blank" rel="noopener">来源</a>` : ""}</td></tr>`;
     }
+    if (ps && ps.subject_coverage) {
+      const cov = ps.subject_coverage;
+      header += `<tr><th>有效比赛数</th><td class="num">${esc(cov.eligible_matches)}</td></tr>
+        <tr><th>已发布指标数</th><td class="num">${esc(cov.published_metrics)}</td></tr>
+        <tr><th>语料比赛数</th><td class="num">${esc(cov.corpus_matches)}</td></tr>`;
+    }
     header += `</table></div>`;
     c.insertAdjacentHTML("beforeend", header);
 
-    // Match-by-match score cards.
-    for (const m of matches) {
-      const ps = m.score;
+    if (ps) {
       c.insertAdjacentHTML("beforeend", `
         <div class="panel">
-          <h3 style="margin-top:0">比赛 <a href="match.html?id=${esc(m.match_id)}">${esc(m.match_id)}</a>
-            <span class="hint">${esc(m.hero || "-")} · 角色 ${esc(m.nominal_role || "-")}</span></h3>
+          <h3 style="margin-top:0">八轴雷达（选手锦标赛聚合）</h3>
           <div class="grid">
             <div class="panel">
-              <h4 style="margin-top:0">八轴雷达</h4>
-              ${ps ? renderRadar(scoreValues(ps, "official"), scoreValues(ps, "experimental"), null) : `<p class="hint">该比赛暂无评分快照</p>`}
+              ${renderRadar(scoreValues(ps, "official"), scoreValues(ps, "experimental"), null)}
               <div class="legend">
                 <span><span class="solid-dot"></span>官方实线（V1/V2）</span>
                 <span><span class="dash-dot"></span>实验虚线（V3）</span>
@@ -238,24 +242,38 @@ async function load() {
             </div>
             <div class="panel">
               <h4 style="margin-top:0">官方总分</h4>
-              ${ps ? totalCard(ps.official_total) : `<p class="hint">无</p>`}
+              ${totalCard(ps.official_total)}
               <h4 style="margin-top:12px">实验总分（V3）</h4>
-              ${ps ? totalCard(ps.experimental_total) : `<p class="hint">无</p>`}
-              ${ps ? `<p class="hint">同角色语料 ${esc(ps.corpus_matches)} 场 · ${esc(ps.comparison_population || "")}</p>` : ""}
+              ${totalCard(ps.experimental_total)}
+              <p class="hint">同角色语料：选手有效 ${esc(ps.subject_coverage.eligible_matches)} 场 · 语料 ${esc(ps.subject_coverage.corpus_matches)} 场 · ${esc(ps.comparison_population || "")}</p>
             </div>
           </div>
-          ${ps ? `
           <h4 style="margin-top:12px">官方轴分解</h4>
           <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "official")}</tbody></table>
           <h4 style="margin-top:12px">实验轴分解（虚线 V3）</h4>
           <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "experimental")}</tbody></table>
           <h4 style="margin-top:12px">指标分解（原始值 · 同角色百分位 · 权重 · 覆盖）</h4>
           <table><thead><tr><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
-          ` : ""}
         </div>`);
+    } else {
+      c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">该账户尚无评分快照（语料中无已发布比赛）。</p></div>`);
     }
-    if (matches.length === 0) {
-      c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">该账户没有已发布比赛记录。</p></div>`);
+
+    if (matches.length) {
+      let mrows = "";
+      for (const m of matches) {
+        const mm = m.match_metrics || {};
+        const kvs = Object.keys(mm).map(k => `${esc(k)}=${fmt(mm[k].value)}`).join(" · ");
+        mrows += `<tr>
+          <td><a href="match.html?id=${esc(m.match_id)}">${esc(m.match_id)}</a></td>
+          <td>${esc(m.hero || "-")}</td>
+          <td><span class="role">${esc(m.nominal_role || "-")}</span></td>
+          <td class="hint">${kvs || "无比赛级指标"}</td>
+        </tr>`;
+      }
+      c.insertAdjacentHTML("beforeend", `
+        <div class="panel"><h3 style="margin-top:0">逐场明细（原始指标值）</h3>
+        <table><thead><tr><th>比赛</th><th>英雄</th><th>角色</th><th>指标</th></tr></thead><tbody>${mrows}</tbody></table></div>`);
     }
   } catch (e) {
     document.getElementById("status").textContent = "加载失败: " + e;
