@@ -1,0 +1,4914 @@
+{
+  "protocol": "P3",
+  "measuredAt": "2026-08-13T06:31:35.473496+00:00",
+  "baseCommit": "217f02d1137aaae8af951215756057a305d9c20d",
+  "sourceDiffSHA256": "437dc7cbb467e63ed50c4cb5caddb1d0a7212a987637f9b3092654f891b3cd39",
+  "configured": {
+    "runKind": "preflight-a",
+    "resolution": "1440p",
+    "emptyBaselineSeconds": 60,
+    "overlayWarmupSeconds": 600,
+    "recordingSeconds": 180,
+    "sampleSeconds": 5
+  },
+  "host": {
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux 7.0.0-28-generic x86_64 GNU/Linux",
+    "logicalCPUs": 32,
+    "cpuGovernor": "performance",
+    "loadAverage": [
+      14.726,
+      12.076,
+      11.249
+    ],
+    "concurrentProcessCount": 666,
+    "sessionType": "x11",
+    "networkNamespace": "loopback-only"
+  },
+  "stack": {
+    "obs": "32.2.1",
+    "browserSource": "2.26.9",
+    "cef": "127.0.6533.120",
+    "flatpakCommit": "a3a5cbd575a1ab74c239cd3fd6903377377a43ef65e936271f655d458dc520b4",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "driver": "595.84",
+    "ffmpeg": "ffmpeg version 7.1.3 Copyright (c) 2000-2025 the FFmpeg developers",
+    "canvas": "2560x1440@60",
+    "browserSourceViewport": "2560x1440@30",
+    "browserHardwareAcceleration": false,
+    "composition": "OBS OpenGL; CEF software-composited",
+    "encoder": "NVENC H.264"
+  },
+  "baseline": {
+    "durationSeconds": 60.352,
+    "samples": 12,
+    "medianPssKiB": 643430.0,
+    "counters": {
+      "framesOutput": 3621,
+      "drawnFrames": 3618,
+      "attemptedDrawnFrames": 3650,
+      "renderLaggedFrames": 32,
+      "renderLagPercent": 0.9,
+      "encodingSkippedFrames": 21,
+      "encodingSkipPercent": 0.6,
+      "graphicsThreadP99Ms": 1.796,
+      "crash": false
+    }
+  },
+  "overlay": {
+    "videoDurationSeconds": 780.309,
+    "measuredDurationSeconds": 180,
+    "warmupSamples": 120,
+    "recordingSamples": 36,
+    "medianPssKiB": 919811.0,
+    "incrementalPssKiB": 276381.0,
+    "pssGrowthKiBPerMinute": 1130.584,
+    "pssTotalGrowthKiB": 5196,
+    "pssByComponent": {
+      "total": {
+        "baselineMedianKiB": 643430.0,
+        "overlayMedianKiB": 919811.0,
+        "incrementalMedianKiB": 276381.0,
+        "growthKiBPerMinute": 1130.584,
+        "totalRangeKiB": 5196
+      },
+      "obs": {
+        "baselineMedianKiB": 643430.0,
+        "overlayMedianKiB": 616874.5,
+        "incrementalMedianKiB": -26555.5,
+        "growthKiBPerMinute": 45.534,
+        "totalRangeKiB": 165
+      },
+      "browser": {
+        "baselineMedianKiB": 0.0,
+        "overlayMedianKiB": 302834.0,
+        "incrementalMedianKiB": 302834.0,
+        "growthKiBPerMinute": 1085.05,
+        "totalRangeKiB": 5176
+      }
+    },
+    "medianOverlayCpuPercentOfOneCore": 0.6,
+    "medianCombinedObsAndBrowserCpuPercentOfOneCore": 9.4,
+    "maxGpuFramebufferMiB": 775,
+    "counters": {
+      "framesOutput": 46818,
+      "drawnFrames": 46781,
+      "attemptedDrawnFrames": 46850,
+      "renderLaggedFrames": 69,
+      "renderLagPercent": 0.1,
+      "encodingSkippedFrames": 57,
+      "encodingSkipPercent": 0.1,
+      "graphicsThreadP99Ms": 1.408,
+      "crash": false
+    },
+    "renderLagDeltaPercentagePoints": -0.8
+  },
+  "visibility": {
+    "crop": {
+      "x": 1770,
+      "y": 80,
+      "width": 750,
+      "height": 450
+    },
+    "sampleSeconds": 5,
+    "threshold": 3.389,
+    "hiddenChecks": 14,
+    "hiddenViolations": 0,
+    "recoveryChecks": 8,
+    "recoveryViolations": 0,
+    "hiddenSamples": [
+      {
+        "seconds": 600,
+        "mode": "malformed",
+        "modeAgeSeconds": 8.639,
+        "modeRemainingSeconds": 3.362,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 610,
+        "mode": "missing-asset",
+        "modeAgeSeconds": 6.638,
+        "modeRemainingSeconds": 5.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 620,
+        "mode": "emergency-hide",
+        "modeAgeSeconds": 4.639,
+        "modeRemainingSeconds": 7.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 625,
+        "mode": "emergency-hide",
+        "modeAgeSeconds": 9.639,
+        "modeRemainingSeconds": 2.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 630,
+        "mode": "disconnect",
+        "modeAgeSeconds": 2.639,
+        "modeRemainingSeconds": 9.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 635,
+        "mode": "disconnect",
+        "modeAgeSeconds": 7.639,
+        "modeRemainingSeconds": 4.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 705,
+        "mode": "stale",
+        "modeAgeSeconds": 5.639,
+        "modeRemainingSeconds": 6.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 715,
+        "mode": "malformed",
+        "modeAgeSeconds": 3.639,
+        "modeRemainingSeconds": 8.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 720,
+        "mode": "malformed",
+        "modeAgeSeconds": 8.639,
+        "modeRemainingSeconds": 3.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 730,
+        "mode": "missing-asset",
+        "modeAgeSeconds": 6.639,
+        "modeRemainingSeconds": 5.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 740,
+        "mode": "emergency-hide",
+        "modeAgeSeconds": 4.639,
+        "modeRemainingSeconds": 7.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 745,
+        "mode": "emergency-hide",
+        "modeAgeSeconds": 9.639,
+        "modeRemainingSeconds": 2.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 750,
+        "mode": "disconnect",
+        "modeAgeSeconds": 2.639,
+        "modeRemainingSeconds": 9.361,
+        "score": 0.389,
+        "visible": false
+      },
+      {
+        "seconds": 755,
+        "mode": "disconnect",
+        "modeAgeSeconds": 7.639,
+        "modeRemainingSeconds": 4.361,
+        "score": 0.389,
+        "visible": false
+      }
+    ],
+    "recoverySamples": [
+      {
+        "seconds": 645,
+        "mode": "draft",
+        "modeAgeSeconds": 5.639,
+        "modeRemainingSeconds": 4.861,
+        "score": 32.855,
+        "visible": true
+      },
+      {
+        "seconds": 655,
+        "mode": "economy",
+        "modeAgeSeconds": 5.139,
+        "modeRemainingSeconds": 4.612,
+        "score": 34.621,
+        "visible": true
+      },
+      {
+        "seconds": 665,
+        "mode": "item",
+        "modeAgeSeconds": 5.388,
+        "modeRemainingSeconds": 4.361,
+        "score": 53.483,
+        "visible": true
+      },
+      {
+        "seconds": 675,
+        "mode": "lane",
+        "modeAgeSeconds": 5.639,
+        "modeRemainingSeconds": 4.861,
+        "score": 35.135,
+        "visible": true
+      },
+      {
+        "seconds": 685,
+        "mode": "objective",
+        "modeAgeSeconds": 5.139,
+        "modeRemainingSeconds": 4.611,
+        "score": 32.92,
+        "visible": true
+      },
+      {
+        "seconds": 695,
+        "mode": "teamfight",
+        "modeAgeSeconds": 5.389,
+        "modeRemainingSeconds": 4.361,
+        "score": 35.304,
+        "visible": true
+      },
+      {
+        "seconds": 765,
+        "mode": "draft",
+        "modeAgeSeconds": 5.639,
+        "modeRemainingSeconds": 4.861,
+        "score": 32.855,
+        "visible": true
+      },
+      {
+        "seconds": 775,
+        "mode": "economy",
+        "modeAgeSeconds": 5.139,
+        "modeRemainingSeconds": 4.611,
+        "score": 34.621,
+        "visible": true
+      }
+    ]
+  },
+  "network": {
+    "remotePeers": [],
+    "loopbackPeersObserved": [
+      "127.0.0.1:18838",
+      "127.0.0.1:33956",
+      "127.0.0.1:40438",
+      "127.0.0.1:41856"
+    ]
+  },
+  "stateTransitions": [
+    {
+      "at": "2026-08-13T06:18:09.070Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:18:12.248Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:18:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:18:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:18:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:18:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:19:08.498Z",
+      "mode": "item"
+    },
+    {
+      "at": "2026-08-13T06:19:18.248Z",
+      "mode": "lane"
+    },
+    {
+      "at": "2026-08-13T06:19:28.748Z",
+      "mode": "objective"
+    },
+    {
+      "at": "2026-08-13T06:19:38.498Z",
+      "mode": "teamfight"
+    },
+    {
+      "at": "2026-08-13T06:19:48.249Z",
+      "mode": "stale"
+    },
+    {
+      "at": "2026-08-13T06:20:00.248Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:20:12.248Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:20:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:20:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:20:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:20:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:21:08.498Z",
+      "mode": "item"
+    },
+    {
+      "at": "2026-08-13T06:21:18.248Z",
+      "mode": "lane"
+    },
+    {
+      "at": "2026-08-13T06:21:28.748Z",
+      "mode": "objective"
+    },
+    {
+      "at": "2026-08-13T06:21:38.498Z",
+      "mode": "teamfight"
+    },
+    {
+      "at": "2026-08-13T06:21:48.249Z",
+      "mode": "stale"
+    },
+    {
+      "at": "2026-08-13T06:22:00.248Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:22:12.248Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:22:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:22:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:22:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:22:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:23:08.498Z",
+      "mode": "item"
+    },
+    {
+      "at": "2026-08-13T06:23:18.248Z",
+      "mode": "lane"
+    },
+    {
+      "at": "2026-08-13T06:23:28.748Z",
+      "mode": "objective"
+    },
+    {
+      "at": "2026-08-13T06:23:38.498Z",
+      "mode": "teamfight"
+    },
+    {
+      "at": "2026-08-13T06:23:48.248Z",
+      "mode": "stale"
+    },
+    {
+      "at": "2026-08-13T06:24:00.249Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:24:12.248Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:24:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:24:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:24:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:24:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:25:08.498Z",
+      "mode": "item"
+    },
+    {
+      "at": "2026-08-13T06:25:18.248Z",
+      "mode": "lane"
+    },
+    {
+      "at": "2026-08-13T06:25:28.748Z",
+      "mode": "objective"
+    },
+    {
+      "at": "2026-08-13T06:25:38.498Z",
+      "mode": "teamfight"
+    },
+    {
+      "at": "2026-08-13T06:25:48.248Z",
+      "mode": "stale"
+    },
+    {
+      "at": "2026-08-13T06:26:00.248Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:26:12.248Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:26:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:26:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:26:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:26:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:27:08.498Z",
+      "mode": "item"
+    },
+    {
+      "at": "2026-08-13T06:27:18.248Z",
+      "mode": "lane"
+    },
+    {
+      "at": "2026-08-13T06:27:28.749Z",
+      "mode": "objective"
+    },
+    {
+      "at": "2026-08-13T06:27:38.498Z",
+      "mode": "teamfight"
+    },
+    {
+      "at": "2026-08-13T06:27:48.248Z",
+      "mode": "stale"
+    },
+    {
+      "at": "2026-08-13T06:28:00.248Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:28:12.249Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:28:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:28:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:28:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:28:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:29:08.499Z",
+      "mode": "item"
+    },
+    {
+      "at": "2026-08-13T06:29:18.248Z",
+      "mode": "lane"
+    },
+    {
+      "at": "2026-08-13T06:29:28.748Z",
+      "mode": "objective"
+    },
+    {
+      "at": "2026-08-13T06:29:38.498Z",
+      "mode": "teamfight"
+    },
+    {
+      "at": "2026-08-13T06:29:48.248Z",
+      "mode": "stale"
+    },
+    {
+      "at": "2026-08-13T06:30:00.248Z",
+      "mode": "malformed"
+    },
+    {
+      "at": "2026-08-13T06:30:12.248Z",
+      "mode": "missing-asset"
+    },
+    {
+      "at": "2026-08-13T06:30:24.248Z",
+      "mode": "emergency-hide"
+    },
+    {
+      "at": "2026-08-13T06:30:36.248Z",
+      "mode": "disconnect"
+    },
+    {
+      "at": "2026-08-13T06:30:48.248Z",
+      "mode": "draft"
+    },
+    {
+      "at": "2026-08-13T06:30:58.748Z",
+      "mode": "economy"
+    },
+    {
+      "at": "2026-08-13T06:31:08.498Z",
+      "mode": "item"
+    }
+  ],
+  "samples": {
+    "emptyBaseline": [
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:16:58.067921+00:00",
+        "elapsedSeconds": 0.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 640600,
+        "pssKiBByKind": {
+          "obs": 640600,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": null,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": null,
+          "browser": null
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "economy",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:03.065297+00:00",
+        "elapsedSeconds": 5.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643100,
+        "pssKiBByKind": {
+          "obs": 643100,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "economy",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:08.065972+00:00",
+        "elapsedSeconds": 10.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643324,
+        "pssKiBByKind": {
+          "obs": 643324,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "item",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:13.066902+00:00",
+        "elapsedSeconds": 15.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643380,
+        "pssKiBByKind": {
+          "obs": 643380,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.0,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "item",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:18.069581+00:00",
+        "elapsedSeconds": 20.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643420,
+        "pssKiBByKind": {
+          "obs": 643420,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "lane",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:23.066817+00:00",
+        "elapsedSeconds": 25.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643420,
+        "pssKiBByKind": {
+          "obs": 643420,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "lane",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:28.068617+00:00",
+        "elapsedSeconds": 30.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643440,
+        "pssKiBByKind": {
+          "obs": 643440,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "objective",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:33.066704+00:00",
+        "elapsedSeconds": 35.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643452,
+        "pssKiBByKind": {
+          "obs": 643452,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "objective",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:38.066147+00:00",
+        "elapsedSeconds": 40.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643452,
+        "pssKiBByKind": {
+          "obs": 643452,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "teamfight",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:43.068284+00:00",
+        "elapsedSeconds": 45.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643452,
+        "pssKiBByKind": {
+          "obs": 643452,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "teamfight",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:48.069734+00:00",
+        "elapsedSeconds": 50.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643452,
+        "pssKiBByKind": {
+          "obs": 643452,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "stale",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "empty-baseline",
+        "at": "2026-08-13T06:17:53.068381+00:00",
+        "elapsedSeconds": 55.0,
+        "pids": {
+          "obs": 1,
+          "browser": 0
+        },
+        "pssKiB": 643452,
+        "pssKiBByKind": {
+          "obs": 643452,
+          "browser": 0
+        },
+        "cpuPercentOfOneCore": 8.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.2,
+          "browser": 0.0
+        },
+        "gpuFramebufferMiB": 749,
+        "mode": "stale",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      }
+    ],
+    "overlayWarmup": [
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:09.041218+00:00",
+        "elapsedSeconds": 0.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 784258,
+        "pssKiBByKind": {
+          "obs": 567325,
+          "browser": 216933
+        },
+        "cpuPercentOfOneCore": null,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": null,
+          "browser": null
+        },
+        "gpuFramebufferMiB": 755,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:59756"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:14.043894+00:00",
+        "elapsedSeconds": 5.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 874379,
+        "pssKiBByKind": {
+          "obs": 615576,
+          "browser": 258803
+        },
+        "cpuPercentOfOneCore": 16.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 13.2,
+          "browser": 2.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:59756",
+          "127.0.0.1:59780",
+          "127.0.0.1:59794"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:19.044808+00:00",
+        "elapsedSeconds": 10.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 874795,
+        "pssKiBByKind": {
+          "obs": 615852,
+          "browser": 258943
+        },
+        "cpuPercentOfOneCore": 8.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:59794"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:24.045861+00:00",
+        "elapsedSeconds": 15.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 874947,
+        "pssKiBByKind": {
+          "obs": 615900,
+          "browser": 259047
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:59794"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:29.042351+00:00",
+        "elapsedSeconds": 20.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 875115,
+        "pssKiBByKind": {
+          "obs": 615940,
+          "browser": 259175
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:59794"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:34.038918+00:00",
+        "elapsedSeconds": 25.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 875271,
+        "pssKiBByKind": {
+          "obs": 615952,
+          "browser": 259319
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:59794"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:39.043100+00:00",
+        "elapsedSeconds": 30.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 877387,
+        "pssKiBByKind": {
+          "obs": 615972,
+          "browser": 261415
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:44.041658+00:00",
+        "elapsedSeconds": 35.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 877667,
+        "pssKiBByKind": {
+          "obs": 615961,
+          "browser": 261706
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:49.043434+00:00",
+        "elapsedSeconds": 40.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 890547,
+        "pssKiBByKind": {
+          "obs": 615968,
+          "browser": 274579
+        },
+        "cpuPercentOfOneCore": 10.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 1.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:54.044016+00:00",
+        "elapsedSeconds": 45.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 890711,
+        "pssKiBByKind": {
+          "obs": 616084,
+          "browser": 274627
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:18:59.044093+00:00",
+        "elapsedSeconds": 50.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 892639,
+        "pssKiBByKind": {
+          "obs": 616084,
+          "browser": 276555
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:04.045107+00:00",
+        "elapsedSeconds": 55.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 892907,
+        "pssKiBByKind": {
+          "obs": 616224,
+          "browser": 276683
+        },
+        "cpuPercentOfOneCore": 8.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:09.043152+00:00",
+        "elapsedSeconds": 60.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 896357,
+        "pssKiBByKind": {
+          "obs": 616403,
+          "browser": 279954
+        },
+        "cpuPercentOfOneCore": 10.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:14.041705+00:00",
+        "elapsedSeconds": 65.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 895637,
+        "pssKiBByKind": {
+          "obs": 616427,
+          "browser": 279210
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:19.042921+00:00",
+        "elapsedSeconds": 70.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 898664,
+        "pssKiBByKind": {
+          "obs": 616631,
+          "browser": 282033
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:24.044357+00:00",
+        "elapsedSeconds": 75.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 898400,
+        "pssKiBByKind": {
+          "obs": 616639,
+          "browser": 281761
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:29.045171+00:00",
+        "elapsedSeconds": 80.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897180,
+        "pssKiBByKind": {
+          "obs": 616639,
+          "browser": 280541
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:34.053002+00:00",
+        "elapsedSeconds": 85.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897176,
+        "pssKiBByKind": {
+          "obs": 616639,
+          "browser": 280537
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:39.050841+00:00",
+        "elapsedSeconds": 90.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897616,
+        "pssKiBByKind": {
+          "obs": 616703,
+          "browser": 280913
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:44.044970+00:00",
+        "elapsedSeconds": 95.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897000,
+        "pssKiBByKind": {
+          "obs": 616755,
+          "browser": 280245
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:49.046327+00:00",
+        "elapsedSeconds": 100.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897192,
+        "pssKiBByKind": {
+          "obs": 616755,
+          "browser": 280437
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:54.044719+00:00",
+        "elapsedSeconds": 105.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 896412,
+        "pssKiBByKind": {
+          "obs": 616755,
+          "browser": 279657
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:19:59.044592+00:00",
+        "elapsedSeconds": 110.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 896544,
+        "pssKiBByKind": {
+          "obs": 616755,
+          "browser": 279789
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:04.064650+00:00",
+        "elapsedSeconds": 115.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 896756,
+        "pssKiBByKind": {
+          "obs": 616779,
+          "browser": 279977
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:09.041546+00:00",
+        "elapsedSeconds": 120.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 896983,
+        "pssKiBByKind": {
+          "obs": 616723,
+          "browser": 280260
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:14.043001+00:00",
+        "elapsedSeconds": 125.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897111,
+        "pssKiBByKind": {
+          "obs": 616723,
+          "browser": 280388
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:19.045622+00:00",
+        "elapsedSeconds": 130.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897291,
+        "pssKiBByKind": {
+          "obs": 616723,
+          "browser": 280568
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:24.041995+00:00",
+        "elapsedSeconds": 135.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897419,
+        "pssKiBByKind": {
+          "obs": 616723,
+          "browser": 280696
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:29.041157+00:00",
+        "elapsedSeconds": 140.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897547,
+        "pssKiBByKind": {
+          "obs": 616723,
+          "browser": 280824
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:34.043712+00:00",
+        "elapsedSeconds": 145.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897699,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 280948
+        },
+        "cpuPercentOfOneCore": 8.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:47590"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:39.040932+00:00",
+        "elapsedSeconds": 150.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897775,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 281024
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:44.041994+00:00",
+        "elapsedSeconds": 155.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 897847,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 281096
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:49.042648+00:00",
+        "elapsedSeconds": 160.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 900151,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 283400
+        },
+        "cpuPercentOfOneCore": 10.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 1.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:54.045296+00:00",
+        "elapsedSeconds": 165.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 900207,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 283456
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:20:59.045440+00:00",
+        "elapsedSeconds": 170.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 901963,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 285212
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:04.044664+00:00",
+        "elapsedSeconds": 175.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 902103,
+        "pssKiBByKind": {
+          "obs": 616751,
+          "browser": 285352
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:09.042721+00:00",
+        "elapsedSeconds": 180.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905547,
+        "pssKiBByKind": {
+          "obs": 616811,
+          "browser": 288736
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:14.043985+00:00",
+        "elapsedSeconds": 185.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904807,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 287984
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:19.044207+00:00",
+        "elapsedSeconds": 190.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 906055,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 289232
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:24.043112+00:00",
+        "elapsedSeconds": 195.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905787,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288964
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:29.044306+00:00",
+        "elapsedSeconds": 200.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905331,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288508
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:34.045105+00:00",
+        "elapsedSeconds": 205.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905295,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288472
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:39.043402+00:00",
+        "elapsedSeconds": 210.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905627,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288804
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:44.043590+00:00",
+        "elapsedSeconds": 215.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904951,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288128
+        },
+        "cpuPercentOfOneCore": 8.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:49.049239+00:00",
+        "elapsedSeconds": 220.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905119,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288296
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:54.046068+00:00",
+        "elapsedSeconds": 225.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904327,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 287504
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:21:59.044813+00:00",
+        "elapsedSeconds": 230.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904463,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 287640
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:04.058072+00:00",
+        "elapsedSeconds": 235.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904611,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 287788
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:09.043572+00:00",
+        "elapsedSeconds": 240.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904727,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 287904
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:14.044449+00:00",
+        "elapsedSeconds": 245.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 904867,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288044
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:19.042646+00:00",
+        "elapsedSeconds": 250.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905031,
+        "pssKiBByKind": {
+          "obs": 616823,
+          "browser": 288208
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:24.044380+00:00",
+        "elapsedSeconds": 255.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905219,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 288348
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:29.043968+00:00",
+        "elapsedSeconds": 260.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905343,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 288472
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:34.042745+00:00",
+        "elapsedSeconds": 265.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905475,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 288604
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37292"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:39.042836+00:00",
+        "elapsedSeconds": 270.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905555,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 288684
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:44.042873+00:00",
+        "elapsedSeconds": 275.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 905631,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 288760
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:49.046116+00:00",
+        "elapsedSeconds": 280.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 907231,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 290360
+        },
+        "cpuPercentOfOneCore": 10.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:54.042425+00:00",
+        "elapsedSeconds": 285.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 907251,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 290380
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:22:59.044812+00:00",
+        "elapsedSeconds": 290.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 908595,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 291724
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:04.042407+00:00",
+        "elapsedSeconds": 295.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 908731,
+        "pssKiBByKind": {
+          "obs": 616871,
+          "browser": 291860
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:09.045397+00:00",
+        "elapsedSeconds": 300.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914615,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 297824
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:14.046146+00:00",
+        "elapsedSeconds": 305.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 913883,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 297092
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:19.043759+00:00",
+        "elapsedSeconds": 310.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 915695,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 298904
+        },
+        "cpuPercentOfOneCore": 11.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 10.0,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:24.044321+00:00",
+        "elapsedSeconds": 315.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 915455,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 298664
+        },
+        "cpuPercentOfOneCore": 16.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 16.2,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:29.044917+00:00",
+        "elapsedSeconds": 320.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914959,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 298168
+        },
+        "cpuPercentOfOneCore": 12.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 12.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:34.044113+00:00",
+        "elapsedSeconds": 325.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914927,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 298136
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:39.042156+00:00",
+        "elapsedSeconds": 330.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 915207,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 298416
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:44.047400+00:00",
+        "elapsedSeconds": 335.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914495,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 297704
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:49.046104+00:00",
+        "elapsedSeconds": 340.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914695,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 297904
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:54.045565+00:00",
+        "elapsedSeconds": 345.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 913863,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 297072
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:23:59.047930+00:00",
+        "elapsedSeconds": 350.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 913979,
+        "pssKiBByKind": {
+          "obs": 616791,
+          "browser": 297188
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:04.048760+00:00",
+        "elapsedSeconds": 355.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914119,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297304
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:09.045588+00:00",
+        "elapsedSeconds": 360.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914215,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297400
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:14.046857+00:00",
+        "elapsedSeconds": 365.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914335,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297520
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:19.044000+00:00",
+        "elapsedSeconds": 370.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914471,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297656
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:24.046543+00:00",
+        "elapsedSeconds": 375.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914583,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297768
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:29.047870+00:00",
+        "elapsedSeconds": 380.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914703,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297888
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:34.045433+00:00",
+        "elapsedSeconds": 385.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914799,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 297984
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:50994"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:39.045366+00:00",
+        "elapsedSeconds": 390.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914867,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 298052
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:44.043993+00:00",
+        "elapsedSeconds": 395.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 914967,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 298152
+        },
+        "cpuPercentOfOneCore": 8.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:49.043119+00:00",
+        "elapsedSeconds": 400.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 916519,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 299704
+        },
+        "cpuPercentOfOneCore": 10.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 1.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:54.044152+00:00",
+        "elapsedSeconds": 405.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 916519,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 299704
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:24:59.045093+00:00",
+        "elapsedSeconds": 410.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917775,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 300960
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:04.048259+00:00",
+        "elapsedSeconds": 415.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917895,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 301080
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:09.044102+00:00",
+        "elapsedSeconds": 420.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920955,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 304140
+        },
+        "cpuPercentOfOneCore": 10.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:14.047379+00:00",
+        "elapsedSeconds": 425.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920179,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303364
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:19.045695+00:00",
+        "elapsedSeconds": 430.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921271,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 304456
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:24.047746+00:00",
+        "elapsedSeconds": 435.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921135,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 304320
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:29.045345+00:00",
+        "elapsedSeconds": 440.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920647,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303832
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:34.044855+00:00",
+        "elapsedSeconds": 445.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920619,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303804
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:39.045542+00:00",
+        "elapsedSeconds": 450.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920911,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 304096
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:44.044402+00:00",
+        "elapsedSeconds": 455.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920235,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303420
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:49.045682+00:00",
+        "elapsedSeconds": 460.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920399,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303584
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:54.045691+00:00",
+        "elapsedSeconds": 465.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919559,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 302744
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:25:59.041688+00:00",
+        "elapsedSeconds": 470.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919687,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 302872
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:04.044700+00:00",
+        "elapsedSeconds": 475.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919811,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 302996
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:09.043958+00:00",
+        "elapsedSeconds": 480.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919895,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303080
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:14.044039+00:00",
+        "elapsedSeconds": 485.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920023,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303208
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:19.044845+00:00",
+        "elapsedSeconds": 490.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920171,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303356
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:24.046679+00:00",
+        "elapsedSeconds": 495.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920279,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303464
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:29.045535+00:00",
+        "elapsedSeconds": 500.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920395,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303580
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:34.044706+00:00",
+        "elapsedSeconds": 505.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920507,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303692
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:37454"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:39.044785+00:00",
+        "elapsedSeconds": 510.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920583,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303768
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:44.046171+00:00",
+        "elapsedSeconds": 515.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920647,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 303832
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:49.046082+00:00",
+        "elapsedSeconds": 520.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921579,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 304764
+        },
+        "cpuPercentOfOneCore": 11.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.8,
+          "browser": 1.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:54.045548+00:00",
+        "elapsedSeconds": 525.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921575,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 304760
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:26:59.042587+00:00",
+        "elapsedSeconds": 530.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 922847,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 306032
+        },
+        "cpuPercentOfOneCore": 10.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 1.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:04.044635+00:00",
+        "elapsedSeconds": 535.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 922967,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 306152
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:09.042632+00:00",
+        "elapsedSeconds": 540.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 925287,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 308472
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:14.045363+00:00",
+        "elapsedSeconds": 545.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 924471,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 307656
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:19.046759+00:00",
+        "elapsedSeconds": 550.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 925575,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 308760
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:24.046940+00:00",
+        "elapsedSeconds": 555.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 925399,
+        "pssKiBByKind": {
+          "obs": 616815,
+          "browser": 308584
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:29.044365+00:00",
+        "elapsedSeconds": 560.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919240,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 302428
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 1.2
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:34.043279+00:00",
+        "elapsedSeconds": 565.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919080,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 302268
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:39.044122+00:00",
+        "elapsedSeconds": 570.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919068,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 302256
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:44.044237+00:00",
+        "elapsedSeconds": 575.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 918308,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 301496
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:49.045889+00:00",
+        "elapsedSeconds": 580.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 918376,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 301564
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:54.044993+00:00",
+        "elapsedSeconds": 585.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917496,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300684
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:27:59.044991+00:00",
+        "elapsedSeconds": 590.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917520,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300708
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-warmup",
+        "at": "2026-08-13T06:28:04.044875+00:00",
+        "elapsedSeconds": 595.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917532,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300720
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      }
+    ],
+    "overlayRecording": [
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:09.044015+00:00",
+        "elapsedSeconds": 0.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917540,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300728
+        },
+        "cpuPercentOfOneCore": null,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": null,
+          "browser": null
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:14.046171+00:00",
+        "elapsedSeconds": 5.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917556,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300744
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:19.044814+00:00",
+        "elapsedSeconds": 10.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917584,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300772
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:24.044653+00:00",
+        "elapsedSeconds": 15.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917608,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300796
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:29.044740+00:00",
+        "elapsedSeconds": 20.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917628,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300816
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:34.040558+00:00",
+        "elapsedSeconds": 25.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917644,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300832
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:33956"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:39.044629+00:00",
+        "elapsedSeconds": 30.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917652,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300840
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:44.045370+00:00",
+        "elapsedSeconds": 35.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 917652,
+        "pssKiBByKind": {
+          "obs": 616812,
+          "browser": 300840
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:49.047224+00:00",
+        "elapsedSeconds": 40.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 918940,
+        "pssKiBByKind": {
+          "obs": 616860,
+          "browser": 302080
+        },
+        "cpuPercentOfOneCore": 10.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 1.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:54.045528+00:00",
+        "elapsedSeconds": 45.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 918872,
+        "pssKiBByKind": {
+          "obs": 616860,
+          "browser": 302012
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:28:59.044472+00:00",
+        "elapsedSeconds": 50.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 916920,
+        "pssKiBByKind": {
+          "obs": 616860,
+          "browser": 300060
+        },
+        "cpuPercentOfOneCore": 10.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:04.044515+00:00",
+        "elapsedSeconds": 55.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 916968,
+        "pssKiBByKind": {
+          "obs": 616860,
+          "browser": 300108
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:09.045147+00:00",
+        "elapsedSeconds": 60.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920764,
+        "pssKiBByKind": {
+          "obs": 616868,
+          "browser": 303896
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:14.051607+00:00",
+        "elapsedSeconds": 65.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919904,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 303024
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "item",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:19.046506+00:00",
+        "elapsedSeconds": 70.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 922116,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 305236
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:24.044200+00:00",
+        "elapsedSeconds": 75.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921756,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 304876
+        },
+        "cpuPercentOfOneCore": 9.8,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "lane",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:29.044780+00:00",
+        "elapsedSeconds": 80.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921160,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 304280
+        },
+        "cpuPercentOfOneCore": 10.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 1.0
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:34.045741+00:00",
+        "elapsedSeconds": 85.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921028,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 304148
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "objective",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:39.047073+00:00",
+        "elapsedSeconds": 90.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921228,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 304348
+        },
+        "cpuPercentOfOneCore": 10.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.2,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:44.043018+00:00",
+        "elapsedSeconds": 95.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920444,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 303564
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.4,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "teamfight",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:49.044631+00:00",
+        "elapsedSeconds": 100.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920476,
+        "pssKiBByKind": {
+          "obs": 616880,
+          "browser": 303596
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 9.0,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:54.042470+00:00",
+        "elapsedSeconds": 105.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919571,
+        "pssKiBByKind": {
+          "obs": 616869,
+          "browser": 302702
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:29:59.045889+00:00",
+        "elapsedSeconds": 110.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919711,
+        "pssKiBByKind": {
+          "obs": 616965,
+          "browser": 302746
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "stale",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:04.042982+00:00",
+        "elapsedSeconds": 115.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919731,
+        "pssKiBByKind": {
+          "obs": 616965,
+          "browser": 302766
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:09.045443+00:00",
+        "elapsedSeconds": 120.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919739,
+        "pssKiBByKind": {
+          "obs": 616965,
+          "browser": 302774
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "malformed",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:14.044409+00:00",
+        "elapsedSeconds": 125.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919759,
+        "pssKiBByKind": {
+          "obs": 616965,
+          "browser": 302794
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:19.041837+00:00",
+        "elapsedSeconds": 130.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919795,
+        "pssKiBByKind": {
+          "obs": 616977,
+          "browser": 302818
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:24.044765+00:00",
+        "elapsedSeconds": 135.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919827,
+        "pssKiBByKind": {
+          "obs": 616977,
+          "browser": 302850
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "missing-asset",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:29.044730+00:00",
+        "elapsedSeconds": 140.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919839,
+        "pssKiBByKind": {
+          "obs": 616977,
+          "browser": 302862
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:34.045125+00:00",
+        "elapsedSeconds": 145.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919867,
+        "pssKiBByKind": {
+          "obs": 616977,
+          "browser": 302890
+        },
+        "cpuPercentOfOneCore": 9.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "emergency_hide",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:41856"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:39.045450+00:00",
+        "elapsedSeconds": 150.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919875,
+        "pssKiBByKind": {
+          "obs": 616977,
+          "browser": 302898
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:44.043730+00:00",
+        "elapsedSeconds": 155.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 919879,
+        "pssKiBByKind": {
+          "obs": 616977,
+          "browser": 302902
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.6
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "disconnect",
+        "socketPeers": [],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:49.042444+00:00",
+        "elapsedSeconds": 160.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920511,
+        "pssKiBByKind": {
+          "obs": 616849,
+          "browser": 303662
+        },
+        "cpuPercentOfOneCore": 10.0,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 1.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:40438"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:54.045896+00:00",
+        "elapsedSeconds": 165.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 920431,
+        "pssKiBByKind": {
+          "obs": 616849,
+          "browser": 303582
+        },
+        "cpuPercentOfOneCore": 9.4,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.6,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "draft",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:40438"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:30:59.043713+00:00",
+        "elapsedSeconds": 170.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921563,
+        "pssKiBByKind": {
+          "obs": 616849,
+          "browser": 304714
+        },
+        "cpuPercentOfOneCore": 9.2,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.4
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:40438"
+        ],
+        "remoteSocketPeers": []
+      },
+      {
+        "phase": "overlay-recording",
+        "at": "2026-08-13T06:31:04.046257+00:00",
+        "elapsedSeconds": 175.0,
+        "pids": {
+          "obs": 1,
+          "browser": 7
+        },
+        "pssKiB": 921599,
+        "pssKiBByKind": {
+          "obs": 616849,
+          "browser": 304750
+        },
+        "cpuPercentOfOneCore": 9.6,
+        "cpuPercentOfOneCoreByKind": {
+          "obs": 8.8,
+          "browser": 0.8
+        },
+        "gpuFramebufferMiB": 775,
+        "mode": "economy",
+        "socketPeers": [
+          "127.0.0.1:18838",
+          "127.0.0.1:40438"
+        ],
+        "remoteSocketPeers": []
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "p3-preflight-a-1440p-visible.png",
+      "sha256": "f9b61bc675d0f8ec7ecefa25ea74b2e2622d626e74f5039bc3da7bd326cee91b"
+    },
+    {
+      "path": "p3-preflight-a-1440p-hidden.png",
+      "sha256": "6895c19a2810b388cf73edcb0df0cc036d4694b99f9deb9c7cd90fe61db0bde8"
+    }
+  ],
+  "passed": false
+}

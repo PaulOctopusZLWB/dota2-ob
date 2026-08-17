@@ -1,0 +1,13 @@
+{
+  "name": "dota2-ob-overlay-spike",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "measure": "node ./measure.mjs",
+    "test": "playwright test",
+    "test:update": "playwright test --update-snapshots"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

@@ -197,14 +197,23 @@ func TestWardPurchaseCooldownTransitionsOnly(t *testing.T) {
 }
 
 // AnalyzeSession writes the four required artifacts and parses as JSON/JSONL.
+func analyzeSessionLegacy(sessionDir, sessionID string) (Snapshot, error) {
+	return AnalyzeSessionWithNormalizer(sessionDir, sessionID, func(_ int, record RebuildRecord) (NormalizedTick, error) {
+		return Normalize(record.ReceivedAt, record.Payload), nil
+	})
+}
+
 func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	p1, p2 := miniSnapshot("item_boots", 1, 0), miniSnapshot("item_power_treads", 1, 12)
 	raw := fmt.Sprintf("{\"received_at\":\"2026-07-07T14:51:01Z\",\"payload\":%s,\"raw\":%s}\n{\"received_at\":\"2026-07-07T14:51:02Z\",\"payload\":%s,\"raw\":%s}\n", p1, p1, p2, p2)
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
 		t.Fatalf("write raw: %v", err)
 	}
-	snap, err := AnalyzeSession(dir, "test-session")
+	snap, err := analyzeSessionLegacy(dir, "test-session")
 	if err != nil {
 		t.Fatalf("AnalyzeSession: %v", err)
 	}
@@ -216,6 +225,14 @@ func TestAnalyzeSessionWritesArtifacts(t *testing.T) {
 		if err != nil || info.Size() == 0 {
 			t.Fatalf("artifact %s missing or empty: %v", name, err)
 		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("artifact %s mode=%v want=0600", name, info.Mode().Perm())
+		}
+	}
+	if info, err := os.Stat(dir); err != nil {
+		t.Fatalf("stat artifact directory: %v", err)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Fatalf("artifact directory mode=%v want=0700", info.Mode().Perm())
 	}
 	// Validate the JSONL/JSON artifacts parse.
 	for _, name := range []string{"normalized_ticks.jsonl", "derived_events.jsonl"} {
@@ -260,7 +277,7 @@ func TestAnalyzeSessionReadsVersion2AndIgnoresUnterminatedTail(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := AnalyzeSession(dir, "v2-session")
+	snap, err := analyzeSessionLegacy(dir, "v2-session")
 	if err != nil {
 		t.Fatalf("AnalyzeSession: %v", err)
 	}
@@ -280,7 +297,7 @@ func TestAnalyzeSessionRejectsUnknownVersionAndTerminatedCorruption(t *testing.T
 			if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(tc.raw), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := AnalyzeSession(dir, "session"); err == nil {
+			if _, err := analyzeSessionLegacy(dir, "session"); err == nil {
 				t.Fatal("AnalyzeSession succeeded")
 			} else if len(err.Error()) > 240 {
 				t.Fatalf("error is unbounded: %d bytes", len(err.Error()))
@@ -295,22 +312,22 @@ func TestAnalyzeSessionRejectsTwoValuesOnOneTerminatedLine(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AnalyzeSession(dir, "session"); err == nil {
+	if _, err := analyzeSessionLegacy(dir, "session"); err == nil {
 		t.Fatal("AnalyzeSession accepted two values on one JSONL line")
 	}
 }
 
-func TestAnalyzeSessionRebuildsAcceptedNullPayload(t *testing.T) {
+func TestAnalyzeSessionConsumesLegacyNullWithoutOutput(t *testing.T) {
 	dir := t.TempDir()
 	raw := `{"schema_version":2,"session_id":"null-session","sequence":1,"received_at":"2026-08-05T12:00:00Z","source":"gsi","payload":null,"raw":null}` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := AnalyzeSession(dir, "null-session")
+	snap, err := analyzeSessionLegacy(dir, "null-session")
 	if err != nil {
 		t.Fatalf("AnalyzeSession: %v", err)
 	}
-	if snap.TickCount != 1 {
+	if snap.TickCount != 0 {
 		t.Fatalf("tick count=%d", snap.TickCount)
 	}
 }
@@ -508,7 +525,7 @@ func TestOfflineDerivedEventsCompleterThanRingCap(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw.String()), 0o644); err != nil {
 		t.Fatalf("write raw: %v", err)
 	}
-	if _, err := AnalyzeSession(dir, "long-session"); err != nil {
+	if _, err := analyzeSessionLegacy(dir, "long-session"); err != nil {
 		t.Fatalf("AnalyzeSession: %v", err)
 	}
 	f, err := os.Open(filepath.Join(dir, "derived_events.jsonl"))
@@ -626,7 +643,7 @@ func TestOfflineSummaryObservationsComplete(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw.String()), 0o644); err != nil {
 		t.Fatalf("write raw: %v", err)
 	}
-	if _, err := AnalyzeSession(dir, "long-wards"); err != nil {
+	if _, err := analyzeSessionLegacy(dir, "long-wards"); err != nil {
 		t.Fatalf("AnalyzeSession: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "analytics_summary.json"))
