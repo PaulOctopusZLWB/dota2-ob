@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TI 2026 回放分析 · 比赛</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8ece7; --muted: #a4aaa0; --line: #30352f;
+      --panel: #171a16; --panel-2: #20241d;
+      --accent: #9bcf53; --gold: #d4a845; --danger: #cf5f53;
+      --radiant: #5bcf83; --dire: #cf6f53; --void: #0d0f0c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--ink);
+      background: linear-gradient(90deg, rgba(155,207,83,.08) 1px, transparent 1px),
+                  linear-gradient(rgba(155,207,83,.06) 1px, transparent 1px), var(--void);
+      background-size: 42px 42px;
+      font-family: "Cascadia Code", "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .shell { width: min(1500px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 40px; }
+    header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: clamp(20px, 3.6vw, 38px); line-height: .95; font-weight: 800; }
+    .meta { color: var(--muted); font-size: 13px; text-align: right; }
+    .panel { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01)), var(--panel); border-radius: 8px; padding: 14px 16px; margin-top: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
+    .ok { color: var(--accent); border-color: var(--accent); }
+    .warn { color: var(--gold); border-color: var(--gold); }
+    .err { color: var(--danger); border-color: var(--danger); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .num { font-variant-numeric: tabular-nums; }
+    .hint { color: var(--muted); font-size: 12px; }
+    .timeline { display: flex; height: 34px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+    .tl-seg { display: flex; align-items: center; justify-content: center; font-size: 11px; color: #000; font-weight: 700; overflow: hidden; white-space: nowrap; }
+    .ph-laning { background: #5bcf83; }
+    .ph-midgame { background: #d4a845; }
+    .ph-decisive { background: #cf5f53; }
+    .ph-other { background: #555; }
+    .role { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); margin-right: 4px; }
+    #status { color: var(--muted); }
+    details { margin-top: 6px; }
+    summary { cursor: pointer; color: var(--muted); }
+    .mono { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>比赛 <span id="match-id">…</span></h1>
+    <div class="meta"><a href="index.html">← 语料库</a> &nbsp; <span id="status">载入中…</span></div>
+  </header>
+
+  <div id="content"><p class="hint">载入中…</p></div>
+</div>
+<script>
+const PHRASE = { laning: "对线期", midgame: "中期", decisive: "决胜期" };
+
+// esc escapes untrusted strings for safe interpolation into HTML. Every
+// replay/public-record value rendered by this page passes through esc() so a
+// crafted player/team/registry string cannot inject markup or script.
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// safeUrl accepts only http/https links; anything else renders as text "-".
+function safeUrl(v) {
+  const s = String(v || "");
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
+async function load() {
+  const id = new URLSearchParams(location.search).get("id");
+  document.getElementById("match-id").textContent = id || "?";
+  try {
+    const resp = await fetch(`/api/replay/v1/matches/${id}`);
+    const env = await resp.json();
+    const r = env.data;
+    render(r);
+  } catch (e) {
+    document.getElementById("status").textContent = "加载失败: " + e;
+  }
+}
+
+function render(r) {
+  document.getElementById("status").textContent = r.status + " · " + (r.publication || "suppressed");
+  const c = document.getElementById("content");
+  c.innerHTML = "";
+
+  // 概览
+  const status = r.status || "?";
+  const cls = status === "verified" ? "ok" : (status === "quarantined" ? "warn" : "err");
+  let dur = r.clock && r.clock.game_duration_seconds ? Math.round(r.clock.game_duration_seconds) : "-";
+  const unavailItems = (r.unavailable_reasons || []).map(u => `<li>${esc(u)}</li>`).join("");
+  let s = `
+    <div class="grid">
+      <div class="panel">
+        <h3 style="margin-top:0">比赛状态</h3>
+        <table>
+          <tr><th>终态</th><td><span class="badge ${cls}">${esc(status)}</span> ${esc(r.status_reason || "")}</td></tr>
+          <tr><th>发布</th><td>${esc(r.publication || "suppressed")}</td></tr>
+          <tr><th>身份</th><td>${esc(r.identity ? r.identity.state : "-")} · 选手闸门 ${esc(r.identity ? r.identity.gate_participants : "-")} · 队伍闸门 ${esc(r.identity ? r.identity.gate_teams : "-")}</td></tr>
+          <tr><th>时钟</th><td>${esc(r.clock ? r.clock.state : "-")} · 时长 ${esc(dur)}s${r.clock && r.clock.duration_delta_seconds != null ? " (公共差 " + esc(r.clock.duration_delta_seconds.toFixed(1)) + "s)" : ""}</td></tr>
+          <tr><th>版本</th><td class="mono">parser=${esc(r.verification ? r.verification.parser_name + " " + r.verification.parser_version : "-")} · schema=${esc(r.schema_version)}</td></tr>
+          <tr><th>标准哈希</th><td class="mono">${esc(r.canonical ? r.canonical.tree_sha256 : "-")}</td></tr>
+        </table>
+      </div>
+      <div class="panel">
+        <h3 style="margin-top:0">不可用字段</h3>
+        ${unavailItems ? `<ul class="hint">${unavailItems}</ul>` : `<p class="hint">无</p>`}
+      </div>
+    </div>`;
+  c.insertAdjacentHTML("beforeend", s);
+
+  // 选手与角色
+  let pt = `<div class="panel"><h3 style="margin-top:0">选手与名义角色</h3><table><thead><tr>
+    <th>槽位</th><th>选手</th><th>英雄</th><th>队伍</th><th>边</th><th>角色</th><th>角色来源</th><th>来源链接</th><th>手动覆盖</th></tr></thead><tbody>`;
+  for (const p of (r.participants || [])) {
+    const url = safeUrl(p.role_source_url);
+    const overrideCell = p.override_applied
+      ? `${esc(p.override_reason || "手动覆盖")}<span class="hint">@${esc(p.override_at || "")}</span>`
+      : "-";
+    pt += `<tr>
+      <td class="num">${esc(p.slot)}</td>
+      <td>${esc(p.player_name)} <span class="hint">(${esc(p.account_id)})</span></td>
+      <td>${esc(p.hero_name || "-")}</td>
+      <td>${esc(p.team_name || "-")}</td>
+      <td class="${p.side === 'radiant' ? 'ok' : p.side === 'dire' ? 'err' : ''}">${esc(p.side || "-")}</td>
+      <td><span class="role">${esc(p.nominal_role || "?")}</span>${esc(p.role_confidence || "")}</td>
+      <td class="hint">${esc(p.role_source_kind || p.role_source || "-")}</td>
+      <td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">来源</a>` : "-"}</td>
+      <td class="hint">${overrideCell}</td></tr>`;
+  }
+  pt += `</tbody></table></div>`;
+  c.insertAdjacentHTML("beforeend", pt);
+
+  // 阶段时间线
+  if (r.phases && r.phases.intervals) {
+    const total = Math.max(1, r.phases.eligible_seconds || 1);
+    let segs = r.phases.intervals.map(iv => {
+      const w = Math.max(1, Math.round(100 * (iv.end_game_second - iv.start_game_second) / total));
+      const cls = iv.global_phase === "laning" ? "ph-laning" : iv.global_phase === "midgame" ? "ph-midgame" : iv.global_phase === "decisive" ? "ph-decisive" : "ph-other";
+      const label = PHRASE[iv.global_phase] || iv.global_phase;
+      return `<div class="tl-seg ${cls}" style="width:${esc(w)}%" title="${esc(iv.start_game_second)}s–${esc(iv.end_game_second)}s ${esc(label)}">${w > 8 ? esc(label) : ""}</div>`;
+    }).join("");
+    const phaseHint = r.phases.intervals.map(iv => `${esc(PHRASE[iv.global_phase] || iv.global_phase)}:${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s(r${esc(iv.round_index)})`).join(" · ");
+    c.insertAdjacentHTML("beforeend", `
+      <div class="panel">
+        <h3 style="margin-top:0">官方阶段时间线</h3>
+        <div class="timeline">${segs}</div>
+        <p class="hint">每段含证据事件 ${phaseHint}</p>
+        <p class="hint">重置回合: ${esc((r.phases.resets || []).length)} 个（重置是事件，不是阶段）</p>
+      </div>`);
+  }
+
+  // 核心事件（行为片段）
+  if (r.episodes && r.episodes.episodes) {
+    let rows = r.episodes.episodes.map(ep => `<tr>
+      <td>${esc(ep.kind)}</td><td class="num">${esc(ep.start_game_second)}s</td><td class="num">${esc(ep.end_game_second)}s</td>
+      <td>${esc((ep.participants || []).join(", ") || ep.account_id || "-")}</td><td class="hint">${esc(ep.detail || "")}</td></tr>`).join("");
+    const unavailEp = (r.episodes.unavailable || []).map(u => `<li>${esc(u.kind)}: ${esc(u.reason)}</li>`).join("");
+    c.insertAdjacentHTML("beforeend", `
+      <div class="panel">
+        <h3 style="margin-top:0">行为片段</h3>
+        <table><thead><tr><th>类型</th><th>开始</th><th>结束</th><th>参与者</th><th>细节</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="hint">无</td></tr>`}</tbody></table>
+        <details><summary>不可用片段族</summary><ul class="hint">${unavailEp || "<li>无</li>"}</ul></details>
+      </div>`);
+  }
+
+  // V1 指标（原始值）
+  if (r.metrics && r.metrics.values) {
+    const byAcct = {};
+    for (const v of r.metrics.values) {
+      (byAcct[v.account_id] = byAcct[v.account_id] || []).push(v);
+    }
+    let mrows = "";
+    for (const [acct, vals] of Object.entries(byAcct)) {
+      const name = (r.participants || []).find(p => p.account_id === acct);
+      mrows += `<tr><td>${esc(name ? name.player_name : acct)} <span class="hint">${name ? "角色" + esc(name.nominal_role || "?") : ""}</span></td>` +
+        vals.map(v => `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}</td>`).join("") + `</tr>`;
+    }
+    const headers = [...new Set(r.metrics.values.map(v => v.metric_id))];
+    const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li>${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
+    c.insertAdjacentHTML("beforeend", `
+      <div class="panel">
+        <h3 style="margin-top:0">V1 直接事实（原始值）</h3>
+        <table><thead><tr><th>选手</th>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${mrows}</tbody></table>
+        <details><summary>不可用指标</summary><ul class="hint">${unavailMet || "<li>无</li>"}</ul></details>
+      </div>`);
+  }
+
+  // 队伍
+  if (r.teams && r.teams.length) {
+    const teamRows = r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${esc(t.side)}</td><td>${esc(t.team_name)}</td><td class="hint">${esc(t.team_id)}</td><td>${esc(t.tag || "")}</td></tr>`).join("");
+    c.insertAdjacentHTML("beforeend", `<div class="panel"><h3 style="margin-top:0">队伍</h3><table>${teamRows}</table></div>`);
+  }
+}
+load();
+</script>
+</body>
+</html>

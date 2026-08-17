@@ -1,0 +1,957 @@
+package runner
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/archive"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
+)
+
+// syntheticDemo writes a minimal deterministic raw stream (the exact bytes the
+// parse stage would produce for a synthetic demo) and returns its content.
+// The runner's parse stage is replaced with a stub that writes these bytes so
+// tests exercise the full pipeline without committing real replay bytes.
+func syntheticRawEvents(matchID string, withAllTen bool, endSecond float64) []byte {
+	// Simulate the raw event sequence for a fast-ish match: file info,
+	// engine, game-state transitions, hero positions, a tower death, deaths,
+	// buybacks, and a parse-done event.
+	type fi struct {
+		MatchID       uint64  `json:"match_id"`
+		GameMode      int32   `json:"game_mode"`
+		GameWinner    int32   `json:"game_winner"`
+		LeagueID      uint32  `json:"league_id"`
+		RadiantTeamID uint32  `json:"radiant_team_id"`
+		DireTeamID    uint32  `json:"dire_team_id"`
+		EndTime       uint32  `json:"end_time_unix"`
+		PlaybackTime  float32 `json:"playback_time"`
+		Players       []struct {
+			HeroName     string `json:"hero_name"`
+			PlayerName   string `json:"player_name"`
+			IsFakeClient bool   `json:"is_fake_client"`
+			SteamID      uint64 `json:"steam_id"`
+			GameTeam     int32  `json:"game_team"`
+		} `json:"players"`
+	}
+	f := &fi{MatchID: mustUint(matchID), GameMode: 22, LeagueID: 19719, EndTime: 1786766917, PlaybackTime: 1180}
+	f.RadiantTeamID = 9823272
+	f.DireTeamID = 5017210
+	n := 10
+	if !withAllTen {
+		n = 9
+	}
+	heroesR := []string{"npc_dota_hero_kez", "npc_dota_hero_kez", "npc_dota_hero_kez", "npc_dota_hero_kez", "npc_dota_hero_kez"}
+	heroesD := []string{"npc_dota_hero_tiny", "npc_dota_hero_tiny", "npc_dota_hero_tiny", "npc_dota_hero_tiny", "npc_dota_hero_tiny"}
+	for i := 0; i < n; i++ {
+		team := int32(2)
+		hero := ""
+		if i < 5 && i < len(heroesR) {
+			hero = heroesR[i]
+		} else if i-5 >= 0 && i-5 < len(heroesD) {
+			team = 3
+			hero = heroesD[i-5]
+		}
+		f.Players = append(f.Players, struct {
+			HeroName     string `json:"hero_name"`
+			PlayerName   string `json:"player_name"`
+			IsFakeClient bool   `json:"is_fake_client"`
+			SteamID      uint64 `json:"steam_id"`
+			GameTeam     int32  `json:"game_team"`
+		}{HeroName: hero, PlayerName: fmt.Sprintf("p%d", i), SteamID: 76561197960265728 + uint64(1000+i), GameTeam: team})
+	}
+
+	var out []byte
+	emit := func(kind string, v interface{}) {
+		b, _ := json.Marshal(map[string]interface{}{"kind": kind, "seq": 0, kind: v})
+		out = append(out, b...)
+		out = append(out, '\n')
+	}
+	emit("file_info", f)
+	emit("engine", map[string]interface{}{"game_dir": "dota", "map_name": "dota"})
+	emit("game_state", map[string]interface{}{"combat_ts": 100, "tick": 1000, "state": 4})
+	emit("game_state", map[string]interface{}{"combat_ts": 120, "tick": 1200, "state": 5})
+	for s := 0; s <= int(endSecond); s += 2 {
+		for i := 0; i < n; i++ {
+			acct := fmt.Sprintf("%d", 1000+i)
+			cls := "CDOTA_Unit_Hero_Kez"
+			if i >= 5 {
+				cls = "CDOTA_Unit_Hero_Tiny"
+			}
+			emit("hero_state", map[string]interface{}{
+				"tick": 1200 + s*30, "hero_index": i, "class": cls, "player_id": i, "team_num": 2 + int32(i/5),
+				"pos_x": float64(100 + i), "pos_y": float64(200 + i), "pos_z": 0.0,
+				"health": 1000, "max_health": 1000, "level": 1, "xp": 0, "alive": true,
+				"hero_account": acct,
+			})
+		}
+	}
+	// A tower death at 300s (triggers midgame).
+	emit("combat", map[string]interface{}{"seq": 1, "type": "DOTA_COMBATLOG_TEAM_BUILDING_KILL", "type_id": 6, "ts": 420, "ts_raw": 420, "tick": 4200, "target_name": "badguys_tower1_mid", "target_team": 3, "attacker_team": 2, "value": 1})
+	// Deaths at 400s and 402s (fight cluster).
+	emit("combat", map[string]interface{}{"seq": 2, "type": "DOTA_COMBATLOG_DEATH", "ts": 520, "target_name": "npc_dota_hero_kez", "is_target_hero": true})
+	emit("combat", map[string]interface{}{"seq": 3, "type": "DOTA_COMBATLOG_DEATH", "ts": 522, "target_name": "npc_dota_hero_tiny", "is_target_hero": true})
+	emit("combat", map[string]interface{}{"seq": 4, "type": "DOTA_COMBATLOG_BUYBACK", "ts": 524, "attacker_name": "npc_dota_hero_kez", "value": 500})
+	// Game over at endSecond+120 (postgame state).
+	emit("game_state", map[string]interface{}{"combat_ts": 120 + endSecond + 120, "tick": 1200 + int(endSecond+120)*30, "state": 6})
+	emit("parse_done", map[string]interface{}{"last_tick": 1200 + int(endSecond+120)*30, "last_net_tick": 0, "game_build": 6902, "message_counts": map[string]interface{}{}, "combat_total": 4, "bytes_read": 1000, "elapsed_sec": 0, "outcome": "ok"})
+	return out
+}
+
+// writeSyntheticArchive writes a zstd archive whose decompressed bytes equal
+// a synthetic demo (PBDEMS2 magic prefix + raw stream content) so
+// archive.Verify passes. The parse stage stub strips the magic and emits the
+// raw stream, exercising the full pipeline without committing real bytes.
+func writeSyntheticArchive(t *testing.T, matchID string, withAllTen bool, endSecond float64) (*archive.Match, string, string) {
+	t.Helper()
+	rawEvents := syntheticRawEvents(matchID, withAllTen, endSecond)
+	demo := append([]byte{'P', 'B', 'D', 'E', 'M', 'S', '2', 0x00}, rawEvents...)
+	compressed := zstd.EncodeTo(nil, demo)
+	root := t.TempDir()
+	arcPath := filepath.Join(root, matchID+".dem.bz2")
+	demPath := filepath.Join(root, "dem", matchID+".dem")
+	if err := os.MkdirAll(filepath.Dir(demPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(arcPath, compressed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(demPath, demo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mt := &archive.Match{
+		MatchID:               matchID,
+		ArchiveRelativePath:   matchID + ".dem.bz2",
+		ArchiveBytes:          int64(len(compressed)),
+		DemoRelativePath:      filepath.Join("dem", matchID+".dem"),
+		DemoBytes:             int64(len(demo)),
+		PublicDurationSeconds: int(endSecond + 120),
+		ExpectedTeams: []archive.ExpectedTeam{
+			{TeamID: "9823272", TeamName: "Team Yandex", Side: "radiant"},
+			{TeamID: "5017210", TeamName: "Team Resilience", Side: "dire"},
+		},
+	}
+	for i := 0; i < 10; i++ {
+		hero := 145
+		side := "radiant"
+		if i >= 5 {
+			hero = 19
+			side = "dire"
+		}
+		mt.ExpectedParticipants = append(mt.ExpectedParticipants, archive.ExpectedPlayer{
+			AccountID: fmt.Sprintf("%d", 1000+i), Side: side, ExpectedHeroID: hero,
+		})
+	}
+	// Compute real hashes from the written bytes.
+	ah, _ := os.ReadFile(arcPath)
+	dh, _ := os.ReadFile(demPath)
+	mt.ArchiveSHA256 = sha256hex(ah)
+	mt.DemoSHA256 = sha256hex(dh)
+	return mt, root, demPath
+}
+
+func mustUint(s string) uint64 {
+	var v uint64
+	for _, c := range s {
+		v = v*10 + uint64(c-'0')
+	}
+	return v
+}
+
+func sha256hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h)
+}
+
+// mustZstd compresses data with the zstd encoder.
+func mustZstd(t *testing.T, data []byte) []byte {
+	t.Helper()
+	return zstd.EncodeTo(nil, data)
+}
+
+// stubParseStage strips the 8-byte PBDEMS2 demo magic and writes the raw
+// stream (simulating the parse stage) so tests exercise the full pipeline
+// deterministically.
+func stubParseStage(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+	b, err := os.ReadFile(demoPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) >= 8 {
+		b = b[8:]
+	}
+	if err := os.WriteFile(rawPath, b, 0o644); err != nil {
+		return nil, err
+	}
+	return &rawMetaPayload{Outcome: "ok", Events: 200, CombatTotal: 4, GameBuild: 6902, LastTick: 1200}, nil
+}
+
+// fullRoleReg builds a complete role registry for the synthetic fixture:
+// accounts 1000-1004 radiant roles 1-5, accounts 1005-1009 dire roles 1-5.
+func fullRoleReg() *roles.Registry {
+	reg := &roles.Registry{SchemaVersion: "ti2026.roles.v1", TournamentID: "ti2026", Matches: []roles.RoleMatch{{
+		MatchID: "1000000001", Teams: []roles.RoleTeam{
+			{
+				TeamID: "9823272", TeamName: "Team Yandex", Side: "radiant",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com/radiant",
+				RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+			{
+				TeamID: "5017210", TeamName: "Team Resilience", Side: "dire",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com/dire",
+				RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+		},
+	}}}
+	radiantRoles := []string{"1", "2", "3", "4", "5"}
+	direRoles := []string{"1", "2", "3", "4", "5"}
+	for i, role := range radiantRoles {
+		reg.Matches[0].Teams[0].Participants = append(reg.Matches[0].Teams[0].Participants, roles.RoleRecord{
+			RoleRecordID: fmt.Sprintf("1000000001:%d", 1000+i), AccountID: fmt.Sprintf("%d", 1000+i),
+			PlayerName: fmt.Sprintf("p%d", i), NominalRole: role, RoleConfidence: "high",
+		})
+	}
+	for i, role := range direRoles {
+		reg.Matches[0].Teams[1].Participants = append(reg.Matches[0].Teams[1].Participants, roles.RoleRecord{
+			RoleRecordID: fmt.Sprintf("1000000001:%d", 1005+i), AccountID: fmt.Sprintf("%d", 1005+i),
+			PlayerName: fmt.Sprintf("p%d", 5+i), NominalRole: role, RoleConfidence: "high",
+		})
+	}
+	return reg
+}
+
+// testOptions builds the runner options with the full registry.
+func testOptions() Options {
+	return Options{RoleRegistry: fullRoleReg(), RoleRegistrySHA256: "reg-hash"}
+}
+
+// partialRoleReg builds a registry covering only one participant (used to
+// prove the role gate quarantines an incomplete registry).
+func partialRoleReg() *roles.Registry {
+	reg := fullRoleReg()
+	reg.Matches[0].Teams[0].Participants = reg.Matches[0].Teams[0].Participants[:1]
+	reg.Matches[0].Teams[1].Participants = nil
+	return reg
+}
+
+func TestRunMatchVerifiedAndRestartDeterministic(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 600)
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	stA, _ := store.New(rootA)
+	stB, _ := store.New(rootB)
+	opts := testOptions()
+	resA, err := RunMatch(stA, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resA.Status != store.StatusVerified {
+		t.Fatalf("status=%s reason=%s", resA.Status, resA.Reason)
+	}
+	resB, err := RunMatch(stB, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resB.Status != store.StatusVerified {
+		t.Fatalf("status=%s reason=%s", resB.Status, resB.Reason)
+	}
+	if resA.TreeSHA256 != resB.TreeSHA256 {
+		t.Fatalf("canonical mismatch runA=%s runB=%s", resA.TreeSHA256, resB.TreeSHA256)
+	}
+	// Byte-identical artifact sets.
+	for _, art := range []string{store.ArtifactRaw, store.ArtifactFacts, store.ArtifactPhases, store.ArtifactEpisodes, store.ArtifactMetrics, store.ArtifactReport, store.ArtifactIdentity, store.ArtifactClock} {
+		a, _ := os.ReadFile(stA.ArtifactPath("1000000001", art))
+		b, _ := os.ReadFile(stB.ArtifactPath("1000000001", art))
+		if string(a) != string(b) {
+			t.Fatalf("artifact %s differs between runs", art)
+		}
+	}
+	// Resume: rerun on rootA must skip and preserve the same hash.
+	resC, err := RunMatch(stA, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resC.Status != store.StatusVerified || resC.Reason != "resumed_completed_match" {
+		t.Fatalf("resume status=%s reason=%s", resC.Status, resC.Reason)
+	}
+	if resC.TreeSHA256 != resA.TreeSHA256 {
+		t.Fatalf("resume changed canonical hash")
+	}
+}
+
+// TestResumeRebuildsAfterDeletedArtifact: deleting a canonical artifact must
+// not resume; the match rebuilds and reaches verified (deterministically the
+// rebuilt tree is identical, but the run must not claim "resumed" and the
+// deleted artifact must exist again).
+func TestResumeRebuildsAfterDeletedArtifact(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("initial status=%s", res.Status)
+	}
+	// Delete a canonical artifact, then rerun: must rebuild, not resume.
+	if err := os.Remove(st.ArtifactPath("1000000001", store.ArtifactPhases)); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Status != store.StatusVerified {
+		t.Fatalf("status after rebuild=%s reason=%s", res2.Status, res2.Reason)
+	}
+	if res2.Reason == "resumed_completed_match" {
+		t.Fatal("resumed over a deleted artifact")
+	}
+	// The deleted artifact must exist again.
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactPhases)); err != nil {
+		t.Fatalf("phases.json not rebuilt: %v", err)
+	}
+}
+
+// TestResumeRebuildsAfterCorruptedFacts: a corrupted facts.jsonl must not
+// resume; the runner rebuilds the match instead of trusting the marker.
+func TestResumeRebuildsAfterCorruptedFacts(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	if _, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	factsPath := st.ArtifactPath("1000000001", store.ArtifactFacts)
+	if err := os.WriteFile(factsPath, []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed over corrupted facts.jsonl")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+}
+
+// TestResumeFailsClosedOnMalformedCanonical: a malformed canonical marker must
+// not resume; it must be invalidated and the match rebuilt.
+func TestResumeFailsClosedOnMalformedCanonical(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	if _, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite canonical.json with garbage.
+	canPath := st.ArtifactPath("1000000001", store.ArtifactCanonical)
+	if err := os.WriteFile(canPath, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed over malformed canonical")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+}
+
+// TestRoleGateQuarantinesMissingRegistry: a match whose role registry lacks
+// participant records must quarantine with an explicit role reason.
+func TestRoleGateQuarantinesMissingRegistry(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	// Registry with only one participant: the gate must fail.
+	opts := Options{RoleRegistry: partialRoleReg(), RoleRegistrySHA256: "partial"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined", res.Status)
+	}
+	if !strings.Contains(res.Reason, "role_provenance_gate") {
+		t.Fatalf("reason=%s want role_provenance_gate", res.Reason)
+	}
+}
+
+// TestRoleGateQuarantinesNilRegistry: a nil registry must quarantine.
+func TestRoleGateQuarantinesNilRegistry(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	res, err := RunMatch(st, mt, root, Options{}, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined", res.Status)
+	}
+}
+
+// TestFingerprintVersionChangeRebuilds: changing a rule version must change
+// the resume fingerprint so stale outputs are never reused.
+func TestFingerprintVersionChangeRebuilds(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	resA, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resA.Status != store.StatusVerified {
+		t.Fatalf("initial status=%s", resA.Status)
+	}
+	// Same options => resume.
+	resB, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resB.Reason != "resumed_completed_match" {
+		t.Fatalf("expected resume, got %s", resB.Reason)
+	}
+	// Different override hash => fingerprint changes => rebuild.
+	opts2 := Options{RoleRegistry: fullRoleReg(), RoleRegistrySHA256: "reg-hash", RoleOverridesSHA256: "override-changed"}
+	resC, err := RunMatch(st, mt, root, opts2, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resC.Reason == "resumed_completed_match" {
+		t.Fatal("reused stale output despite version change")
+	}
+	if resC.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", resC.Status)
+	}
+}
+
+// TestResumeRebuildsAfterDeletedReport: deleting report.json after a verified
+// run must NOT resume as verified; the completion tree includes the report, so
+// the runner rebuilds (report absent => canonical tree invalid).
+func TestResumeRebuildsAfterDeletedReport(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("initial status=%s", res.Status)
+	}
+	// Delete report.json, then rerun: must rebuild (not resume verified).
+	if err := os.Remove(st.ArtifactPath("1000000001", store.ArtifactReport)); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Reason == "resumed_completed_match" {
+		t.Fatal("resumed verified over deleted report.json")
+	}
+	if res2.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res2.Status)
+	}
+	// report.json must exist again.
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactReport)); err != nil {
+		t.Fatalf("report.json not rebuilt: %v", err)
+	}
+}
+
+// TestResumeFailsClosedOnCorruptReport: corrupting report.json must not resume
+// verified; the runner rebuilds or fails closed.
+func TestResumeFailsClosedOnCorruptReport(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	if _, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := st.ArtifactPath("1000000001", store.ArtifactReport)
+	if err := os.WriteFile(reportPath, []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed verified over corrupted report.json")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+}
+
+// TestQuarantineResumeStaysQuarantined: a first run with incomplete role
+// provenance quarantines; an unchanged rerun must remain quarantined (never
+// become verified), with the reason preserved.
+func TestQuarantineResumeStaysQuarantined(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := Options{RoleRegistry: partialRoleReg(), RoleRegistrySHA256: "partial"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("first run status=%s want quarantined", res.Status)
+	}
+	// Persisted status must record the quarantine.
+	sr, serr := st.ReadStatus("1000000001")
+	if serr != nil {
+		t.Fatalf("read status: %v", serr)
+	}
+	if sr.Status != store.StatusQuarantined {
+		t.Fatalf("persisted status=%s want quarantined", sr.Status)
+	}
+	if sr.Reason == "" {
+		t.Fatal("persisted quarantine has empty reason")
+	}
+	// Unchanged rerun must stay quarantined with the reason preserved.
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Status != store.StatusQuarantined {
+		t.Fatalf("rerun status=%s want quarantined (never verified)", res2.Status)
+	}
+	if !strings.Contains(res2.Reason, sr.Reason) && res2.Reason != sr.Reason {
+		t.Fatalf("rerun reason=%q not preserving persisted reason %q", res2.Reason, sr.Reason)
+	}
+	// The persisted quarantine must also be visible via catalog and report.
+	cat, err := st.RebuildCatalog("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Matches) != 1 || cat.Matches[0].Status != store.StatusQuarantined {
+		t.Fatalf("catalog status=%v want quarantined", cat.Matches)
+	}
+	if cat.Matches[0].Publication != "suppressed" {
+		t.Fatalf("catalog publication=%s want suppressed", cat.Matches[0].Publication)
+	}
+	// Report must carry the quarantined state (not published).
+	var rep struct {
+		Status      string `json:"status"`
+		Reason      string `json:"reason"`
+		Publication string `json:"publication_state"`
+	}
+	if err := st.ReadJSON("1000000001", store.ArtifactReport, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != store.StatusQuarantined || rep.Publication != "suppressed" {
+		t.Fatalf("report status=%s pub=%s want quarantined/suppressed", rep.Status, rep.Publication)
+	}
+}
+
+// TestInterruptionBeforeReportNeverResumesVerified: simulate interruption
+// after source artifacts + canonical were written by an earlier version but
+// before report/status/gate completed. Because the completion tree requires
+// report.json + status.json, a missing report must never resume verified.
+func TestInterruptionBeforeReportNeverResumesVerified(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	// Write only source artifacts + a canonical marker covering source only
+	// (as if an old/partial run finished source but not report/status/gate).
+	if err := os.MkdirAll(st.MatchDir("1000000001"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range sourceArtifacts() {
+		b := []byte("x")
+		if a == store.ArtifactRaw || a == store.ArtifactFacts {
+			b = syntheticRawEvents("1000000001", true, 300)
+		}
+		if err := os.WriteFile(st.ArtifactPath("1000000001", a), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fp := store.Fingerprint(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID, opts.RoleRegistrySHA256, opts.RoleOverridesSHA256)
+	if _, err := st.WriteCanonical("1000000001", fp, sourceArtifacts()); err != nil {
+		t.Fatal(err)
+	}
+	// Rerun: no report/status in the completion tree => must rebuild and
+	// reach verified via full pipeline (never resume as verified).
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed verified over an incomplete completion tree")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+	// report.json + status.json must now exist.
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactReport)); err != nil {
+		t.Fatalf("report.json missing after rebuild: %v", err)
+	}
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactStatus)); err != nil {
+		t.Fatalf("status.json missing after rebuild: %v", err)
+	}
+}
+
+// TestOverrideProvenanceSurvivesRestart: an effective manual override must be
+// persisted in the report (source=manual_override, reason, timestamp) and
+// survive a resume/rebuild.
+func TestOverrideProvenanceSurvivesRestart(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	// Full registry + explicit overrides that swap roles 1<->2 on radiant
+	// (preserving the one-per-role-per-side invariant).
+	ovr := &roles.OverrideFile{Overrides: []roles.Override{
+		{MatchID: "1000000001", AccountID: "1000", NominalRole: "2", Reason: "manual adjudication", AppliedAt: "2026-08-17T08:00:00Z"},
+		{MatchID: "1000000001", AccountID: "1001", NominalRole: "1", Reason: "manual adjudication", AppliedAt: "2026-08-17T08:00:00Z"},
+	}}
+	opts := Options{RoleRegistry: fullRoleReg(), Overrides: ovr, RoleRegistrySHA256: "reg-hash", RoleOverridesSHA256: "ovr-hash"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified", res.Status)
+	}
+	// Report must carry the override provenance for account 1000.
+	var rep struct {
+		Participants []struct {
+			AccountID       string  `json:"account_id"`
+			NominalRole     string  `json:"nominal_role"`
+			RoleSourceKind  string  `json:"role_source_kind"`
+			RoleSourceURL   string  `json:"role_source_url"`
+			OverrideApplied bool    `json:"override_applied"`
+			OverrideReason  *string `json:"override_reason"`
+			OverrideAt      *string `json:"override_at"`
+		} `json:"participants"`
+	}
+	if err := st.ReadJSON("1000000001", store.ArtifactReport, &rep); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range rep.Participants {
+		if p.AccountID == "1000" {
+			found = true
+			if p.NominalRole != "2" {
+				t.Fatalf("overridden role=%s want 2", p.NominalRole)
+			}
+			if p.RoleSourceKind != "manual_override" {
+				t.Fatalf("source=%s want manual_override", p.RoleSourceKind)
+			}
+			if p.OverrideReason == nil || *p.OverrideReason != "manual adjudication" {
+				t.Fatalf("override reason=%v", p.OverrideReason)
+			}
+			if p.OverrideAt == nil || *p.OverrideAt != "2026-08-17T08:00:00Z" {
+				t.Fatalf("override at=%v", p.OverrideAt)
+			}
+			if p.RoleSourceURL == "" {
+				t.Fatal("base registry source URL lost")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("account 1000 not in report participants")
+	}
+	// Resume (same inputs) must preserve the override provenance.
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Reason != "resumed_completed_match" {
+		t.Fatalf("expected resume, got %s", res2.Reason)
+	}
+	var rep2 struct {
+		Participants []struct {
+			AccountID       string `json:"account_id"`
+			RoleSourceKind  string `json:"role_source_kind"`
+			OverrideApplied bool   `json:"override_applied"`
+		} `json:"participants"`
+	}
+	if err := st.ReadJSON("1000000001", store.ArtifactReport, &rep2); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range rep2.Participants {
+		if p.AccountID == "1000" && (!p.OverrideApplied || p.RoleSourceKind != "manual_override") {
+			t.Fatalf("override provenance lost on resume: %+v", p)
+		}
+	}
+}
+
+// TestOverrideMissingTimestampFailsClosed: an override without a timestamp
+// must fail the publication gate deterministically (not fabricate wall clock).
+func TestOverrideMissingTimestampFailsClosed(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	ovr := &roles.OverrideFile{Overrides: []roles.Override{
+		{MatchID: "1000000001", AccountID: "1000", NominalRole: "2", Reason: "no timestamp"},
+		{MatchID: "1000000001", AccountID: "1001", NominalRole: "1", Reason: "no timestamp"},
+	}}
+	opts := Options{RoleRegistry: fullRoleReg(), Overrides: ovr, RoleRegistrySHA256: "reg-hash", RoleOverridesSHA256: "ovr"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined (override missing timestamp)", res.Status)
+	}
+	if !strings.Contains(res.Reason, "override_timestamp_required") {
+		t.Fatalf("reason=%s want override_timestamp_required", res.Reason)
+	}
+}
+
+// blockArtifact makes the given artifact path a directory so that the atomic
+// WriteAtomic rename to it fails deterministically (fault injection).
+func blockArtifact(t *testing.T, st *store.Store, matchID, artifact string) {
+	t.Helper()
+	path := st.ArtifactPath(matchID, artifact)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStatusWriteFailureArchivePath: a failed status write on the archive
+// early-return path must return an error, not (terminalResult, nil).
+func TestStatusWriteFailureArchivePath(t *testing.T) {
+	mt, _, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	// Force archive missing: use an empty replay root.
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactStatus)
+	res, err := RunMatch(st, mt, t.TempDir(), testOptions(), stubParseStage, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestStatusWriteFailureParsePath: a failed status write on the parse
+// early-return path must return an error, not (parse_failed, nil).
+func TestStatusWriteFailureParsePath(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactStatus)
+	failParse := func(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+		return nil, fmt.Errorf("synthetic parse failure")
+	}
+	res, err := RunMatch(st, mt, root, testOptions(), failParse, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestRawMetaWriteFailurePropagates: a failed raw-meta.json write on the
+// parse-failure path must propagate an error (not discard it).
+func TestRawMetaWriteFailurePropagates(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactRawMeta)
+	failParse := func(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+		return nil, fmt.Errorf("synthetic parse failure")
+	}
+	res, err := RunMatch(st, mt, root, testOptions(), failParse, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from raw-meta write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "parse-failure raw-meta") {
+		t.Fatalf("error=%v want raw-meta write propagation", err)
+	}
+}
+
+// TestStatusWriteFailureIdentityPath: a failed status write on the identity
+// quarantine early-return path must return an error. The synthetic match uses
+// only 9 participants so identity quarantines after archive/parse succeed.
+func TestStatusWriteFailureIdentityPath(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000003", false, 300)
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000003", store.ArtifactStatus)
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestStatusWriteFailureClockPath: a failed status write on the clock
+// quarantine early-return path must return an error. A public-duration
+// mismatch makes the clock fail closed after identity passes.
+func TestStatusWriteFailureClockPath(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	// Break the clock gate: wildly wrong public duration.
+	mt.PublicDurationSeconds = 300 + 5000
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactStatus)
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestTerminalStatusRecordsFullState: every early terminal path must populate
+// the applicable StatusRecord fields so catalog/API/UI show real stage state
+// instead of empty dashes.
+func TestTerminalStatusRecordsFullState(t *testing.T) {
+	t.Run("archive_fail", func(t *testing.T) {
+		mt, _, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		st, _ := store.New(t.TempDir())
+		// Point at an empty root so the archive is missing.
+		res, err := RunMatch(st, mt, t.TempDir(), testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusMissing {
+			t.Fatalf("status=%s want missing", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState == "" || sr.Status != store.StatusMissing {
+			t.Fatalf("status record missing archive_state: %+v", sr)
+		}
+	})
+	t.Run("parse_fail", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		st, _ := store.New(t.TempDir())
+		failParse := func(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+			return nil, fmt.Errorf("synthetic parse failure")
+		}
+		res, err := RunMatch(st, mt, root, testOptions(), failParse, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusParseFailed {
+			t.Fatalf("status=%s want parse_failed", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState != "verified" || sr.ParseState != "parse_error" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+	})
+	t.Run("identity_quarantine", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000003", false, 300)
+		st, _ := store.New(t.TempDir())
+		res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusQuarantined {
+			t.Fatalf("status=%s want quarantined", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000003")
+		if sr.ArchiveState != "verified" || sr.ParseState != "ok" || sr.IdentityState == "" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+	})
+	t.Run("clock_quarantine", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		mt.PublicDurationSeconds = 300 + 5000
+		st, _ := store.New(t.TempDir())
+		res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusQuarantined {
+			t.Fatalf("status=%s want quarantined", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState != "verified" || sr.ParseState != "ok" || sr.IdentityState != "verified" || sr.ClockState == "" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+	})
+	t.Run("verified", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		st, _ := store.New(t.TempDir())
+		res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusVerified {
+			t.Fatalf("status=%s want verified", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState != "verified" || sr.ParseState != "ok" || sr.IdentityState != "verified" || sr.ClockState != "calibrated" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+		// Catalog must carry the same stage states.
+		cat, err := st.RebuildCatalog("t")
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := cat.Matches[0]
+		if row.ArchiveState != "verified" || row.IdentityState != "verified" || row.ClockState != "calibrated" || row.ParseState != "ok" {
+			t.Fatalf("catalog row incomplete: %+v", row)
+		}
+	})
+}
+
+func TestRunMatchCorruptIsolated(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000002", true, 300)
+	// Corrupt the archive bytes.
+	arcPath := filepath.Join(root, "1000000002.dem.bz2")
+	f, err := os.OpenFile(arcPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("corrupt")
+	f.Close()
+	st, _ := store.New(t.TempDir())
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusCorrupt {
+		t.Fatalf("status=%s want corrupt", res.Status)
+	}
+}
+
+func TestRunMatchMissingParticipantQuarantined(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000003", false, 300)
+	st, _ := store.New(t.TempDir())
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined (9 participants)", res.Status)
+	}
+	if res.Reason != "identity_participant_binding_mismatch" {
+		t.Fatalf("reason=%s", res.Reason)
+	}
+}
+
+func TestRunBatchOneBadDoesNotAbort(t *testing.T) {
+	mtGood, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	mtBad, _, _ := writeSyntheticArchive(t, "1000000002", true, 300)
+	// Corrupt the bad archive.
+	arcPath := filepath.Join(root, "1000000002.dem.bz2")
+	f, _ := os.OpenFile(arcPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString("corrupt")
+	f.Close()
+	st, _ := store.New(t.TempDir())
+	results := RunBatch(st, []*archive.Match{mtGood, mtBad}, root, testOptions(), stubParseStage, 2, func(string) {})
+	if results[0].Status != store.StatusVerified {
+		t.Fatalf("good match failed: %s %s", results[0].Status, results[0].Reason)
+	}
+	if results[1].Status != store.StatusMissing && results[1].Status != store.StatusCorrupt {
+		t.Fatalf("bad match status=%s want missing/corrupt", results[1].Status)
+	}
+}
