@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TI 2026 回放分析 · 语料库</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8ece7;
+      --muted: #a4aaa0;
+      --line: #30352f;
+      --panel: #171a16;
+      --panel-2: #20241d;
+      --accent: #9bcf53;
+      --gold: #d4a845;
+      --danger: #cf5f53;
+      --radiant: #5bcf83;
+      --dire: #cf6f53;
+      --void: #0d0f0c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background: linear-gradient(90deg, rgba(155,207,83,.08) 1px, transparent 1px),
+                  linear-gradient(rgba(155,207,83,.06) 1px, transparent 1px), var(--void);
+      background-size: 42px 42px;
+      font-family: "Cascadia Code", "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .shell { width: min(1440px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 40px; }
+    header {
+      display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px;
+      padding: 0 0 18px; border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: clamp(22px, 4vw, 44px); line-height: .95; font-weight: 800; letter-spacing: 0; }
+    .meta { color: var(--muted); font-size: 13px; text-align: right; }
+    .panel {
+      border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01)), var(--panel);
+      border-radius: 8px; padding: 14px 16px; margin-top: 16px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
+    .ok { color: var(--accent); border-color: var(--accent); }
+    .warn { color: var(--gold); border-color: var(--gold); }
+    .err { color: var(--danger); border-color: var(--danger); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+    .num { font-variant-numeric: tabular-nums; }
+    .hint { color: var(--muted); font-size: 12px; }
+    #status { color: var(--muted); }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>TI 2026 回放分析 · 语料库</h1>
+    <div class="meta"><div id="status">载入中…</div><div class="hint">本地只读 · loopback</div></div>
+  </header>
+
+  <div class="panel">
+    <h2 style="margin-top:0">五场纵切探针</h2>
+    <table>
+      <thead>
+        <tr><th>比赛 ID</th><th>分类</th><th>终态</th><th>身份</th><th>时钟</th><th>解析</th><th>发布</th><th>标准哈希</th><th>时长(s)</th></tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="9" class="hint">载入中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h3 style="margin-top:0">说明</h3>
+      <p class="hint" style="line-height:1.7">
+        本页是本地回放分析系统的语料视图。每个探针达到显式终态：
+        <span class="badge ok">verified</span> 通过全部身份/时钟/解析/确定性闸门并已发布，
+        <span class="badge warn">quarantined</span> 被显式隔离并记录原因，
+        <span class="badge err">corrupt / missing / parse_failed</span> 同样显式记录，绝不静默跳过。
+        所有产物按输入哈希与解析器版本内容寻址；二次运行字节一致。
+      </p>
+    </div>
+    <div class="panel">
+      <h3 style="margin-top:0">API</h3>
+      <p class="hint" style="line-height:1.9">
+        <code>/api/replay/v1/corpus</code><br>
+        <code>/api/replay/v1/matches</code><br>
+        <code>/api/replay/v1/matches/{id}</code><br>
+        <code>/api/replay/v1/matches/{id}/timeline</code><br>
+        <code>/api/replay/v1/matches/{id}/tracks</code><br>
+        <code>/api/replay/v1/roles</code><br>
+        <code>/api/replay/v1/metrics/registry</code>
+      </p>
+    </div>
+  </div>
+</div>
+<script>
+const STATUS = {
+  verified: ["ok", "已通过"],
+  corrupt: ["err", "损坏"],
+  missing: ["err", "缺失"],
+  parse_failed: ["err", "解析失败"],
+  quarantined: ["warn", "隔离"],
+};
+
+async function load() {
+  try {
+    const resp = await fetch("/api/replay/v1/corpus");
+    const env = await resp.json();
+    const matches = env.data.matches || [];
+    const tbody = document.getElementById("rows");
+    tbody.innerHTML = "";
+    for (const m of matches) {
+      const [cls, label] = STATUS[m.status] || ["warn", m.status];
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><a href="match.html?id=${m.match_id}">${m.match_id}</a></td>
+        <td class="hint">${m.category || "-"}</td>
+        <td><span class="badge ${cls}">${label}</span></td>
+        <td class="hint">${m.identity_state || "-"}</td>
+        <td class="hint">${m.clock_state || "-"}</td>
+        <td class="hint">${m.parse_state || "-"}</td>
+        <td class="hint">${m.publication || "-"}</td>
+        <td class="num">${m.tree_sha256 ? m.tree_sha256.slice(0, 12) + "…" : "-"}</td>
+        <td class="num">${m.duration_seconds != null ? Math.round(m.duration_seconds) : "-"}</td>`;
+      tbody.appendChild(tr);
+    }
+    document.getElementById("status").textContent = `${matches.length} 场比赛`;
+  } catch (e) {
+    document.getElementById("status").textContent = "加载失败: " + e;
+  }
+}
+load();
+</script>
+</body>
+</html>

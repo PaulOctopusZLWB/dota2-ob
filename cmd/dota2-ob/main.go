@@ -49,6 +49,16 @@ func run(args []string, output io.Writer) int {
 }
 
 func runWithDependencies(args []string, output io.Writer, deps runDependencies) int {
+	// Replay-plane subcommands are dispatched before the legacy GSI flag
+	// parsing so the live capture defaults remain unchanged.
+	if len(args) > 0 {
+		switch args[0] {
+		case "replay":
+			return runReplay(args[1:], output)
+		case "serve":
+			return runServe(args[1:], output)
+		}
+	}
 	flags := flag.NewFlagSet("dota2-ob", flag.ContinueOnError)
 	flags.SetOutput(output)
 	addr := flags.String("addr", "127.0.0.1:43210", "HTTP listen address")
