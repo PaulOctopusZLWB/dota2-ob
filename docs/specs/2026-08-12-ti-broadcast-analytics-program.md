@@ -7,7 +7,8 @@ Amended: 2026-08-17
 Decision owner: Paul
 
 Status: M0-M3 and the M4 functional/harness candidates accepted; the P4
-non-TI public tournament substitution is pending independent review
+public-tournament/rehearsal spec successor is pending complete independent
+re-review
 
 ## Objective
 
@@ -1149,6 +1150,11 @@ Acceptance:
   abandoned game, incomplete recording, unexplained GSI gap, or missing terminal
   state does not count. Match duration is measured but has no artificial
   minimum; completeness replaces the former 12-hour synthetic-duration gate.
+- An optional ordinary public DotaTV match may exercise the same production
+  systems only through the separately versioned `public_match_rehearsal`
+  purpose. Its evidence is structurally ineligible for P4, never arms or updates
+  the P4 manual checkpoint, and cannot close M4 or open its evidence-review
+  stage. A qualifying P4 match must still run fresh.
 - During that match there are zero lost accepted raw records; notification
   capacity remains one; candidate queue capacity remains 64; accepted GSI
   request bodies remain at most the existing 10 MiB limit, other API
@@ -1357,7 +1363,7 @@ and excluded samples are reported, never silently removed.
   and attach sanitized frames/logs. A short preflight can reject a configuration
   but cannot pass P3 or justify a threshold change.
 
-### P4 - one complete authoritative public tournament DotaTV match
+### P4 - one complete authoritative TI/public-tournament DotaTV match
 
 - The capture source is the accepted localhost HTTP GSI boundary. Dota GSI does
   not provide an authenticated OS-process identity for each request, so a
@@ -1378,19 +1384,28 @@ and excluded samples are reported, never silently removed.
   substitution remains explicitly outside what this interface can disprove.
 - Use one live professional/tournament DotaTV game that reaches a normal
   post-game terminal state. Before arming, bind the in-client public DotaTV
-  listing and nonzero Valve match ID to either Valve-provided league metadata or
-  the tournament organizer's official public schedule. Retain source class,
-  sanitized endpoint/URL, retrieval time, response/page hash, pagination where
-  relevant, and conflicts; never retain a Steam Web API key. Community indexes
-  may supplement discovery but cannot be the sole authority or independent
-  corroboration for a Valve-derived fact. Missing competition, series/game,
-  team, or match identity fails closed. Arm the exact candidate, isolated data
-  root, sanitized evidence sink, operator UI, native 750x640 Browser Source, and
-  OBS recording before Paul manually joins and before game clock `0:00`. Record
-  public competition, series/game, teams, match ID, Dota/OBS/application builds,
-  exact candidate/configuration hashes, start/end boundaries, DotaTV pause and
-  observer-delay context, and the actual wall-clock duration. Do not retain
-  credentials, private chat, account identifiers, or unrelated screen content.
+  listing and nonzero Valve match ID to machine-verifiable authority evidence.
+  A non-TI tournament run pins an immutable, independently reviewed
+  `MatchAuthorityRootV1` that establishes the Valve league/event or organizer
+  origin from a Valve source. The harness then performs bounded retrieval and
+  retains content-addressed response/page bytes plus deterministic sanitized
+  exports. `MatchAuthorityEvidenceV1` must bind exact match ID, league/event,
+  series/game, teams, and start window to reviewed JSON Pointers or byte ranges
+  in those artifacts so an independent verifier can re-extract every fact.
+  Caller-supplied authority, an official-looking or unrelated page, an
+  out-of-root redirect, incomplete pagination, missing fact locator,
+  fetch/hash mismatch, or source conflict fails closed. Secrets enter only by
+  an external channel and are absent from persisted URLs, headers, logs, and
+  exported evidence. Community indexes may supplement discovery but cannot be
+  the sole authority or independent corroboration for a Valve-derived fact.
+  Missing competition, series/game, team, or match identity fails closed. Arm
+  the exact candidate, isolated data root, sanitized evidence sink, operator
+  UI, native 750x640 Browser Source, and OBS recording before Paul manually
+  joins and before game clock `0:00`. Record public competition, series/game,
+  teams, match ID, Dota/OBS/application builds, exact candidate/configuration
+  hashes, start/end boundaries, DotaTV pause and observer-delay context, and the
+  actual wall-clock duration. Do not retain credentials, private chat, account
+  identifiers, or unrelated screen content.
 - Run continuously through post-game and recording finalization. Count every
   capture HTTP response and bind each accepted response to one exact RawRecordV3
   identity. Every successfully projected sequence must produce exactly one
@@ -1435,11 +1450,63 @@ The accepted harness candidate
 and emits TI-specific human instructions. It must not be bypassed or used
 unchanged for a non-TI match. Before this amendment can authorize a live run,
 one narrow immutable harness successor must bind this exact spec revision,
-replace only the typed match/source classification and human wording, preserve
-all accepted process, timing, evidence, privacy, fault, resource, recovery, and
-cleanup semantics, and pass full independent exact-SHA review. The existing
-`DOT-70` window remains closed until that successor and one exact qualifying
-match are both accepted.
+implement separate closed `RunPurposeV1` and `MatchClassV1` enums plus the
+authority contracts, replace only the directly dependent identity/source,
+evidence, verifier, golden, and human wording, preserve all accepted process,
+timing, evidence, privacy, fault, resource, recovery, and cleanup semantics,
+and pass full independent exact-SHA review. The only acceptance pairs are
+`p4_acceptance + ti` and `p4_acceptance + public_tournament`; every other pair
+fails closed.
+
+The P4 order is immutable spec acceptance, exact-parent harness implementation,
+independent exact-SHA review, fresh readiness reproduction, qualifying-match
+selection and authority preflight, update/reopen existing `DOT-70` with that
+exact identity and one absolute China Standard Time window of at most 30
+minutes, execute once, then independently evaluate sealed evidence. Match
+acceptance is not a prerequisite to its only manual checkpoint. `DOT-70`
+remains closed until the first five prerequisites pass and is reused rather
+than duplicated.
+
+#### Public-match systems rehearsal (never P4)
+
+- The only rehearsal pair is
+  `public_match_rehearsal + public_match`. It uses distinct versioned readiness,
+  evidence-index, terminal-outcome, root-domain, and verifier schemas. Canonical
+  evidence always binds `claims_p4:false`, `qualifying_match:false`,
+  `acceptance_eligible:false`, `acceptance_gate:"none"`, and one outcome
+  `rehearsal_complete|rehearsal_failed`. A rehearsal root is rejected by every
+  P4 preflight/live/recovery verifier; editing a purpose, class, eligibility,
+  readiness, source, or index breaks its canonical hash.
+- Rehearsal emits `REHEARSAL_READY`, never `ARMED`, and generates no Multica
+  mention/status payload or reference to `DOT-64`, `DOT-62`, or `DOT-70`. Its
+  completion has no milestone side effect. Tournament, series, team/roster, and
+  historical identities unavailable in a public match use
+  `unavailable_for_public_match`; account IDs, persona/display names, chat, and
+  unrelated screen content cannot substitute. Dependent claims suppress with
+  stable audited reasons.
+- The rehearsal retains every production-path check meaningful for an ordinary
+  public match: public DotaTV visibility and stable nonzero match ID, bound Dota
+  process/GSI identity, before-`0:00` start, full post-game/OBS finalization,
+  raw-first reconciliation, process/sender limitation, privacy, five-second
+  resources, 100 ms visibility, operator actions, fault/recovery byte
+  comparison, confinement, cleanup, and non-resumable failure. Acceptance-only
+  qualification checks are `not_applicable_rehearsal`, never passes.
+- Produce value-free `FieldCoverageDeltaV1` bound to captured-schedule SHA-256
+  `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`,
+  exact raw-session/evidence hashes, and algorithm version. Type-prefixed fixed,
+  array, and reviewed dynamic-key segments eliminate path collisions; dynamic
+  keys aggregate only counts/types/collision counts and retain no raw key or
+  scalar sample. The full canonical union assigns every path exactly one of
+  `same`, `missing_in_rehearsal`, `additional_in_rehearsal`, or
+  `different_type_or_nullability`, with frame/seen/null counts and JSON types.
+- A later qualifying attempt uses a fresh isolated root and complete unchanged
+  P4. No rehearsal artifact, hash, manual confirmation, or result can be
+  imported, resumed, spliced, relabeled, or used to skip a check.
+
+The focused amendment
+`docs/specs/2026-08-17-m4-public-tournament-match-substitution.md` defines the
+complete authority, schema-separation, normalization, adversarial-test, and
+ordering contract.
 
 ### P5 — production rehearsal latency
 
