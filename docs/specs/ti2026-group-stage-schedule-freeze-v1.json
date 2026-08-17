@@ -1,0 +1,936 @@
+{
+  "artifact_version": "v1",
+  "tournament": "The International 2026",
+  "stage": "group_stage",
+  "source": {
+    "endpoint": "https://www.dota2.com.cn/international2026/getMatchScheduleGrouped?schedule_key=ti2026&swiss_format=ti_road",
+    "retrieved_at_utc": "2026-08-17T03:02:31Z",
+    "response_timestamp_unix": 1786935748,
+    "response_timestamp_utc": "2026-08-17T03:02:28Z",
+    "raw_response_sha256": "d6314c9beb2fb36956f5f042ddd679661dc27590ca0df9cdeae7fff4a914cfa6",
+    "schedule_key": "ti2026",
+    "schedule_source": "match_api",
+    "provider_match_id_semantics": "event_series_id_not_dota_match_id"
+  },
+  "participant_scope_reference": {
+    "status": "tournament_roster_only_not_per_game_verified",
+    "scope_id": "da84de9204dc8493c07a0d4ba9fafcdec7e4481c01060f6bad5d7b954ef5f8f2",
+    "accepted_evidence_commit": "77741f940f6b1b2c2cdb68e2c08cfb6491d0b38b",
+    "team_count": 16,
+    "cutoff_player_count": 80
+  },
+  "initial_game_slot_state": {
+    "dota_match_id": null,
+    "participant_bindings": [],
+    "status": "missing",
+    "reason_code": "dota_match_id_not_frozen"
+  },
+  "series_count": 44,
+  "swiss_series_count": 39,
+  "elimination_series_count": 5,
+  "expected_game_count": 109,
+  "frozen_dota_match_id_count": 0,
+  "series": [
+    {
+      "official_series_id": "3367881",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T03:03:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 19563,
+        "name": "Falcons",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3505,
+        "name": "LGD",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367881:game-1",
+        "ti2026:3367881:game-2",
+        "ti2026:3367881:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367882",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T03:18:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22296,
+        "name": "Iron Wing",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 18412,
+        "name": "Nigma Galaxy",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367882:game-1",
+        "ti2026:3367882:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367884",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T03:33:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22887,
+        "name": "VISION",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23887,
+        "name": "Team Resilience",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367884:game-1",
+        "ti2026:3367884:game-2",
+        "ti2026:3367884:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367883",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T03:38:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 20782,
+        "name": "BB",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3522,
+        "name": "OG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367883:game-1",
+        "ti2026:3367883:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367886",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T05:57:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3530,
+        "name": "Liquid",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3507,
+        "name": "VG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367886:game-1",
+        "ti2026:3367886:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367887",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T06:09:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3903,
+        "name": "Aurora",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23696,
+        "name": "Gamerlegion",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367887:game-1",
+        "ti2026:3367887:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367885",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T07:18:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3552,
+        "name": "Spirit",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 19629,
+        "name": "XG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367885:game-1",
+        "ti2026:3367885:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367888",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T07:18:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 23531,
+        "name": "Yandex",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 22084,
+        "name": "HULIGANI",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367888:game-1",
+        "ti2026:3367888:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367889",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T08:43:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 20782,
+        "name": "BB",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 22296,
+        "name": "Iron Wing",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367889:game-1",
+        "ti2026:3367889:game-2",
+        "ti2026:3367889:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367893",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T09:17:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 23887,
+        "name": "Team Resilience",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 3505,
+        "name": "LGD",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367893:game-1",
+        "ti2026:3367893:game-2",
+        "ti2026:3367893:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367892",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T09:32:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 18412,
+        "name": "Nigma Galaxy",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3522,
+        "name": "OG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367892:game-1",
+        "ti2026:3367892:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367890",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-13T10:06:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22887,
+        "name": "VISION",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 19563,
+        "name": "Falcons",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367890:game-1",
+        "ti2026:3367890:game-2",
+        "ti2026:3367890:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367900",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T02:00:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22084,
+        "name": "HULIGANI",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 3507,
+        "name": "VG",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367900:game-1",
+        "ti2026:3367900:game-2",
+        "ti2026:3367900:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367901",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T02:01:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 19629,
+        "name": "XG",
+        "score": 0
+      },
+      "away": {
+        "source_team_id": 23696,
+        "name": "Gamerlegion",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367901:game-1",
+        "ti2026:3367901:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367898",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T02:02:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 23531,
+        "name": "Yandex",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 3530,
+        "name": "Liquid",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367898:game-1",
+        "ti2026:3367898:game-2",
+        "ti2026:3367898:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367899",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T02:02:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3552,
+        "name": "Spirit",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3903,
+        "name": "Aurora",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367899:game-1",
+        "ti2026:3367899:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367904",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T04:11:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3505,
+        "name": "LGD",
+        "score": 0
+      },
+      "away": {
+        "source_team_id": 18412,
+        "name": "Nigma Galaxy",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367904:game-1",
+        "ti2026:3367904:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367902",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T04:33:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 20782,
+        "name": "BB",
+        "score": 0
+      },
+      "away": {
+        "source_team_id": 22887,
+        "name": "VISION",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367902:game-1",
+        "ti2026:3367902:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367903",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T05:47:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22296,
+        "name": "Iron Wing",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 19563,
+        "name": "Falcons",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367903:game-1",
+        "ti2026:3367903:game-2",
+        "ti2026:3367903:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367905",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T06:10:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 23887,
+        "name": "Team Resilience",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3522,
+        "name": "OG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367905:game-1",
+        "ti2026:3367905:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367908",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T07:14:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3507,
+        "name": "VG",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23696,
+        "name": "Gamerlegion",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367908:game-1",
+        "ti2026:3367908:game-2",
+        "ti2026:3367908:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367906",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T07:26:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3552,
+        "name": "Spirit",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3530,
+        "name": "Liquid",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367906:game-1",
+        "ti2026:3367906:game-2",
+        "ti2026:3367906:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367907",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T08:36:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 19629,
+        "name": "XG",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 22084,
+        "name": "HULIGANI",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367907:game-1",
+        "ti2026:3367907:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367909",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-14T10:24:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3903,
+        "name": "Aurora",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23531,
+        "name": "Yandex",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367909:game-1",
+        "ti2026:3367909:game-2",
+        "ti2026:3367909:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367924",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T02:00:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3522,
+        "name": "OG",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 22084,
+        "name": "HULIGANI",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367924:game-1",
+        "ti2026:3367924:game-2",
+        "ti2026:3367924:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367925",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T02:00:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 19563,
+        "name": "Falcons",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23696,
+        "name": "Gamerlegion",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367925:game-1",
+        "ti2026:3367925:game-2",
+        "ti2026:3367925:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367927",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T02:01:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3505,
+        "name": "LGD",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 19629,
+        "name": "XG",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367927:game-1",
+        "ti2026:3367927:game-2",
+        "ti2026:3367927:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367926",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T02:02:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 23887,
+        "name": "Team Resilience",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 23531,
+        "name": "Yandex",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367926:game-1",
+        "ti2026:3367926:game-2",
+        "ti2026:3367926:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367912",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T05:26:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 18412,
+        "name": "Nigma Galaxy",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3507,
+        "name": "VG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367912:game-1",
+        "ti2026:3367912:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367913",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T06:02:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22296,
+        "name": "Iron Wing",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 3530,
+        "name": "Liquid",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367913:game-1",
+        "ti2026:3367913:game-2",
+        "ti2026:3367913:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367911",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T06:09:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 20782,
+        "name": "BB",
+        "score": 0
+      },
+      "away": {
+        "source_team_id": 3903,
+        "name": "Aurora",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367911:game-1",
+        "ti2026:3367911:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367910",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T06:19:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22887,
+        "name": "VISION",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3552,
+        "name": "Spirit",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367910:game-1",
+        "ti2026:3367910:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367915",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T09:33:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 23887,
+        "name": "Team Resilience",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 19629,
+        "name": "XG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367915:game-1",
+        "ti2026:3367915:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367916",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T09:34:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3522,
+        "name": "OG",
+        "score": 0
+      },
+      "away": {
+        "source_team_id": 23696,
+        "name": "Gamerlegion",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367916:game-1",
+        "ti2026:3367916:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367917",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T09:41:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3505,
+        "name": "LGD",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3507,
+        "name": "VG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367917:game-1",
+        "ti2026:3367917:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367928",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T10:41:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 20782,
+        "name": "BB",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 19563,
+        "name": "Falcons",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367928:game-1",
+        "ti2026:3367928:game-2",
+        "ti2026:3367928:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367918",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T11:44:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22296,
+        "name": "Iron Wing",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23531,
+        "name": "Yandex",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367918:game-1",
+        "ti2026:3367918:game-2",
+        "ti2026:3367918:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367919",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T11:52:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3530,
+        "name": "Liquid",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3903,
+        "name": "Aurora",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367919:game-1",
+        "ti2026:3367919:game-2",
+        "ti2026:3367919:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367920",
+      "phase": "swiss",
+      "scheduled_at_utc": "2026-08-15T12:56:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 18412,
+        "name": "Nigma Galaxy",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3552,
+        "name": "Spirit",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367920:game-1",
+        "ti2026:3367920:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367930",
+      "phase": "elimination",
+      "scheduled_at_utc": "2026-08-16T02:00:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 19563,
+        "name": "Falcons",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 3507,
+        "name": "VG",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367930:game-1",
+        "ti2026:3367930:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367929",
+      "phase": "elimination",
+      "scheduled_at_utc": "2026-08-16T03:00:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3903,
+        "name": "Aurora",
+        "score": 0
+      },
+      "away": {
+        "source_team_id": 20782,
+        "name": "BB",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367929:game-1",
+        "ti2026:3367929:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367931",
+      "phase": "elimination",
+      "scheduled_at_utc": "2026-08-16T04:32:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3552,
+        "name": "Spirit",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23887,
+        "name": "Team Resilience",
+        "score": 1
+      },
+      "game_slot_ids": [
+        "ti2026:3367931:game-1",
+        "ti2026:3367931:game-2",
+        "ti2026:3367931:game-3"
+      ]
+    },
+    {
+      "official_series_id": "3367933",
+      "phase": "elimination",
+      "scheduled_at_utc": "2026-08-16T05:46:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 22296,
+        "name": "Iron Wing",
+        "score": 2
+      },
+      "away": {
+        "source_team_id": 23696,
+        "name": "Gamerlegion",
+        "score": 0
+      },
+      "game_slot_ids": [
+        "ti2026:3367933:game-1",
+        "ti2026:3367933:game-2"
+      ]
+    },
+    {
+      "official_series_id": "3367932",
+      "phase": "elimination",
+      "scheduled_at_utc": "2026-08-16T08:08:00Z",
+      "best_of": 3,
+      "home": {
+        "source_team_id": 3505,
+        "name": "LGD",
+        "score": 1
+      },
+      "away": {
+        "source_team_id": 23531,
+        "name": "Yandex",
+        "score": 2
+      },
+      "game_slot_ids": [
+        "ti2026:3367932:game-1",
+        "ti2026:3367932:game-2",
+        "ti2026:3367932:game-3"
+      ]
+    }
+  ]
+}
