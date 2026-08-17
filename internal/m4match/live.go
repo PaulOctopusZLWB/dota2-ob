@@ -781,6 +781,27 @@ func verifyDotaProcess(identity LiveIdentity) error {
 	return nil
 }
 
+// verifyDotaProcessAt is shared by the accepted live harness and rehearsal
+// producer. It binds the opened /proc identity, including the executable path
+// fact, before comparing the accepted PID/hash/start-tick contract.
+func verifyDotaProcessAt(procRoot string, identity LiveIdentity) (processCorrelationIdentity, string, error) {
+	observed, err := readProcessCorrelationIdentity(procRoot, identity.DotaPID)
+	if err != nil || strings.ToLower(observed.Comm) != "dota2" {
+		return processCorrelationIdentity{}, "", errors.New("bound Dota process exited or changed")
+	}
+	if observed.ExecutableSHA256 != identity.DotaExecutableSHA256 {
+		return processCorrelationIdentity{}, "", errors.New("bound Dota executable changed")
+	}
+	if observed.StartTicks != identity.DotaProcessStartTicks {
+		return processCorrelationIdentity{}, "", errors.New("bound Dota process instance changed")
+	}
+	executable, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(identity.DotaPID), "exe"))
+	if err != nil {
+		return processCorrelationIdentity{}, "", err
+	}
+	return observed, payloadSHA([]byte(executable)), nil
+}
+
 func collectSample(pid, obsPID int, rawPath, tokenPath, root, expectedSession, expectedMatch string) Sample {
 	sample := Sample{At: time.Now().UTC()}
 	var telemetryOK = true
