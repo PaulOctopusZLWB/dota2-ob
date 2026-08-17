@@ -66,6 +66,7 @@ type operatorTerminal struct {
 }
 
 type recoveryProof struct {
+	StartTicks     uint64     `json:"-"`
 	CursorSHA256   string     `json:"cursor_sha256"`
 	PolicySHA256   string     `json:"policy_sha256"`
 	AuditSHA256    string     `json:"audit_sha256"`
@@ -109,10 +110,15 @@ func captureFinalEndpoints(root, tokenPath string) ([]Artifact, error) {
 }
 
 func validateCompletedAttempt(root, sessionID string, productClean, obsClean bool) (attemptValidation, []Artifact, error) {
+	validation, artifacts, _, err := validateCompletedAttemptWithProof(root, sessionID, productClean, obsClean)
+	return validation, artifacts, err
+}
+
+func validateCompletedAttemptWithProof(root, sessionID string, productClean, obsClean bool) (attemptValidation, []Artifact, recoveryProof, error) {
 	sessionDir := filepath.Join(root, "data/sessions", sessionID)
 	validation, err := summarizeAttempt(sessionDir)
 	if err != nil {
-		return validation, nil, err
+		return validation, nil, recoveryProof{}, err
 	}
 	validation.RecordingFinalized = obsClean && recordingFinalized(filepath.Join(root, "recordings"), filepath.Join(root, "evidence/logs/obs-live.log"))
 	validation.PrivacySafe = scanRawPrivacy(filepath.Join(sessionDir, "raw.jsonl")) == nil
@@ -138,13 +144,13 @@ func validateCompletedAttempt(root, sessionID string, productClean, obsClean boo
 	payload, _ := canonical(validation)
 	relative := "evidence/canonical/live-validation.json"
 	if err := writePrivate(filepath.Join(root, relative), payload); err != nil {
-		return validation, nil, err
+		return validation, nil, proof, err
 	}
 	artifacts := append(recoveryArtifacts, Artifact{Path: relative, SHA256: payloadSHA(payload), Bytes: int64(len(payload))})
 	if !productClean || !validation.RecordingFinalized || !validation.OperatorComplete || !validation.PrivacySafe || !validation.Reconciled || !validation.NoCacheRecovery || !validation.MeasurementsPassed || !validation.VisibilityPassed || !validation.OperatorInputBounds {
-		return validation, artifacts, errors.New("completed attempt validation failed")
+		return validation, artifacts, proof, errors.New("completed attempt validation failed")
 	}
-	return validation, artifacts, nil
+	return validation, artifacts, proof, nil
 }
 
 func summarizeAttempt(sessionDir string) (attemptValidation, error) {
@@ -276,6 +282,13 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 	}
 	done := make(chan error, 1)
 	go func() { done <- process.Wait() }()
+	identity, identityErr := readProcessCorrelationIdentity("/proc", process.Process.Pid)
+	if identityErr != nil || identity.StartTicks == 0 {
+		_ = process.Process.Kill()
+		<-done
+		return proof, nil, errors.New("recovery process identity unavailable")
+	}
+	proof.StartTicks = identity.StartTicks
 	clean := false
 	defer func() {
 		if !clean && process.ProcessState == nil {

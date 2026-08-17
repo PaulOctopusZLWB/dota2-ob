@@ -89,6 +89,27 @@ func TestEvaluateLiveOnlyEmitsNoHistoryFamilies(t *testing.T) {
 	artifact := contracts.PolicyArtifactIdentityV2{Version: "v1", ContentSHA256: hash('9')}
 	lineage := contracts.PolicyLineageManifestV3{SchemaVersion: contracts.PolicyLineageManifestSchemaV3, SessionID: "session", RawRecordSchema: artifact, RawRecordFraming: artifact, RawPayloadSchema: artifact, LiveObservationSchema: artifact, ProjectionMapping: artifact, TournamentScopeID: hash('c'), TournamentScopeSHA256: hash('c'), HistoryAvailabilityBindingID: id, HistoryAvailabilityBindingSHA256: id, Rules: insight.RulesArtifact(), Config: insight.ConfigArtifact(insight.DefaultConfig()), Catalog: artifact, Terminology: artifact, LocalizationParameterMapping: artifact, EngineBuild: artifact}
 	input := insight.LiveOnlyInput{Observation: observation, Previous: &previous, History: history, Lineage: lineage, PolicyTimeMS: now.UnixMilli()}
+	production, productionErr := insight.EvaluateLiveOnlyProduction(input, insight.DefaultConfig())
+	if productionErr != nil || len(production.Suppressions) != 8 {
+		t.Fatalf("production eligibility sites not executed: %#v %v", production, productionErr)
+	}
+	acceptedVisible := insight.EvaluateLiveOnly(input, insight.DefaultConfig())
+	productionVisible, _ := contracts.MarshalCanonical(production.Candidates)
+	acceptedVisiblePayload, _ := contracts.MarshalCanonical(acceptedVisible)
+	if string(productionVisible) != string(acceptedVisiblePayload) {
+		t.Fatal("production eligibility wiring changed accepted candidate behavior")
+	}
+	for index, family := range contracts.HistoricalDisabledFamiliesV1() {
+		execution := production.Suppressions[index]
+		if execution.Family != family || execution.Reason != "historical_unavailable" || execution.Evidence.Sequence != observation.Evidence.Sequence || execution.Evidence.RawPayloadSHA256 != observation.Evidence.RawPayloadSHA256 {
+			t.Fatalf("production eligibility order/binding mismatch: %#v", production.Suppressions)
+		}
+	}
+	badInput := input
+	badInput.History.DisabledFamilies = append([]string(nil), history.DisabledFamilies[:7]...)
+	if _, err := insight.EvaluateLiveOnlyProduction(badInput, insight.DefaultConfig()); err == nil {
+		t.Fatal("missing immutable production eligibility site accepted")
+	}
 	first, second := insight.EvaluateLiveOnly(input, insight.DefaultConfig()), insight.EvaluateLiveOnly(input, insight.DefaultConfig())
 	a, _ := contracts.MarshalCanonical(first)
 	b, _ := contracts.MarshalCanonical(second)
