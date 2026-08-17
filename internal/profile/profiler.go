@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -82,11 +83,32 @@ func (p *Profiler) Snapshot() Snapshot {
 }
 
 func WriteSummary(path string, snapshot Snapshot) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create summary dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(RenderSummary(snapshot)), 0o644); err != nil {
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return fmt.Errorf("secure summary dir: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return fmt.Errorf("write session summary: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("secure session summary: %w", err)
+	}
+	summary := RenderSummary(snapshot)
+	written, err := io.WriteString(file, summary)
+	if err == nil && written != len(summary) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write session summary: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close session summary: %w", err)
 	}
 	return nil
 }

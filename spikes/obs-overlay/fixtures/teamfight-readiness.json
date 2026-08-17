@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "teamfight-readiness",
+    "kicker": "直播洞察 · 团战准备",
+    "title": "关键技能转好，正面接团条件恢复",
+    "body": "两名英雄已经复活，当前可观察资源与关键技能均就绪；不推断战争迷雾中的站位或意图。",
+    "evidence": "5 人存活 · 3 个关键技能可用 · 当前资源完整",
+    "confidenceLabel": "中高置信度",
+    "sourceLabel": "实时观察 · 可见资源",
+    "ageLabel": "更新于 1 秒前",
+    "asset": null
+  }
+}

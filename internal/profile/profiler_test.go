@@ -61,9 +61,19 @@ func TestWriteSummaryClassifiesCoreAvailability(t *testing.T) {
 	profiler := profile.NewProfiler()
 	profiler.Observe(time.Date(2026, 7, 5, 14, 30, 0, 0, time.UTC), completePayloadWithWardStats())
 
-	summaryPath := filepath.Join(t.TempDir(), "session_summary.md")
+	summaryPath := filepath.Join(t.TempDir(), "private", "session_summary.md")
 	if err := profile.WriteSummary(summaryPath, profiler.Snapshot()); err != nil {
 		t.Fatalf("WriteSummary returned error: %v", err)
+	}
+	if info, err := os.Stat(filepath.Dir(summaryPath)); err != nil {
+		t.Fatalf("stat summary directory: %v", err)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Fatalf("summary directory mode=%v want=0700", info.Mode().Perm())
+	}
+	if info, err := os.Stat(summaryPath); err != nil {
+		t.Fatalf("stat summary file: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("summary file mode=%v want=0600", info.Mode().Perm())
 	}
 
 	data, err := os.ReadFile(summaryPath)

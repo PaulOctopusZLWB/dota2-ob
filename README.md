@@ -45,3 +45,18 @@ See:
 - `docs/plans/2026-07-05-mvp-gsi-validation.md`
 - `research/dota2_live_data_sources.md`
 - `research/multica_agent_harness_best_practices.md`
+
+## Local delivery boundary
+
+The capture listener defaults to `127.0.0.1:43210`; the separate operator and
+OBS overlay listener defaults to `127.0.0.1:43211`. Production capture exposes
+only `/gsi`, `/healthz`, and `/api/status`. Use `--diagnostic-mode` to re-enable
+the deprecated dashboard and diagnostic JSON routes behind bearer and
+same-origin checks.
+
+For an explicit operator-process token handoff, create a user-only directory
+and pass an absolute path inside it with `--operator-token-file`. The process
+creates that file as `0600`, never logs the token or path, and removes it on
+shutdown. If the flag is omitted, the documented handoff is
+`$XDG_RUNTIME_DIR/dota2-ob/runtime/operator.token`, falling back to the same
+path under the user's cache directory when no runtime directory is configured.

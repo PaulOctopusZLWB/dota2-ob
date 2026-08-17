@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dota2-ob.local/spikes/overlay-state-v1-fixture.schema.json",
+  "title": "OverlayStateV1 presentation-spike fixture",
+  "description": "Spike-local conformance envelope; the accepted shared contract remains owned by the M0 contract track.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "generatedAt", "health", "display"],
+  "properties": {
+    "schemaVersion": { "const": "overlay-state/v1" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "renderSafe", "emergencyHidden", "maxSilenceMs"],
+      "properties": {
+        "status": { "enum": ["healthy", "stale", "disconnected"] },
+        "renderSafe": { "type": "boolean" },
+        "emergencyHidden": { "type": "boolean" },
+        "maxSilenceMs": { "type": "integer", "minimum": 250, "exclusiveMaximum": 2000 }
+      }
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible", "family", "kicker", "title", "body", "evidence", "confidenceLabel", "sourceLabel", "ageLabel", "asset"],
+      "properties": {
+        "visible": { "type": "boolean" },
+        "family": { "enum": ["draft-context", "lane-checkpoint", "item-timing", "objective-exchange", "teamfight-readiness"] },
+        "kicker": { "$ref": "#/$defs/plainText" },
+        "title": { "$ref": "#/$defs/plainText" },
+        "body": { "$ref": "#/$defs/plainText" },
+        "evidence": { "$ref": "#/$defs/plainText" },
+        "confidenceLabel": { "$ref": "#/$defs/plainText" },
+        "sourceLabel": { "$ref": "#/$defs/plainText" },
+        "ageLabel": { "$ref": "#/$defs/plainText" },
+        "asset": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["src", "alt", "fallback"],
+              "properties": {
+                "src": { "type": "string", "pattern": "^/assets/[a-z0-9-]+\\.(png|webp|svg)$" },
+                "alt": { "$ref": "#/$defs/plainText" },
+                "fallback": { "$ref": "#/$defs/plainText" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "plainText": { "type": "string", "minLength": 1, "pattern": "^[^<>]+$" }
+  }
+}
