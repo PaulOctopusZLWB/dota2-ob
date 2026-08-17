@@ -98,6 +98,12 @@ func rawContentGuardState(rawPath string) (valid, available bool) {
 	return guard.rawSize == info.Size() && guard.rawMtime == fileMtime(info), true
 }
 
+// RawContentGuardState exposes the accepted sidecar guard to bounded evidence
+// admission without allowing callers to create or refresh it.
+func RawContentGuardState(rawPath string) (valid, available bool) {
+	return rawContentGuardState(rawPath)
+}
+
 func rawAuthorityGuardValid(rawPath string) bool {
 	// The xattr is attached to the authoritative raw inode, not stored in a
 	// second sidecar. Store append/recovery refresh the raw half only after a
