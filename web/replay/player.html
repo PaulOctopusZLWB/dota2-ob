@@ -163,7 +163,8 @@ function axisRows(ps, layer) {
 }
 
 // metricDrilldown renders the score decomposition: raw values, percentiles,
-// weights, and coverage for every component.
+// weights, coverage, and typed lineage (fact/episode/phase evidence refs) for
+// every component.
 function metricDrilldown(ps) {
   const seen = {};
   let rows = "";
@@ -179,7 +180,14 @@ function metricDrilldown(ps) {
       const pct = c.percentile == null ? "-" : fmt(c.percentile);
       const st = c.published ? `<span class="badge ok">已发布</span>` : `<span class="badge warn">不可用</span>`;
       const reason = c.unavailable_reason ? ` · ${esc(c.unavailable_reason)}` : "";
-      rows += `<tr><td>${esc(mid)}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td>${st}${reason}</td></tr>`;
+      const agg = ps.aggregated_metrics && ps.aggregated_metrics[mid];
+      let lineage = "-";
+      if (agg && agg.lineage && agg.lineage.length) {
+        lineage = agg.lineage.map(ref =>
+          `<a href="match.html?id=${esc(ref.match_id || "")}" title="来源事实序列 ${esc(ref.source_fact_seq)}">${esc(ref.kind)}:${esc(ref.id)}</a>`
+        ).join(" ");
+      }
+      rows += `<tr><td>${esc(mid)}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td>${st}${reason}</td><td class="hint">${lineage}</td></tr>`;
     }
   }
   return rows;
@@ -252,8 +260,8 @@ async function load() {
           <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "official")}</tbody></table>
           <h4 style="margin-top:12px">实验轴分解（虚线 V3）</h4>
           <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "experimental")}</tbody></table>
-          <h4 style="margin-top:12px">指标分解（原始值 · 同角色百分位 · 权重 · 覆盖）</h4>
-          <table><thead><tr><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
+          <h4 style="margin-top:12px">指标分解（原始值 · 同角色百分位 · 权重 · 覆盖 · 证据链）</h4>
+          <table><thead><tr><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th><th>证据链</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
         </div>`);
     } else {
       c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">该账户尚无评分快照（语料中无已发布比赛）。</p></div>`);

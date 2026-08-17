@@ -112,30 +112,43 @@ async function load() {
           <td class="mono">${esc(JSON.stringify(corr.effective_value))}</td>
           <td class="hint">${esc(corr.applied_at || "")} · ${esc(corr.algorithm_version || "")}</td>
         </tr>`).join("");
-      // Preload the machine phase boundaries for this match so the reviewer
-      // accepts/moves/relabels real machine intervals instead of blank JSON.
+      // Preload the machine phase boundaries (canonical interval@START-END
+      // refs) so the reviewer accepts/moves/relabels/splits real machine
+      // intervals instead of blank JSON.
       let phaseOptions = "";
       try {
         const tl = await (await fetch(`/api/replay/v1/matches/${rv.match_id}/timeline`)).json();
         const intervals = (tl.data && tl.data.phases && tl.data.phases.intervals) || [];
         phaseOptions = intervals.map(iv =>
-          `<option value="${esc(iv.start_game_second)}-${esc(iv.end_game_second)}">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s（机器值）</option>`
+          `<option value="interval@${esc(iv.start_game_second)}-${esc(iv.end_game_second)}">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s（机器值）</option>`
         ).join("");
       } catch (e) { phaseOptions = ""; }
       c.insertAdjacentHTML("beforeend", `
         <div class="panel">
           <h3 style="margin-top:0">比赛 <a href="match.html?id=${esc(rv.match_id)}">${esc(rv.match_id)}</a>
             <span class="badge ${rv.review_status === 'reviewed' ? 'ok' : rv.review_status === 'in_progress' ? 'warn' : ''}">${esc(rv.review_status || "pending")}</span></h3>
-          <h4 style="margin-top:8px">阶段边界校正（机器值由服务端解析，拒绝伪造）</h4>
+          <h4 style="margin-top:8px">阶段边界校正（机器值由服务端解析，拒绝伪造；非法阶段/边界被拒绝）</h4>
           <div style="display:grid;gap:8px">
+            <label class="hint">目标机器区间</label>
             <select id="phase-ref-${esc(rv.match_id)}">${phaseOptions || `<option value="">无机器区间</option>`}</select>
-            <input id="phase-eff-${esc(rv.match_id)}" placeholder='有效值 JSON（如 {"global_phase":"midgame","start":300,"end":620}）'>
+            <label class="hint">操作类型</label>
+            <select id="phase-op-${esc(rv.match_id)}">
+              <option value="accept">接受（确认机器边界）</option>
+              <option value="relabel">重标注（仅改阶段名）</option>
+              <option value="move">移动（改边界）</option>
+              <option value="add">新增区间</option>
+              <option value="delete">删除区间</option>
+              <option value="split">拆分</option>
+              <option value="merge">合并相邻</option>
+            </select>
+            <label class="hint">有效值 JSON（accept/delete 可留空；split 请填 {"split_second":N}；merge 请填 {"merge_right":"interval@A-B"}）</label>
+            <textarea id="phase-eff-${esc(rv.match_id)}" rows="2" placeholder='{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}'></textarea>
             <textarea id="phase-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因（必填）"></textarea>
-            <button onclick="submitPhase('${esc(rv.match_id)}')">提交阶段校正（接受/移动/重标注）</button>
+            <button onclick="submitPhase('${esc(rv.match_id)}')">提交阶段操作</button>
           </div>
           <h4 style="margin-top:12px">争议事件校正（机器值由服务端解析）</h4>
           <div style="display:grid;gap:8px">
-            <input id="evt-ref-${esc(rv.match_id)}" placeholder="事件引用（如 fight_interval@100）">
+            <input id="evt-ref-${esc(rv.match_id)}" placeholder="事件引用（如 fight_interval@100 或事件 ID）">
             <input id="evt-eff-${esc(rv.match_id)}" placeholder='有效值 JSON'>
             <textarea id="evt-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因（必填）"></textarea>
             <button onclick="submitEvent('${esc(rv.match_id)}')">提交事件校正（接受/拒绝/编辑）</button>
@@ -155,9 +168,29 @@ async function load() {
 
 async function submitPhase(matchId) {
   const ref = document.getElementById("phase-ref-" + matchId).value;
+  const op = document.getElementById("phase-op-" + matchId).value;
   const eff = document.getElementById("phase-eff-" + matchId).value;
   const reason = document.getElementById("phase-reason-" + matchId).value;
-  await submit("phase-corrections", matchId, ref, "", eff, reason);
+  let ev = {};
+  if (eff && eff.trim()) {
+    try { ev = JSON.parse(eff); } catch (e) { alert("有效值 JSON 无效"); return; }
+  }
+  if (!ref) { alert("目标机器区间必填"); return; }
+  if (!reason) { alert("原因必填"); return; }
+  const payload = { match_id: matchId, author: "paul", reason, operation: op, event_ref: ref };
+  if (op === "add" || op === "move" || op === "relabel") {
+    payload.effective_value = ev;
+  } else if (op === "split") {
+    if (ev.split_second == null) { alert("split 需要 split_second"); return; }
+    payload.split_second = ev.split_second;
+  } else if (op === "merge") {
+    if (!ev.merge_right) { alert("merge 需要 merge_right"); return; }
+    payload.merge_right = ev.merge_right;
+  }
+  const resp = await postCorrection("/reviews/phase-corrections", payload);
+  const out = await resp.json();
+  if (resp.status === 200) { location.reload(); }
+  else { alert("提交失败: " + JSON.stringify(out)); }
 }
 
 async function submitEvent(matchId) {

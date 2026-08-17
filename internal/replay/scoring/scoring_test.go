@@ -25,6 +25,15 @@ func testMetricReg(t *testing.T) *metrics.Registry {
 	return reg
 }
 
+func testTeamContract(t *testing.T) *TeamContract {
+	t.Helper()
+	tc, err := LoadTeamContract("../../../docs/specs/ti2026-team-scoring-v1.json")
+	if err != nil {
+		t.Fatalf("load team registry: %v", err)
+	}
+	return tc
+}
+
 func TestContractValidates(t *testing.T) {
 	c := testContract(t)
 	if len(c.Axes) != 8 {
@@ -261,13 +270,48 @@ func TestSuppressionOnMandatoryMissing(t *testing.T) {
 	}
 }
 
-// TestTeamScoreComputesDerivedRegistry proves team-tournament scores are
-// computed under the derived team registry (not hard-coded unavailable): the
-// team snapshot exists, the fight axis publishes from team-pooled metrics, and
-// the team total is suppressed with explicit mandatory-axis reasons (a real
-// gate, not "registry not defined").
-func TestTeamScoreComputesDerivedRegistry(t *testing.T) {
+// TestLineagePreservedThroughAggregation proves typed evidence references are
+// retained and deduplicated through player-tournament aggregation.
+func TestLineagePreservedThroughAggregation(t *testing.T) {
 	c := testContract(t)
+	mreg := testMetricReg(t)
+	players := []*PlayerMatch{
+		mkPlayerWithLineage("m1", "a1", "T1", "1", "fight_damage_share", 0.3, 30, 100, []EvidenceRef{{MatchID: "m1", Kind: "episode", ID: "fight@100", SourceFactSeq: 7}}),
+		mkPlayerWithLineage("m2", "a1", "T1", "1", "fight_damage_share", 0.1, 30, 300, []EvidenceRef{{MatchID: "m2", Kind: "episode", ID: "fight@200", SourceFactSeq: 8}}),
+	}
+	cor := NewCorpus(c, mreg, players)
+	pt := cor.Tournament("a1", "1")
+	if pt == nil {
+		t.Fatal("tournament nil")
+	}
+	agg := pt.Metrics["fight_damage_share"]
+	if len(agg.Lineage) != 2 {
+		t.Fatalf("lineage len=%d want 2 (deduplicated across matches)", len(agg.Lineage))
+	}
+	if agg.Lineage[0].Kind != "episode" || agg.Lineage[0].MatchID == "" {
+		t.Fatalf("lineage ref malformed: %+v", agg.Lineage[0])
+	}
+}
+
+func mkPlayerWithLineage(match, acct, team, role, mid string, val, num, den float64, lineage []EvidenceRef) *PlayerMatch {
+	pm := mkPlayer(match, acct, team, role,
+		map[string]float64{mid: val},
+		map[string]float64{mid: num},
+		map[string]float64{mid: den})
+	mv := pm.Metrics[mid]
+	mv.Lineage = lineage
+	pm.Metrics[mid] = mv
+	return pm
+}
+
+// TestTeamScoreFromFrozenRegistry proves team-tournament scores are computed
+// exactly from the frozen team scoring registry: the team snapshot exists, the
+// fight axis publishes from team-pooled metrics using the registry's frozen
+// component weights, and the team total is suppressed with explicit
+// mandatory-axis reasons.
+func TestTeamScoreFromFrozenRegistry(t *testing.T) {
+	c := testContract(t)
+	tc := testTeamContract(t)
 	mreg := testMetricReg(t)
 	rows := []struct {
 		tid, match, acct, role string
@@ -288,17 +332,25 @@ func TestTeamScoreComputesDerivedRegistry(t *testing.T) {
 		m, n, d := rateMetrics(map[string]float64{"fight_damage_share": r.share, "control_duration_per_opportunity": 0.5})
 		players = append(players, mkPlayer(r.match, r.acct, r.tid, r.role, m, n, d))
 	}
-	cor := NewCorpus(c, mreg, players)
+	cor := NewCorpusWithTeam(c, tc, mreg, players)
 	ts := cor.ScoreTeam("TA")
 	if ts == nil {
 		t.Fatal("team score nil")
 	}
+	if ts.ScoringVersion != TeamSchemaVersion {
+		t.Fatalf("team scoring version=%q want %q", ts.ScoringVersion, TeamSchemaVersion)
+	}
 	if ts.SubjectCoverage.EligibleMatches != 3 {
 		t.Fatalf("team eligible matches=%d want 3", ts.SubjectCoverage.EligibleMatches)
 	}
-	// The fight axis publishes from the team-pooled metric.
-	if a := ts.OfficialAxes["fight"]; !a.Published {
+	// The fight axis publishes using the frozen registry's component weights.
+	a := ts.OfficialAxes["fight"]
+	if !a.Published {
 		t.Fatalf("team fight axis not published: %s", a.Reason)
+	}
+	wantW := tc.OfficialAxisComponents["fight"]["fight_damage_share"]
+	if gotW := a.Components["fight_damage_share"].Weight; math.Abs(gotW-wantW) > 1e-9 {
+		t.Fatalf("fight_damage_share team weight=%f want frozen %f", gotW, wantW)
 	}
 	// The team total is suppressed with explicit mandatory-axis reasons.
 	if ts.OfficialTotal == nil || ts.OfficialTotal.Published {

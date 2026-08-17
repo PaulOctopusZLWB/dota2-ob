@@ -88,6 +88,10 @@ type roleInputs struct {
 	ScoringContract     *scoring.Contract
 	ScoringContractSHA  string
 	ScoringContractPath string
+	// TeamContract is the frozen team scoring registry.
+	TeamContract     *scoring.TeamContract
+	TeamContractSHA  string
+	TeamContractPath string
 }
 
 // fileSHA256 returns the hex sha256 of a file, or "" when absent.
@@ -157,12 +161,27 @@ func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 		return nil, fmt.Errorf("scoring_contract_hash_failed: %w", err)
 	}
 
+	teamFile := filepath.Join(dir, "ti2026-team-scoring-v1.json")
+	var tc *scoring.TeamContract
+	var tcSHA string
+	if _, err := os.Stat(teamFile); err == nil {
+		tc, err = scoring.LoadTeamContract(teamFile)
+		if err != nil {
+			return nil, fmt.Errorf("team_scoring_contract_load_failed (%s): %w", teamFile, err)
+		}
+		tcSHA, err = fileSHA256(teamFile)
+		if err != nil {
+			return nil, fmt.Errorf("team_scoring_contract_hash_failed: %w", err)
+		}
+	}
+
 	return &roleInputs{
 		Registry: reg, Overrides: overrides,
 		RegistrySHA: regSHA, OverridesSHA: ovrSHA,
 		RegistryPath: roleFile, OverridesPath: overrideFile,
 		MetricRegistry: mreg, MetricRegistrySHA: mregSHA, MetricRegistryPath: metricFile,
 		ScoringContract: sc, ScoringContractSHA: scSHA, ScoringContractPath: scoringFile,
+		TeamContract: tc, TeamContractSHA: tcSHA, TeamContractPath: teamFile,
 	}, nil
 }
 
@@ -445,7 +464,7 @@ func cmdScore(args []string, output io.Writer) int {
 	if err := st.ReadJSONFile(st.Root+"/role-overrides-effective.json", &of); err == nil {
 		effectiveOverrides = &of
 	}
-	cs, err := scoring.ComputeAndPersist(st, ri.ScoringContract, ri.MetricRegistry, ri.Registry, effectiveOverrides)
+	cs, err := scoring.ComputeAndPersist(st, ri.ScoringContract, ri.TeamContract, ri.MetricRegistry, ri.Registry, effectiveOverrides)
 	if err != nil {
 		fmt.Fprintf(output, "score_compute_failed: %v\n", err)
 		return 1
@@ -554,6 +573,7 @@ func runServe(args []string, output io.Writer) int {
 	}
 	srv := api.New(st, ri.Registry, ri.Overrides, ri.RegistryPath).
 		WithContracts(ri.MetricRegistry, ri.ScoringContract).
+		WithTeamContract(ri.TeamContract).
 		WithReviews(rv).
 		WithSessionToken(*sessionToken)
 	handler := serveHandler(srv)

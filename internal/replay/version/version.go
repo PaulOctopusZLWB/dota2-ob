@@ -17,7 +17,7 @@ const (
 	// RawSchema is the raw observation stream schema version.
 	RawSchema = "replay.raw.v1"
 	// FactsSchema is the normalized fact partition schema version.
-	FactsSchema = "replay.facts.v1"
+	FactsSchema = "replay.facts.v2"
 	// IdentitySchema is the identity/verification record schema version.
 	IdentitySchema = "replay.identity.v1"
 	// ClockSchema is the calibrated clock record schema version.
@@ -29,7 +29,7 @@ const (
 	// MetricsSchema is the V1/V2/V3 metric publication schema version.
 	MetricsSchema = "replay.metrics.v2"
 	// ScoreSchema is the radar/score snapshot schema version.
-	ScoreSchema = "replay.score.v1"
+	ScoreSchema = "replay.score.v2"
 	// CorrectionSchema is the review/correction overlay schema version.
 	CorrectionSchema = "replay.corrections.v1"
 	// RoleSchema is the nominal role registry schema version.
@@ -44,9 +44,9 @@ const (
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
 	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v4"
+	MetricsRuleVersion = "ti2026.metrics.v5"
 	// ScoreRuleVersion identifies the radar/score computation rule set.
-	ScoreRuleVersion = "ti2026.scoring.v1"
+	ScoreRuleVersion = "ti2026.scoring.v2"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
 	CorrectionRuleVersion = "ti2026.corrections.v1"
 )

@@ -39,6 +39,8 @@ type Server struct {
 	MetricReg *metrics.Registry
 	// ScoringContract is the frozen radar/score contract.
 	ScoringContract *scoring.Contract
+	// TeamContract is the frozen team scoring registry.
+	TeamContract *scoring.TeamContract
 	// Reviews is the gold-review correction store (may be nil for read-only
 	// mode, in which case mutation endpoints are rejected).
 	Reviews *review.Store
@@ -54,10 +56,17 @@ func New(st *store.Store, roleReg *roles.Registry, overrides *roles.OverrideFile
 	return &Server{Store: st, RoleReg: roleReg, Overrides: overrides, RoleFile: roleFile}
 }
 
-// WithContracts binds the frozen metric registry and scoring contract.
+// WithContracts binds the frozen metric registry, radar/score contract, and
+// team scoring registry.
 func (s *Server) WithContracts(mreg *metrics.Registry, sc *scoring.Contract) *Server {
 	s.MetricReg = mreg
 	s.ScoringContract = sc
+	return s
+}
+
+// WithTeamContract binds the frozen team scoring registry.
+func (s *Server) WithTeamContract(tc *scoring.TeamContract) *Server {
+	s.TeamContract = tc
 	return s
 }
 

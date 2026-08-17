@@ -79,6 +79,9 @@ type Review struct {
 	EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals,omitempty"`
 	// ReviewStatus is the review workflow state.
 	ReviewStatus string `json:"review_status"` // pending|in_progress|reviewed
+	// RecomputeVersion is the scoring contract version that a synchronous
+	// recompute ran under (set by the API after role-override recompute).
+	RecomputeVersion string `json:"recompute_version,omitempty"`
 }
 
 // Audit is the append-only audit log for one review store.
@@ -335,34 +338,4 @@ func jsonEqual(a, b json.RawMessage) bool {
 		return false
 	}
 	return fmt.Sprintf("%#v", av) == fmt.Sprintf("%#v", bv)
-}
-
-// ApplyPhaseOverlay computes the effective phase interval stream by applying
-// phase corrections over the machine intervals. It never mutates the machine
-// intervals; corrections are applied by event_ref match on the machine
-// interval id, replacing the machine interval with the effective value.
-func ApplyPhaseOverlay(machine []json.RawMessage, corrections []Correction) []json.RawMessage {
-	effective := append([]json.RawMessage(nil), machine...)
-	byRef := map[string]int{}
-	for i := range effective {
-		var m map[string]interface{}
-		if err := json.Unmarshal(effective[i], &m); err != nil {
-			continue
-		}
-		if id, ok := m["event_ref"].(string); ok {
-			byRef[id] = i
-		}
-	}
-	for i := range corrections {
-		c := &corrections[i]
-		if c.Kind != KindPhaseInterval {
-			continue
-		}
-		idx, ok := byRef[c.EventRef]
-		if !ok {
-			continue
-		}
-		effective[idx] = append(json.RawMessage(nil), c.EffectiveValue...)
-	}
-	return effective
 }

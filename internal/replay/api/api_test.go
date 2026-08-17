@@ -31,6 +31,24 @@ func testContracts(t *testing.T) (*metrics.Registry, *scoring.Contract) {
 	return reg, sc
 }
 
+// testTeamContract loads the frozen team scoring registry.
+func testTeamContract(t *testing.T) *scoring.TeamContract {
+	t.Helper()
+	tc, err := scoring.LoadTeamContract("../../../docs/specs/ti2026-team-scoring-v1.json")
+	if err != nil {
+		t.Fatalf("load team scoring registry: %v", err)
+	}
+	return tc
+}
+
+// testServerWithContracts binds all three frozen contracts.
+func testServerWithContracts(t *testing.T, st *store.Store, reg *roles.Registry) *Server {
+	t.Helper()
+	mreg, sc := testContracts(t)
+	tc := testTeamContract(t)
+	return New(st, reg, nil, "").WithContracts(mreg, sc).WithTeamContract(tc)
+}
+
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
 	st, err := store.New(t.TempDir())
@@ -117,8 +135,8 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 		})
 	}
 	srv := New(st, reg, nil, "")
-	reg2, sc := testContracts(t)
-	srv.WithContracts(reg2, sc)
+	mreg, sc := testContracts(t)
+	srv.WithContracts(mreg, sc).WithTeamContract(testTeamContract(t))
 	ts := httptest.NewServer(srv.Handler())
 	return srv, ts
 }
@@ -388,18 +406,19 @@ func TestScoresEndpoint404WhenAbsent(t *testing.T) {
 func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	st := testStore(t)
 	reg := testRoleRegistry(t)
-	reg2, sc := testContracts(t)
+
 	rv, err := review.New(st.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	srv := testServerWithContracts(t, st, reg).WithReviews(rv).WithSessionToken("tok")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// The fixture store has a machine phase interval 0-100 (laning); the
-	// correction references it and supplies a matching previous value.
-	body := `{"match_id":"m1","author":"paul","reason":"moved boundary","event_ref":"interval@0-100","previous_value":{"start_game_second":0,"end_game_second":100,"global_phase":"laning","round_index":0,"rule_version":"","event_ref":"interval@0-100"},"effective_value":{"start_game_second":50,"end_game_second":100,"global_phase":"midgame"}}`
+	// The fixture store has a machine phase interval 0-100 (laning); the move
+	// operation relabels it to midgame via the typed op payload (boundaries
+	// kept contiguous).
+	body := `{"match_id":"m1","author":"paul","reason":"moved boundary","operation":"move","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)
@@ -448,16 +467,18 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 func TestReviewMutationRejectsTamperedMachineValue(t *testing.T) {
 	st := testStore(t)
 	reg := testRoleRegistry(t)
-	reg2, sc := testContracts(t)
+
 	rv, err := review.New(st.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	srv := testServerWithContracts(t, st, reg).WithReviews(rv).WithSessionToken("tok")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := `{"match_id":"m1","author":"paul","reason":"x","event_ref":"interval@0-100","previous_value":{"global_phase":"decisive"},"effective_value":{"global_phase":"midgame"}}`
+	// The invalid-state test: a bogus phase label is rejected by validation
+	// (400), not persisted as invalid analytical state.
+	body := `{"match_id":"m1","author":"paul","reason":"x","operation":"relabel","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"bogus"}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)
@@ -465,8 +486,8 @@ func TestReviewMutationRejectsTamperedMachineValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("tampered correction status=%d want 409", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid-phase correction status=%d want 400", resp.StatusCode)
 	}
 }
 
@@ -475,12 +496,12 @@ func TestReviewMutationRejectsTamperedMachineValue(t *testing.T) {
 func TestRoleOverridePersistsToAuthoritativeStore(t *testing.T) {
 	st := testStore(t)
 	reg := testRoleRegistry(t)
-	reg2, sc := testContracts(t)
+
 	rv, err := review.New(st.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	srv := testServerWithContracts(t, st, reg).WithReviews(rv).WithSessionToken("tok")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -510,22 +531,48 @@ func TestRoleOverridePersistsToAuthoritativeStore(t *testing.T) {
 	if len(of.Overrides) != 1 || of.Overrides[0].NominalRole != "2" || of.Overrides[0].Reason == "" || of.Overrides[0].AppliedAt == "" {
 		t.Fatalf("override not effective: %+v", of.Overrides)
 	}
+	// Synchronous recompute: the served player tournament score must reflect
+	// the effective role immediately.
+	var players struct {
+		Data struct {
+			Score struct {
+				AccountID   string `json:"account_id"`
+				NominalRole string `json:"nominal_role"`
+			} `json:"score"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/players/1000", &players); code != 200 {
+		t.Fatalf("player status %d", code)
+	}
+	if players.Data.Score.NominalRole != "2" {
+		t.Fatalf("player role after override=%q want 2", players.Data.Score.NominalRole)
+	}
+	// The recompute must be durable: reload a fresh server and confirm.
+	srv2 := testServerWithContracts(t, st, reg).WithReviews(rv).WithSessionToken("tok")
+	ts2 := httptest.NewServer(srv2.Handler())
+	defer ts2.Close()
+	if code := getJSON(t, ts2.URL+Version+"/players/1000", &players); code != 200 {
+		t.Fatalf("player restart status %d", code)
+	}
+	if players.Data.Score.NominalRole != "2" {
+		t.Fatalf("player role after restart=%q want 2", players.Data.Score.NominalRole)
+	}
 }
 
 // TestMutationRejectsTraversalMatchID proves out-of-root writes are blocked.
 func TestMutationRejectsTraversalMatchID(t *testing.T) {
 	st := testStore(t)
 	reg := testRoleRegistry(t)
-	reg2, sc := testContracts(t)
+
 	rv, err := review.New(st.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	srv := testServerWithContracts(t, st, reg).WithReviews(rv).WithSessionToken("tok")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	body := `{"match_id":"../../escaped","author":"paul","reason":"x","event_ref":"interval@0-100","previous_value":{"global_phase":"laning"},"effective_value":{"global_phase":"midgame"}}`
+	body := `{"match_id":"../../escaped","author":"paul","reason":"x","operation":"relabel","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)

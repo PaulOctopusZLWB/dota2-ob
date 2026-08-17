@@ -45,12 +45,13 @@ func writeTestRoleRegistry(t *testing.T, dir string) string {
 	return path
 }
 
-// copyContractFiles copies the frozen metric registry and scoring contract
-// into dir (loadRoleInputs requires them as publication/contract inputs).
+// copyContractFiles copies the frozen metric registry, scoring contract, and
+// team scoring registry into dir (loadRoleInputs requires them as
+// publication/contract inputs).
 func copyContractFiles(t *testing.T, dir string) {
 	t.Helper()
 	specsDir := "../../docs/specs"
-	for _, name := range []string{"ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json"} {
+	for _, name := range []string{"ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json", "ti2026-team-scoring-v1.json"} {
 		b, err := os.ReadFile(filepath.Join(specsDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -127,7 +128,7 @@ func TestLoadRoleInputs(t *testing.T) {
 	copyContractFiles(t, dir)
 	manDir := filepath.Join(dir, "man")
 	os.MkdirAll(manDir, 0o755)
-	for _, name := range []string{"ti2026-five-replay-role-registry-v1.json", "ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json"} {
+	for _, name := range []string{"ti2026-five-replay-role-registry-v1.json", "ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json", "ti2026-team-scoring-v1.json"} {
 		os.Rename(filepath.Join(dir, name), filepath.Join(manDir, name))
 	}
 	manifest := filepath.Join(manDir, "manifest.json")
@@ -147,6 +148,9 @@ func TestLoadRoleInputs(t *testing.T) {
 	}
 	if ri.ScoringContract == nil || ri.ScoringContractSHA == "" {
 		t.Fatal("scoring contract or hash not loaded")
+	}
+	if ri.TeamContract == nil || ri.TeamContractSHA == "" {
+		t.Fatal("team scoring registry or hash not loaded")
 	}
 	// Missing overrides file is fine (empty set), but a missing registry is a
 	// hard error (publication gate).

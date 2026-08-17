@@ -80,13 +80,106 @@ type AxisDef struct {
 // SchemaVersion is the frozen contract version.
 const SchemaVersion = "ti2026.radar-score.v1"
 
-// TeamScoringVersion identifies the derived team scoring registry. The frozen
-// player contract does not define a separate team registry; team scores are a
-// documented derivation: metrics are pooled to team level, then team axes use
-// the contract's axis structure with role-averaged component weights and the
-// contract's axis weights. Team totals use the contract's official-total
-// formula and gates.
-const TeamScoringVersion = "ti2026.scoring.team.v1"
+// TeamSchemaVersion is the frozen team scoring registry version.
+const TeamSchemaVersion = "ti2026.team-score.v1"
+
+// TeamContract is the frozen team scoring registry
+// (docs/specs/ti2026-team-scoring-v1.json). The master spec requires team
+// radar/total under a separate versioned registry; team weights and component
+// weights are frozen here and never derived from the player contract.
+type TeamContract struct {
+	SchemaVersion          string                        `json:"schema_version"`
+	Issue                  string                        `json:"issue"`
+	ComparisonPopulation   string                        `json:"comparison_population"`
+	ScoreRange             []int                         `json:"score_range"`
+	MetricNormalization    string                        `json:"metric_normalization"`
+	OfficialMetricSource   string                        `json:"official_metric_source"`
+	MinimumMatches         int                           `json:"minimum_matches"`
+	MinimumPublishableAxes int                           `json:"minimum_publishable_axes"`
+	MissingMetricPolicy    string                        `json:"missing_metric_policy"`
+	MandatoryAxisPolicy    string                        `json:"mandatory_axis_policy"`
+	OptionalAxisPolicy     string                        `json:"optional_axis_policy"`
+	Axes                   []AxisDef                     `json:"axes"`
+	OfficialAxisComponents map[string]map[string]float64 `json:"official_axis_components"`
+	AxisWeights            map[string]float64            `json:"axis_weights"`
+	MandatoryAxes          []string                      `json:"mandatory_axes"`
+	OptionalAxes           []string                      `json:"optional_axes"`
+	OfficialTotalScore     struct {
+		ID              string `json:"id"`
+		Gate            string `json:"gate"`
+		Formula         string `json:"formula"`
+		MissingAxisRule string `json:"missing_axis_rule"`
+	} `json:"official_total_score"`
+	DisplayRequirements []string `json:"display_requirements"`
+}
+
+// LoadTeamContract reads and validates the frozen team scoring registry.
+func LoadTeamContract(path string) (*TeamContract, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("scoring: read team registry: %w", err)
+	}
+	return ParseTeamContract(b)
+}
+
+// ParseTeamContract decodes a team registry from bytes.
+func ParseTeamContract(b []byte) (*TeamContract, error) {
+	var c TeamContract
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, fmt.Errorf("scoring: decode team registry: %w", err)
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// Validate enforces the team registry invariants: eight axes, axis weights
+// summing to 1, and per-axis component weights summing to 1.
+func (c *TeamContract) Validate() error {
+	if c.SchemaVersion != TeamSchemaVersion {
+		return fmt.Errorf("scoring: team registry schema %q != %q", c.SchemaVersion, TeamSchemaVersion)
+	}
+	if len(c.Axes) != 8 {
+		return fmt.Errorf("scoring: team registry %d axes, want 8", len(c.Axes))
+	}
+	sum := 0.0
+	for _, v := range c.AxisWeights {
+		sum += v
+	}
+	if math.Abs(sum-1.0) > 1e-6 {
+		return fmt.Errorf("scoring: team axis weights sum %f != 1", sum)
+	}
+	for axis, m := range c.OfficialAxisComponents {
+		s := 0.0
+		for _, v := range m {
+			s += v
+		}
+		if math.Abs(s-1.0) > 1e-6 {
+			return fmt.Errorf("scoring: team axis %s component weights sum %f != 1", axis, s)
+		}
+	}
+	return nil
+}
+
+// TeamAxisNames returns the canonical team axis order.
+func (c *TeamContract) TeamAxisNames() []string {
+	out := make([]string, 0, len(c.Axes))
+	for _, a := range c.Axes {
+		out = append(out, a.ID)
+	}
+	return out
+}
+
+// TeamAxisDisplayNameZh returns the Chinese display name for a team axis.
+func (c *TeamContract) TeamAxisDisplayNameZh(id string) string {
+	for _, a := range c.Axes {
+		if a.ID == id {
+			return a.DisplayNameZh
+		}
+	}
+	return id
+}
 
 // LoadContract reads and validates the frozen scoring contract.
 func LoadContract(path string) (*Contract, error) {
@@ -202,31 +295,45 @@ func Invert(pct float64) float64 {
 	return 100.0 - pct
 }
 
+// EvidenceRef is a typed, versioned lineage reference: the source fact,
+// derived episode, or applicable phase that produced a metric observation.
+// It is preserved through aggregation so drilldown can navigate to evidence.
+type EvidenceRef struct {
+	MatchID       string `json:"match_id,omitempty"`
+	Kind          string `json:"kind"` // fact|episode|phase|metric
+	ID            string `json:"id"`
+	RuleVersion   string `json:"rule_version,omitempty"`
+	SourceFactSeq int64  `json:"source_fact_seq,omitempty"`
+}
+
 // MetricValue is one published metric observation with the numerator/
-// denominator/opportunity fields needed for declared-rule aggregation.
+// denominator/opportunity fields needed for declared-rule aggregation and the
+// typed lineage references that produced it.
 type MetricValue struct {
-	MetricID             string    `json:"metric_id"`
-	Value                float64   `json:"value"`
-	Numerator            *float64  `json:"numerator,omitempty"`
-	Denominator          *float64  `json:"denominator,omitempty"`
-	OpportunityCount     int64     `json:"opportunity_count,omitempty"`
-	Direction            Direction `json:"direction"`
-	OfficialEligible     bool      `json:"official_eligible"`
-	ExperimentalEligible bool      `json:"experimental_eligible"`
+	MetricID             string        `json:"metric_id"`
+	Value                float64       `json:"value"`
+	Numerator            *float64      `json:"numerator,omitempty"`
+	Denominator          *float64      `json:"denominator,omitempty"`
+	OpportunityCount     int64         `json:"opportunity_count,omitempty"`
+	Direction            Direction     `json:"direction"`
+	OfficialEligible     bool          `json:"official_eligible"`
+	ExperimentalEligible bool          `json:"experimental_eligible"`
+	Lineage              []EvidenceRef `json:"lineage,omitempty"`
 }
 
 // AggregatedMetric is one metric aggregated over a subject's eligible records
-// using its declared rule.
+// using its declared rule, retaining the merged typed lineage.
 type AggregatedMetric struct {
-	MetricID             string    `json:"metric_id"`
-	Value                float64   `json:"value"`
-	Numerator            float64   `json:"numerator,omitempty"`
-	Denominator          float64   `json:"denominator,omitempty"`
-	OpportunityCount     int64     `json:"opportunity_count,omitempty"`
-	EligibleMatches      int       `json:"eligible_matches"`
-	Direction            Direction `json:"direction"`
-	OfficialEligible     bool      `json:"official_eligible"`
-	ExperimentalEligible bool      `json:"experimental_eligible"`
+	MetricID             string        `json:"metric_id"`
+	Value                float64       `json:"value"`
+	Numerator            float64       `json:"numerator,omitempty"`
+	Denominator          float64       `json:"denominator,omitempty"`
+	OpportunityCount     int64         `json:"opportunity_count,omitempty"`
+	EligibleMatches      int           `json:"eligible_matches"`
+	Direction            Direction     `json:"direction"`
+	OfficialEligible     bool          `json:"official_eligible"`
+	ExperimentalEligible bool          `json:"experimental_eligible"`
+	Lineage              []EvidenceRef `json:"lineage,omitempty"`
 }
 
 // PlayerMatch is one player in one match with its published metric values.
@@ -312,11 +419,14 @@ type TotalResult struct {
 // grain). SubjectCoverage reports the subject's own eligible match count, never
 // the global corpus count.
 type PlayerScore struct {
-	AccountID            string                      `json:"account_id"`
-	TeamID               string                      `json:"team_id,omitempty"`
-	NominalRole          string                      `json:"nominal_role"`
-	ScoringVersion       string                      `json:"scoring_version"`
-	MetricPercentiles    map[string]PercentileResult `json:"metric_percentiles"`
+	AccountID         string                      `json:"account_id"`
+	TeamID            string                      `json:"team_id,omitempty"`
+	NominalRole       string                      `json:"nominal_role"`
+	ScoringVersion    string                      `json:"scoring_version"`
+	MetricPercentiles map[string]PercentileResult `json:"metric_percentiles"`
+	// AggregatedMetrics carries the aggregated raw values with typed lineage
+	// (fact/episode/phase refs) for navigable drilldown.
+	AggregatedMetrics    map[string]AggregatedMetric `json:"aggregated_metrics,omitempty"`
 	OfficialAxes         map[string]AxisResult       `json:"official_axes"`
 	ExperimentalAxes     map[string]AxisResult       `json:"experimental_axes"`
 	OfficialTotal        *TotalResult                `json:"official_total"`
@@ -359,6 +469,7 @@ type TeamScore struct {
 // the team aggregation, and the percentile cohorts.
 type Corpus struct {
 	Contract    *Contract
+	TeamC       *TeamContract
 	MetricReg   *metrics.Registry
 	Matches     map[string][]*PlayerMatch        // match_id -> players
 	Players     []*PlayerMatch                   // flat per-match rows
@@ -373,8 +484,14 @@ type Corpus struct {
 // player-match inputs. Aggregation happens here using each metric's declared
 // rule from the frozen registry.
 func NewCorpus(c *Contract, mreg *metrics.Registry, players []*PlayerMatch) *Corpus {
+	return NewCorpusWithTeam(c, nil, mreg, players)
+}
+
+// NewCorpusWithTeam builds a corpus with an optional frozen team scoring
+// registry. When tc is nil, team scoring fails closed (no team axes publish).
+func NewCorpusWithTeam(c *Contract, tc *TeamContract, mreg *metrics.Registry, players []*PlayerMatch) *Corpus {
 	cor := &Corpus{
-		Contract: c, MetricReg: mreg,
+		Contract: c, TeamC: tc, MetricReg: mreg,
 		Matches:     map[string][]*PlayerMatch{},
 		Players:     players,
 		Tournaments: map[string]*PlayerTournament{},
@@ -417,6 +534,7 @@ func (c *Corpus) aggregateValues(mid string, vals []MetricValue) (AggregatedMetr
 	var numOK, denOK bool
 	maxV := math.Inf(-1)
 	sumV := 0.0
+	seenLineage := map[string]bool{}
 	for _, v := range vals {
 		agg.EligibleMatches++
 		agg.OpportunityCount += v.OpportunityCount
@@ -432,6 +550,14 @@ func (c *Corpus) aggregateValues(mid string, vals []MetricValue) (AggregatedMetr
 			maxV = v.Value
 		}
 		sumV += v.Value
+		// Preserve typed lineage through aggregation (deduplicated).
+		for _, ref := range v.Lineage {
+			key := ref.Kind + "\x00" + ref.ID
+			if !seenLineage[key] {
+				seenLineage[key] = true
+				agg.Lineage = append(agg.Lineage, ref)
+			}
+		}
 	}
 	low := strings.ToLower(rule)
 	switch {
@@ -616,6 +742,7 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 		AccountID: pt.AccountID, TeamID: pt.TeamID, NominalRole: pt.NominalRole,
 		ScoringVersion:    cv.SchemaVersion,
 		MetricPercentiles: map[string]PercentileResult{},
+		AggregatedMetrics: map[string]AggregatedMetric{},
 		OfficialAxes:      map[string]AxisResult{},
 		ExperimentalAxes:  map[string]AxisResult{},
 		SubjectCoverage: SubjectCoverage{
@@ -623,6 +750,10 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 			PublishedMetrics: len(pt.Metrics), CorpusMatches: c.MatchCount(),
 		},
 		ComparisonPopulation: cv.ComparisonPopulation,
+	}
+	// Carry the aggregated raw values + typed lineage for drilldown.
+	for mid, am := range pt.Metrics {
+		ps.AggregatedMetrics[mid] = am
 	}
 
 	// Step 1: normalize every published tournament metric to a same-role
@@ -654,27 +785,37 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 	return ps
 }
 
-// ScoreTeam computes the team-tournament scoring snapshot using the derived
-// team registry.
+// ScoreTeam computes the team-tournament scoring snapshot exactly from the
+// frozen team scoring registry. When the registry is absent, team scoring
+// fails closed (no axes publish).
 func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
-	cv := c.Contract
+	tc := c.TeamC
+	if tc == nil {
+		return &TeamScore{
+			TeamID: teamID, ScoringVersion: "",
+			MetricPercentiles: map[string]PercentileResult{},
+			OfficialAxes:      map[string]AxisResult{},
+			OfficialTotal:     &TotalResult{ID: "official_team_total_v1", Name: "队伍官方总分", Suppressed: true, Reasons: []string{"team_scoring_registry_unavailable"}},
+			SubjectCoverage:   SubjectCoverage{CorpusMatches: c.MatchCount()},
+		}
+	}
 	tt := c.Teams[teamID]
 	if tt == nil {
 		return nil
 	}
 	ts := &TeamScore{
-		TeamID: teamID, ScoringVersion: TeamScoringVersion,
+		TeamID: teamID, ScoringVersion: tc.SchemaVersion,
 		MetricPercentiles: map[string]PercentileResult{},
 		OfficialAxes:      map[string]AxisResult{},
 		SubjectCoverage: SubjectCoverage{
 			EligibleMatches: tt.EligibleMatches, MatchIDs: tt.MatchIDs,
 			PublishedMetrics: len(tt.Metrics), CorpusMatches: c.MatchCount(),
 		},
-		ComparisonPopulation: "team cohort within the frozen TI 2026 corpus (derived team registry)",
+		ComparisonPopulation: tc.ComparisonPopulation,
 	}
 	for mid, am := range tt.Metrics {
 		cohort := c.TeamCohort(mid)
-		if len(cohort) < cv.MinimumMatches {
+		if len(cohort) < tc.MinimumMatches {
 			continue
 		}
 		pct := MidRankPercentile(am.Value, cohort)
@@ -742,48 +883,27 @@ func (c *Corpus) computeOfficialAxes(pt *PlayerTournament, pcts map[string]Perce
 	return out
 }
 
-// computeTeamAxes builds team axes from team-tournament metric percentiles.
-// Component weights are the role-average of the contract's per-role component
-// weights for each official metric, normalized to sum 1 per axis (documented
-// derived team registry).
+// computeTeamAxes builds team axes exactly from the frozen team scoring
+// registry's per-axis component weights (never derived from player roles).
 func (c *Corpus) computeTeamAxes(tt *TeamTournament, pcts map[string]PercentileResult) map[string]AxisResult {
-	cv := c.Contract
+	tc := c.TeamC
 	out := map[string]AxisResult{}
-	// Derive per-axis component weight as mean over roles of the role weight.
-	for _, axis := range cv.AxisNames() {
-		ar := AxisResult{Axis: axis, DisplayZh: cv.AxisDisplayNameZh(axis), Components: map[string]ComponentResult{}, Suppressed: true}
-		// Collect all official-eligible metrics on this axis across roles.
-		metricWeights := map[string]float64{}
-		seen := map[string]bool{}
-		for _, role := range []string{"1", "2", "3", "4", "5"} {
-			cm := cv.OfficialAxisComponentsByRole[role][axis]
-			for mid, w := range cm {
-				if !seen[mid] {
-					metricWeights[mid] = w
-					seen[mid] = true
-				} else {
-					metricWeights[mid] = (metricWeights[mid] + w) / 2
-				}
-			}
-		}
-		if len(metricWeights) == 0 {
+	if tc == nil {
+		return out
+	}
+	for _, axis := range tc.TeamAxisNames() {
+		ar := AxisResult{Axis: axis, DisplayZh: tc.TeamAxisDisplayNameZh(axis), Components: map[string]ComponentResult{}, Suppressed: true}
+		cm := tc.OfficialAxisComponents[axis]
+		if len(cm) == 0 {
 			ar.Reason = "no_team_components_defined"
 			out[axis] = ar
 			continue
 		}
-		// Normalize to sum 1.
-		total := 0.0
-		for _, w := range metricWeights {
-			total += w
-		}
-		for mid, w := range metricWeights {
-			metricWeights[mid] = w / total
-		}
 		weightedSum := 0.0
 		weightTotal := 0.0
-		ar.Coverage.MetricCount = len(metricWeights)
+		ar.Coverage.MetricCount = len(cm)
 		mandatoryMissing := false
-		for mid, w := range metricWeights {
+		for mid, w := range cm {
 			cr := ComponentResult{MetricID: mid, Weight: w}
 			am, ok := tt.Metrics[mid]
 			pct, ok2 := pcts[mid]
@@ -803,7 +923,7 @@ func (c *Corpus) computeTeamAxes(tt *TeamTournament, pcts map[string]PercentileR
 			ar.Components[mid] = cr
 		}
 		if mandatoryMissing || weightTotal == 0 {
-			ar.Reason = c.missingMetricPolicyReason(metricWeights, ar)
+			ar.Reason = c.missingMetricPolicyReason(cm, ar)
 			out[axis] = ar
 			continue
 		}
@@ -927,36 +1047,39 @@ func (c *Corpus) computeOfficialTotal(ps *PlayerScore, pt *PlayerTournament) *To
 	return tr
 }
 
-// computeTeamTotal applies the official total gate to a team snapshot.
+// computeTeamTotal applies the official total gate exactly from the frozen
+// team scoring registry's axis weights.
 func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResult {
-	cv := c.Contract
+	tc := c.TeamC
 	tr := &TotalResult{
 		ID: "official_team_total_v1", Name: "队伍官方总分", Weights: map[string]float64{},
 		Suppressed: true,
 	}
-	reasons := []string{}
-	if tt.EligibleMatches < cv.MinimumMatches {
-		reasons = append(reasons, fmt.Sprintf("team_matches=%d_less_than_%d", tt.EligibleMatches, cv.MinimumMatches))
+	if tc == nil {
+		tr.Reasons = []string{"team_scoring_registry_unavailable"}
+		return tr
 	}
-	// Team mandatory axes: all eight (derived team registry has no role split).
+	reasons := []string{}
+	if tt.EligibleMatches < tc.MinimumMatches {
+		reasons = append(reasons, fmt.Sprintf("team_matches=%d_less_than_%d", tt.EligibleMatches, tc.MinimumMatches))
+	}
 	published := []string{}
 	totalW := 0.0
 	sum := 0.0
-	for _, ax := range cv.AxisNames() {
+	for _, ax := range tc.TeamAxisNames() {
 		a := ts.OfficialAxes[ax]
 		if !a.Published {
 			reasons = append(reasons, "mandatory_axis_unavailable:"+ax)
 			continue
 		}
-		// Team axis weight = mean of role axis weights (derived registry).
-		w := c.teamAxisWeight(ax)
+		w := tc.AxisWeights[ax]
 		published = append(published, ax)
 		sum += w * *a.Value
 		totalW += w
 		tr.Weights[ax] = w
 	}
-	if len(published) < cv.MinimumPublishableAxes {
-		reasons = append(reasons, fmt.Sprintf("publishable_axes=%d_less_than_%d", len(published), cv.MinimumPublishableAxes))
+	if len(published) < tc.MinimumPublishableAxes {
+		reasons = append(reasons, fmt.Sprintf("publishable_axes=%d_less_than_%d", len(published), tc.MinimumPublishableAxes))
 	}
 	if len(reasons) > 0 || totalW == 0 {
 		tr.Reasons = reasons
@@ -971,18 +1094,6 @@ func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResul
 	tr.Value = &val
 	tr.AxesIncluded = published
 	return tr
-}
-
-// teamAxisWeight returns the mean of the contract's per-role axis weights.
-func (c *Corpus) teamAxisWeight(axis string) float64 {
-	var s float64
-	n := 0
-	for _, role := range []string{"1", "2", "3", "4", "5"} {
-		w := c.Contract.AxisWeightsByRole[role][axis]
-		s += w
-		n++
-	}
-	return s / float64(n)
 }
 
 // computeExperimentalAxes builds the dashed V3 axes.

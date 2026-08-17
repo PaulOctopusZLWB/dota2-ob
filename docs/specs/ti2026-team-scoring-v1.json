@@ -1,0 +1,57 @@
+{
+  "schema_version": "ti2026.team-score.v1",
+  "issue": "DOT-72",
+  "comparison_population": "team within the frozen TI 2026 109-map corpus",
+  "score_range": [0, 100],
+  "metric_normalization": "empirical_midrank_percentile",
+  "official_metric_source": "Team-pooled aggregates of official_score_eligible metrics: for a team-match, sum member numerators and denominators (or counts) per metric; for a team-tournament, pool team-match aggregates by the same declared rule.",
+  "minimum_matches": 3,
+  "minimum_publishable_axes": 6,
+  "missing_metric_policy": "Suppress an axis when a required applicable team metric is unavailable. Never impute 0 or 50.",
+  "mandatory_axis_policy": "If any mandatory team axis is unavailable, suppress the team total score.",
+  "optional_axis_policy": "A team may declare an optional axis. If unavailable, disclose the omission and renormalize only the remaining team axis weights.",
+  "axes": [
+    {"id": "laning", "display_name_zh": "对线", "description": "Team lane execution, pressure, and structural control."},
+    {"id": "resources", "display_name_zh": "资源", "description": "Team farm/resource conversion and item timing."},
+    {"id": "tempo", "display_name_zh": "节奏", "description": "Team rotation, rune, smoke, and response windows."},
+    {"id": "map", "display_name_zh": "地图", "description": "Team map pressure, territory, and cross-map exchange."},
+    {"id": "vision", "display_name_zh": "视野", "description": "Team vision placement, coverage, and deward."},
+    {"id": "fight", "display_name_zh": "团战", "description": "Team damage, control, healing/saves, and survival."},
+    {"id": "objectives", "display_name_zh": "目标转化", "description": "Team tower/rax/Roshan/Tormentor conversion."},
+    {"id": "endgame", "display_name_zh": "终局决策", "description": "Team buyback rounds, high-ground execution, resets."}
+  ],
+  "official_axis_components": {
+    "laning": {"lane_pressure_damage_per_contact": 1.0},
+    "resources": {"item_timing_opportunity_percentile": 0.7, "stack_attempt_success_rate": 0.3},
+    "tempo": {"roam_conversion_rate": 0.35, "rune_control_contribution": 0.25, "key_ability_window_conversion": 0.4},
+    "map": {"observed_map_exchange_outcome_rate": 1.0},
+    "vision": {"ward_lifetime_share": 1.0},
+    "fight": {"fight_damage_share": 0.5, "control_duration_per_opportunity": 0.5},
+    "objectives": {"resource_to_objective_conversion": 0.55, "highground_building_conversion": 0.45},
+    "endgame": {"death_without_buyback_exposure": 0.5, "buyback_round_participation": 0.5}
+  },
+  "axis_weights": {
+    "laning": 0.136,
+    "resources": 0.102,
+    "tempo": 0.136,
+    "map": 0.126,
+    "vision": 0.108,
+    "fight": 0.184,
+    "objectives": 0.116,
+    "endgame": 0.092
+  },
+  "mandatory_axes": ["laning", "resources", "tempo", "map", "fight", "objectives", "endgame"],
+  "optional_axes": ["vision"],
+  "official_total_score": {
+    "id": "official_team_total_v1",
+    "gate": "At least six team axes, every mandatory team axis, at least three eligible team matches, and every team coverage gate must pass.",
+    "formula": "official_team_total = sum(axis_weights[a] * team_axis[a] for a in A) / sum(axis_weights[a] for a in A), where A is the published team axis set.",
+    "missing_axis_rule": "A missing mandatory team axis suppresses the total. A missing declared optional axis is excluded with renormalized remaining weights and disclosed."
+  },
+  "display_requirements": [
+    "Show team raw pooled values, percentiles, weights, opportunities, matches, coverage, confidence, and unavailable reasons.",
+    "Show official and experimental team layers separately.",
+    "A team score drilldown must reproduce the displayed value exactly.",
+    "Never render a cross-role combined leaderboard as a team ranking."
+  ]
+}

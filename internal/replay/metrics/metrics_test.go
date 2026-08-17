@@ -1,14 +1,28 @@
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"testing"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/clock"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/episodes"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/facts"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/identity"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/phase"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/raw"
 )
+
+func rawReader(events []raw.Event) *raw.Reader {
+	var buf bytes.Buffer
+	w := raw.NewWriter(&buf)
+	for i := range events {
+		_ = w.Write(&events[i])
+	}
+	_ = w.Flush()
+	return raw.NewReader(&buf)
+}
 
 // testRegistry returns a frozen 52-metric registry from the repo contract.
 func testRegistry(t *testing.T) *Registry {
@@ -206,9 +220,9 @@ func TestRegistryResolutionComplete(t *testing.T) {
 }
 
 // TestObjectiveDamageOnlyConfiguredTargets proves objective_damage_total only
-// counts configured objective entities (tower/rax/ancient/fort/shrine/Roshan/
-// Tormentor); lane/neutral creep damage is excluded attribution, never summed
-// into the objective total.
+// counts configured objective entities (tower/rax/ancient-fort/shrine/Roshan/
+// Tormentor) per the explicit taxonomy; lane/neutral creeps are excluded
+// attribution and excluded_count counts records, not damage magnitude.
 func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
@@ -218,11 +232,17 @@ func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
 		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetName: target, Value: &val})}
 	}
 	calc.Feed(dmg("a1", "npc_dota_goodguys_tower1_mid", 5000, 1))
-	calc.Feed(dmg("a1", "npc_dota_goodguys_rax_melee_top", 3000, 2))
+	calc.Feed(dmg("a1", "npc_dota_badguys_melee_rax_mid", 3000, 2))
 	calc.Feed(dmg("a1", "npc_dota_roshan", 2500, 3))
-	// Lane/neutral creeps must NOT count as objective damage.
-	calc.Feed(dmg("a1", "npc_dota_creep_lane", 999999, 4))
-	calc.Feed(dmg("a1", "npc_dota_neutral", 888888, 5))
+	// Neutral ancient-frog creeps MUST NOT count as objectives (the taxonomy
+	// must not substring-match "ancient").
+	calc.Feed(dmg("a1", "npc_dota_neutral_ancient_frog", 46511, 4))
+	calc.Feed(dmg("a1", "npc_dota_neutral_ancient_frog_mage", 100, 5))
+	// Lane/neutral creeps excluded.
+	calc.Feed(dmg("a1", "npc_dota_creep_lane", 999999, 6))
+	calc.Feed(dmg("a1", "npc_dota_neutral_centaur_khan", 888888, 7))
+	// Roshan's banner is a summoned unit, not Roshan.
+	calc.Feed(dmg("a1", "npc_dota_unit_roshans_banner", 1000, 8))
 	out := calc.Result(nil, nil)
 	var obj *Value
 	for i := range out.Values {
@@ -233,14 +253,50 @@ func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
 	if obj == nil {
 		t.Fatal("objective_damage_total not published for a1")
 	}
+	// tower(5000)+rax(3000)+roshan(2500) = 10500; neutral ancient creeps,
+	// lane/neutral creeps, and Roshan's banner are excluded.
 	if *obj.Value != 10500 {
-		t.Fatalf("objective_damage_total=%v want 10500 (tower+rax+roshan only)", *obj.Value)
+		t.Fatalf("objective_damage_total=%v want 10500", *obj.Value)
 	}
-	if obj.ExcludedCount != 1888887 {
-		t.Fatalf("excluded=%d want 1888887 (creep+neutral damage preserved separately)", obj.ExcludedCount)
+	// excluded_count counts excluded RECORDS: ancient_frog, ancient_frog_mage,
+	// creep_lane, centaur_khan, roshans_banner = 5 records.
+	if obj.ExcludedCount != 5 {
+		t.Fatalf("excluded_count=%d want 5 records", obj.ExcludedCount)
+	}
+	// excluded_damage carries the excluded magnitude separately.
+	if obj.ExcludedDamage == nil || *obj.ExcludedDamage != 46511+100+999999+888888+1000 {
+		t.Fatalf("excluded_damage=%v want 1936498", obj.ExcludedDamage)
 	}
 	if len(obj.EvidenceIDs) == 0 {
 		t.Fatal("objective_damage_total has no evidence lineage")
+	}
+}
+
+// TestClassifyObjectiveTargetTaxonomy locks the explicit objective taxonomy:
+// neutral ancient creeps and summoned units are never objectives.
+func TestClassifyObjectiveTargetTaxonomy(t *testing.T) {
+	cases := []struct {
+		name string
+		want ObjectiveEntityKind
+	}{
+		{"npc_dota_goodguys_tower2_mid", ObjectiveTower},
+		{"npc_dota_badguys_melee_rax_bot", ObjectiveBarracks},
+		{"npc_dota_goodguys_fort", ObjectiveAncientFort},
+		{"npc_dota_badguys_ancient", ObjectiveAncientFort},
+		{"npc_dota_goodguys_shrine", ObjectiveShrine},
+		{"npc_dota_roshan", ObjectiveRoshan},
+		{"npc_dota_badguys_tormentor", ObjectiveTormentor},
+		{"npc_dota_neutral_ancient_frog", ObjectiveUnknown},
+		{"npc_dota_neutral_ancient_frog_mage", ObjectiveUnknown},
+		{"npc_dota_creep_goodguys_melee", ObjectiveUnknown},
+		{"npc_dota_unit_roshans_banner", ObjectiveUnknown},
+		{"npc_dota_underlord_portal", ObjectiveUnknown},
+		{"", ObjectiveUnknown},
+	}
+	for _, c := range cases {
+		if got := classifyObjectiveTarget(c.name); got != c.want {
+			t.Fatalf("classify(%q)=%v want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -369,3 +425,84 @@ func TestRateMetricsDenominatorReconciliation(t *testing.T) {
 		t.Fatalf("lane_pressure_damage_per_contact published without geometry inputs: %+v", v)
 	}
 }
+
+// TestAdditionalV1Metrics proves heal_dispel_save_casts, smoke participation,
+// and buyback round participation publish from the accepted facts, and economy
+// attribution resolves from GOLD/XP target heroes.
+func TestAdditionalV1Metrics(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
+	calc.SetFactsCoverage([]string{"combat_event", "modifier_event", "death_respawn_buyback_event"})
+	h := int64(100)
+	d := int64(50)
+	// heal cast
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 10, Seq: 1, SourceSeq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "heal", ActorAccount: "a1", TargetAccount: "b1", Value: &h})})
+	// smoke modifier add on a1 and b1
+	m := "modifier_smoke_of_deceit"
+	calc.Feed(&facts.Fact{Family: facts.FamilyModifier, GameSecond: 20, Seq: 2, SourceSeq: 2, Payload: mustJSON(&facts.ModifierFact{Kind: "add", Modifier: m, AccountID: "a1"})})
+	calc.Feed(&facts.Fact{Family: facts.FamilyModifier, GameSecond: 20, Seq: 3, SourceSeq: 3, Payload: mustJSON(&facts.ModifierFact{Kind: "add", Modifier: m, AccountID: "b1"})})
+	// buyback on a1 at 100, post-buyback damage at 130 (within 60s)
+	calc.Feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 100, Seq: 4, SourceSeq: 4, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "buyback", AccountID: "a1"})})
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 130, Seq: 5, SourceSeq: 5, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "b1", Value: &d})})
+	out := calc.Result(nil, nil)
+	got := map[string]map[string]Value{}
+	for _, v := range out.Values {
+		if got[v.AccountID] == nil {
+			got[v.AccountID] = map[string]Value{}
+		}
+		got[v.AccountID][v.MetricID] = v
+	}
+	if got["a1"]["heal_dispel_save_casts"].IntValue == nil || *got["a1"]["heal_dispel_save_casts"].IntValue != 1 {
+		t.Fatalf("heal_dispel_save_casts a1=%+v want 1", got["a1"]["heal_dispel_save_casts"])
+	}
+	if got["a1"]["smoke_activation_participation"].IntValue == nil || *got["a1"]["smoke_activation_participation"].IntValue != 1 {
+		t.Fatalf("smoke_activation_participation a1=%+v want 1", got["a1"]["smoke_activation_participation"])
+	}
+	if got["b1"]["smoke_activation_participation"].IntValue == nil || *got["b1"]["smoke_activation_participation"].IntValue != 1 {
+		t.Fatalf("smoke_activation_participation b1=%+v want 1", got["b1"]["smoke_activation_participation"])
+	}
+	bb := got["a1"]["buyback_round_participation"]
+	if bb.Value == nil || *bb.Value != 1.0 {
+		t.Fatalf("buyback_round_participation a1=%+v want 1.0 (1/1 participated)", bb)
+	}
+}
+
+// TestEconomyAttributionFromTarget proves GOLD/XP economy facts attribute to
+// the hero carried in TargetName (the accepted adapter's shape).
+func TestEconomyAttributionFromTarget(t *testing.T) {
+	clk := &clock.Clock{State: clock.StateCalibrated, AnchorCombatTS: 0, GameDurationSeconds: f64ptr(300)}
+	idn := &identity.Identity{MatchID: "m1", State: identity.StateVerified, Participants: []identity.Participant{
+		{AccountID: "a1", HeroName: "npc_dota_hero_kez", Side: "radiant", Slot: 0},
+	}}
+	rawEv := []raw.Event{
+		{Kind: raw.KindCombat, Combat: &raw.Combat{Type: "DOTA_COMBATLOG_GOLD", TargetName: "npc_dota_hero_kez", Value: int64p(500), Networth: uint32p(1000), LastHits: uint32p(42)}},
+	}
+	b := facts.NewBuilder(clk, idn)
+	var got []facts.Fact
+	_, err := b.Build(rawReader(rawEv), func(f *facts.Fact) error { got = append(got, *f); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range got {
+		if f.Family != facts.FamilyEconomy {
+			continue
+		}
+		var es facts.EconomySample
+		if err := json.Unmarshal(f.Payload, &es); err != nil {
+			t.Fatal(err)
+		}
+		if es.AccountID == "a1" && es.Gold != nil && *es.Gold == 500 && es.LastHits != nil && *es.LastHits == 42 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("economy fact not attributed to target hero account")
+	}
+}
+
+func f64ptr(v float64) *float64 { return &v }
+func int64p(v int64) *int64     { return &v }
+func uint32p(v uint32) *uint32  { return &v }

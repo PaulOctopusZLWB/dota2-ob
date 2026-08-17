@@ -49,23 +49,26 @@ type Definition struct {
 
 // Value is a computed metric value with provenance.
 type Value struct {
-	MetricID                  string   `json:"metric_id"`
-	Name                      string   `json:"name"`
-	ReportLevel               string   `json:"report_level"`
-	AccountID                 string   `json:"account_id,omitempty"`
-	TeamID                    string   `json:"team_id,omitempty"`
-	NominalRole               string   `json:"nominal_role,omitempty"`
-	OfficialPhase             string   `json:"official_phase,omitempty"`
-	Value                     *float64 `json:"value"`
-	IntValue                  *int64   `json:"int_value,omitempty"`
-	Unit                      string   `json:"unit"`
-	EpistemicClass            string   `json:"epistemic_class"`
-	CapabilityLevel           string   `json:"capability_level"`
-	MetricVersion             string   `json:"metric_version"`
-	Numerator                 *float64 `json:"numerator"`
-	Denominator               *float64 `json:"denominator"`
-	OpportunityCount          int64    `json:"opportunity_count"`
-	ExcludedCount             int64    `json:"excluded_count"`
+	MetricID         string   `json:"metric_id"`
+	Name             string   `json:"name"`
+	ReportLevel      string   `json:"report_level"`
+	AccountID        string   `json:"account_id,omitempty"`
+	TeamID           string   `json:"team_id,omitempty"`
+	NominalRole      string   `json:"nominal_role,omitempty"`
+	OfficialPhase    string   `json:"official_phase,omitempty"`
+	Value            *float64 `json:"value"`
+	IntValue         *int64   `json:"int_value,omitempty"`
+	Unit             string   `json:"unit"`
+	EpistemicClass   string   `json:"epistemic_class"`
+	CapabilityLevel  string   `json:"capability_level"`
+	MetricVersion    string   `json:"metric_version"`
+	Numerator        *float64 `json:"numerator"`
+	Denominator      *float64 `json:"denominator"`
+	OpportunityCount int64    `json:"opportunity_count"`
+	ExcludedCount    int64    `json:"excluded_count"`
+	// ExcludedDamage is the magnitude of excluded (non-objective) damage
+	// preserved separately; it is distinct from excluded_count (record count).
+	ExcludedDamage            *float64 `json:"excluded_damage,omitempty"`
 	SampleCount               int64    `json:"sample_count"`
 	EvidenceCount             int64    `json:"evidence_count"`
 	EvidenceIDs               []int64  `json:"evidence_ids,omitempty"`
@@ -155,11 +158,20 @@ type Calculator struct {
 	heroDamage      map[string]float64
 	heroHealing     map[string]float64
 	objectiveDamage map[string]float64
-	objectiveExcl   map[string]float64 // non-objective damage excluded (creeps etc.)
+	objectiveExcl   map[string]float64 // excluded non-objective damage magnitude
+	objectiveExclN  map[string]int64   // excluded non-objective damage record count
 	controlSeconds  map[string]float64
 	heroStateSecs   map[string]map[int64]struct{} // distinct eligible second-grid bins
-	damageEvents    []damageEvent                 // for fight_damage_share
-	teams           map[string]map[string]float64 // team_id -> account -> networth (final)
+	// heal casts (for heal_dispel_save_casts) and smoke participations (for
+	// smoke_activation_participation) per account.
+	healCasts      map[string]int64
+	smokeParticles map[string]int64
+	// buyback post-participation: account -> seconds of buybacks that had a
+	// follow-up combat/objective event within 60s.
+	buybackRoundPart map[string]int64
+	buybackTotal     map[string]int64
+	damageEvents     []damageEvent                 // for fight_damage_share
+	teams            map[string]map[string]float64 // team_id -> account -> networth (final)
 
 	// evidence: "account\x00metric" -> ordered fact seq ids that produced the
 	// metric's observations (fact_ids -> episode/phase/opportunity -> metric).
@@ -194,11 +206,14 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		goldEarned: map[string]float64{}, firstItemSec: map[string]float64{},
 		heroDamage: map[string]float64{}, heroHealing: map[string]float64{},
 		objectiveDamage: map[string]float64{}, objectiveExcl: map[string]float64{},
+		objectiveExclN: map[string]int64{},
 		controlSeconds: map[string]float64{},
 		heroStateSecs:  map[string]map[int64]struct{}{},
 		teams:          map[string]map[string]float64{},
 		evidence:       map[string][]int64{},
 		factsCoverage:  map[string]bool{},
+		healCasts:      map[string]int64{}, smokeParticles: map[string]int64{},
+		buybackRoundPart: map[string]int64{}, buybackTotal: map[string]int64{},
 	}
 }
 
@@ -343,8 +358,10 @@ func (c *Calculator) Feed(f *facts.Fact) {
 				c.addEvidence(cf.ActorAccount, "objective_damage_total", f.Seq)
 			} else {
 				// Lane/neutral creep damage and other non-objective targets
-				// are excluded attribution, preserved separately.
+				// are excluded attribution: record count and magnitude are
+				// preserved separately (never mixed into the objective total).
 				c.objectiveExcl[cf.ActorAccount] += v
+				c.objectiveExclN[cf.ActorAccount]++
 			}
 			c.damageEvents = append(c.damageEvents, damageEvent{
 				GameSecond: f.GameSecond, Actor: cf.ActorAccount, Team: team,
@@ -352,7 +369,9 @@ func (c *Calculator) Feed(f *facts.Fact) {
 			})
 		case "heal":
 			c.heroHealing[cf.ActorAccount] += v
+			c.healCasts[cf.ActorAccount]++
 			c.addEvidence(cf.ActorAccount, "hero_healing_total", f.Seq)
+			c.addEvidence(cf.ActorAccount, "heal_dispel_save_casts", f.Seq)
 		}
 	case facts.FamilyEconomy:
 		var es facts.EconomySample
@@ -412,6 +431,17 @@ func (c *Calculator) Feed(f *facts.Fact) {
 				c.addEvidence(hs.AccountID, "opportunity_duration_seconds", f.Seq)
 			}
 		}
+	case facts.FamilyModifier:
+		var mf facts.ModifierFact
+		if err := json.Unmarshal(f.Payload, &mf); err != nil {
+			return
+		}
+		// Smoke activation participation: the smoke-of-deceit modifier is
+		// applied to each participant; count each account's smoke applications.
+		if strings.Contains(mf.Modifier, "smoke_of_deceit") && mf.Kind == "add" && mf.AccountID != "" {
+			c.smokeParticles[mf.AccountID]++
+			c.addEvidence(mf.AccountID, "smoke_activation_participation", f.Seq)
+		}
 	}
 }
 
@@ -457,6 +487,21 @@ func (c *Calculator) derivedEvidence(metricID, acct string, fightParticipation m
 			}
 			return out
 		}
+	case "buyback_round_participation":
+		// Evidence = post-buyback combat events by the same account within the
+		// participation window (fact seq ids from the damage stream).
+		var out []int64
+		for _, bb := range c.buybackSeconds[acct] {
+			for _, de := range c.damageEvents {
+				if de.Actor != acct {
+					continue
+				}
+				if de.GameSecond >= bb && de.GameSecond <= bb+60 {
+					out = append(out, de.FactSeq)
+				}
+			}
+		}
+		return out
 	}
 	return nil
 }
@@ -678,7 +723,13 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 			v.UnavailableReason = "objective_damage_missing"
 		} else {
 			v = c.floatValue(c.objectiveDamage[acct], m)
-			v.ExcludedCount = int64(c.objectiveExcl[acct])
+			// excluded_count counts excluded damage RECORDS; the excluded
+			// damage magnitude is a separate typed field.
+			v.ExcludedCount = c.objectiveExclN[acct]
+			if c.objectiveExcl[acct] > 0 {
+				ed := c.objectiveExcl[acct]
+				v.ExcludedDamage = &ed
+			}
 			v.EvidenceCount = int64(len(c.evidenceFor(acct, "objective_damage_total")))
 		}
 	case "fight_participation_count":
@@ -699,6 +750,18 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 		v = c.floatValue(c.heroDamage[acct], m)
 	case "hero_healing_total":
 		v = c.floatValue(c.heroHealing[acct], m)
+	case "heal_dispel_save_casts":
+		if c.healCasts[acct] == 0 && len(c.evidenceFor(acct, "heal_dispel_save_casts")) == 0 {
+			v.UnavailableReason = "heal_cast_events_missing"
+		} else {
+			v = c.countValue(c.healCasts[acct], m)
+		}
+	case "smoke_activation_participation":
+		if c.smokeParticles[acct] == 0 && len(c.evidenceFor(acct, "smoke_activation_participation")) == 0 {
+			v.UnavailableReason = "smoke_modifier_events_missing"
+		} else {
+			v = c.countValue(c.smokeParticles[acct], m)
+		}
 	case "control_duration_seconds":
 		v.UnavailableReason = "control_modifier_registry_not_in_accepted_adapter"
 	case "phase_duration_seconds":
@@ -719,9 +782,23 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 			v.SampleCount = sv.fights
 		}
 	case "buyback_round_participation":
-		// Post-buyback participation facts are not resolvable from the
-		// accepted adapter (no round context/participation ledger).
-		v.UnavailableReason = "buyback_round_context_not_in_accepted_adapter"
+		// Derived from verified buyback facts plus post-buyback combat within
+		// a 60-second window: participation = buyback uses followed by at
+		// least one hero damage/heal/objective event by the same player.
+		num, den, ev := c.computeBuybackParticipation(acct)
+		if den <= 0 {
+			v.UnavailableReason = "buyback_events_missing"
+		} else {
+			rate := float64(num) / float64(den)
+			v = c.floatValue(rate, m)
+			nf := float64(num)
+			df := float64(den)
+			v.Numerator = &nf
+			v.Denominator = &df
+			v.OpportunityCount = den
+			v.SampleCount = den
+			v.EvidenceCount = ev
+		}
 	default:
 		// V2/V3 modelled and opportunity metrics requiring map geometry,
 		// creep lifecycle, rune state, ward entities, or team shape.
@@ -812,6 +889,31 @@ func (c *Calculator) computeFightParticipation(eps *episodes.Output) map[string]
 	return out
 }
 
+// computeBuybackParticipation derives buyback round participation from
+// verified buyback facts and post-buyback combat within a 60-second window:
+// numerator = buybacks followed by a player damage/heal/objective event,
+// denominator = verified buyback uses. Evidence count is the number of
+// qualifying post-buyback damage events.
+func (c *Calculator) computeBuybackParticipation(acct string) (num, den, ev int64) {
+	den = c.buybacks[acct]
+	if den == 0 {
+		return 0, 0, 0
+	}
+	for _, bb := range c.buybackSeconds[acct] {
+		for _, de := range c.damageEvents {
+			if de.Actor != acct {
+				continue
+			}
+			if de.GameSecond >= bb && de.GameSecond <= bb+60 {
+				num++
+				ev++
+				break
+			}
+		}
+	}
+	return num, den, ev
+}
+
 // computeFightDamageShare computes per-player hero damage inside fight
 // intervals divided by team hero damage in those intervals.
 func (c *Calculator) computeFightDamageShare(eps *episodes.Output) map[string]*shareVal {
@@ -854,25 +956,61 @@ func teamOf(teamByAcct map[string]string, acct string) string {
 	return teamByAcct[acct]
 }
 
-// isObjectiveTarget reports whether a damage target name is a configured
-// objective entity: tower, barracks, ancient/fort, shrine, Roshan, or
-// Tormentor. Temporary structures and summoned units never count as objective
-// entities, and lane/neutral creeps are explicitly excluded (their damage is
-// preserved separately as excluded attribution).
-func isObjectiveTarget(name string) bool {
+// ObjectiveEntityKind is the classified objective-entity family for a damage
+// target, used by objective_damage_total's field gate.
+type ObjectiveEntityKind int
+
+const (
+	ObjectiveUnknown ObjectiveEntityKind = iota
+	ObjectiveTower
+	ObjectiveBarracks
+	ObjectiveAncientFort
+	ObjectiveShrine
+	ObjectiveRoshan
+	ObjectiveTormentor
+)
+
+// classifyObjectiveTarget returns the objective-entity family of a damage
+// target name. It uses an explicit taxonomy: a real structure is only a
+// Radiant/Dire entity (`npc_dota_goodguys_*` / `npc_dota_badguys_*`) of kind
+// tower / rax / fort-ancient / shrine, or the Roshan / Tormentor bosses.
+// Neutral creeps — including `npc_dota_neutral_ancient_frog*` — are NEVER
+// objectives, and summoned units (e.g. Roshan's banner) are excluded.
+func classifyObjectiveTarget(name string) ObjectiveEntityKind {
 	if name == "" {
-		return false
+		return ObjectiveUnknown
 	}
 	lower := strings.ToLower(name)
-	for _, marker := range []string{
-		"tower", "rax", "ancient", "fort", "shrine",
-		"roshan", "tormentor",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
+	side := strings.HasPrefix(lower, "npc_dota_goodguys_") || strings.HasPrefix(lower, "npc_dota_badguys_")
+	switch {
+	case strings.Contains(lower, "npc_dota_roshan") && !strings.Contains(lower, "roshans_banner"):
+		return ObjectiveRoshan
+	case strings.Contains(lower, "tormentor"):
+		return ObjectiveTormentor
 	}
-	return false
+	if !side {
+		// Neutral/lane creeps and summons are not objectives even when their
+		// name contains a structural word (e.g. neutral_ancient_frog).
+		return ObjectiveUnknown
+	}
+	switch {
+	case strings.Contains(lower, "tower"):
+		return ObjectiveTower
+	case strings.Contains(lower, "_rax_") || strings.Contains(lower, "rax"):
+		return ObjectiveBarracks
+	case strings.Contains(lower, "fort") || strings.Contains(lower, "ancient"):
+		return ObjectiveAncientFort
+	case strings.Contains(lower, "shrine"):
+		return ObjectiveShrine
+	}
+	return ObjectiveUnknown
+}
+
+// isObjectiveTarget reports whether a damage target name is a configured
+// objective entity (tower, barracks, ancient/fort, shrine, Roshan, or
+// Tormentor) per the explicit taxonomy.
+func isObjectiveTarget(name string) bool {
+	return classifyObjectiveTarget(name) != ObjectiveUnknown
 }
 
 // computePhaseDuration sums the official phase interval durations.

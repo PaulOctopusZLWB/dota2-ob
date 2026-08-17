@@ -98,43 +98,24 @@ func (s *Server) handleReviewsAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: audit})
 }
 
-// phaseCorrectionReq is the phase-correction mutation payload.
-type phaseCorrectionReq struct {
-	MatchID          string          `json:"match_id"`
-	Author           string          `json:"author"`
-	Reason           string          `json:"reason"`
-	AlgorithmVersion string          `json:"algorithm_version"`
-	EventRef         string          `json:"event_ref"`
-	PreviousValue    json.RawMessage `json:"previous_value"`
-	EffectiveValue   json.RawMessage `json:"effective_value"`
-	EvidenceIDs      []string        `json:"evidence_ids"`
-}
-
 // machinePhaseTruth resolves the authoritative machine value for a phase
 // interval correction: the machine interval (from phases.json) referenced by
-// event_ref, the replay content hash, and the machine phase rule version.
-// It never trusts the caller-supplied previous value.
+// event_ref (canonical `interval@START-END` or `START-END`), the replay
+// content hash, and the machine phase rule version. It never trusts the
+// caller-supplied previous value.
 func (s *Server) machinePhaseTruth(matchID, eventRef string) (review.MachineTruth, error) {
 	var ph phase.Output
 	if err := s.Store.ReadJSON(matchID, store.ArtifactPhases, &ph); err != nil {
 		return review.MachineTruth{}, fmt.Errorf("machine_phases_unavailable: %w", err)
 	}
-	// event_ref form: "interval@<start>" or "interval@<start>-<end>".
-	startSec := -1
-	if strings.HasPrefix(eventRef, "interval@") {
-		id := strings.TrimPrefix(eventRef, "interval@")
-		if i := strings.IndexByte(id, '-'); i >= 0 {
-			id = id[:i]
-		}
-		var n int
-		if _, err := fmt.Sscanf(id, "%d", &n); err == nil {
-			startSec = n
-		}
+	st, _, ok := review.ParseEventRef(eventRef)
+	if !ok {
+		return review.MachineTruth{}, fmt.Errorf("invalid_event_ref:%s", eventRef)
 	}
 	var machine json.RawMessage
 	for _, iv := range ph.Intervals {
-		ref := fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond)
-		if startSec >= 0 && iv.StartGameSecond == startSec {
+		if iv.StartGameSecond == st {
+			ref := review.CanonicalEventRef(review.PhaseInterval{StartGameSecond: iv.StartGameSecond, EndGameSecond: iv.EndGameSecond, GlobalPhase: string(iv.GlobalPhase), RoundIndex: iv.RoundIndex})
 			b, _ := json.Marshal(map[string]interface{}{
 				"start_game_second": iv.StartGameSecond, "end_game_second": iv.EndGameSecond,
 				"global_phase": iv.GlobalPhase, "round_index": iv.RoundIndex,
@@ -192,10 +173,12 @@ func (s *Server) replaySHA(matchID string) string {
 	return ""
 }
 
-// handlePhaseCorrections accepts/moves/relabels a machine phase interval. The
-// machine output (phases.json) is never mutated; the machine value, replay
-// SHA, and rule version are resolved server-side, so a fabricated previous
-// value is rejected.
+// handlePhaseCorrections applies a typed phase-review operation
+// (accept/move/relabel/add/delete/split/merge). The machine output
+// (phases.json) is never mutated; the machine value, replay SHA, and rule
+// version are resolved server-side, so a fabricated previous value is
+// rejected. The effective stream is recomputed, validated, and durably
+// persisted before a 2xx is returned.
 func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -204,7 +187,7 @@ func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) 
 	if !s.requireSessionToken(w, r) {
 		return
 	}
-	var req phaseCorrectionReq
+	var req review.PhaseOpReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_payload")
 		return
@@ -217,19 +200,48 @@ func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "match_id_not_in_catalog")
 		return
 	}
-	if req.EventRef == "" || len(req.EffectiveValue) == 0 {
-		writeErr(w, http.StatusBadRequest, "event_ref_and_effective_value_required")
+	// Resolve machine intervals (the immutable source for the overlay).
+	var ph phase.Output
+	if err := s.Store.ReadJSON(req.MatchID, store.ArtifactPhases, &ph); err != nil {
+		writeErr(w, http.StatusBadRequest, "machine_phases_unavailable")
 		return
 	}
-	truth, err := s.machinePhaseTruth(req.MatchID, req.EventRef)
+	machine := []review.PhaseInterval{}
+	for _, iv := range ph.Intervals {
+		machine = append(machine, review.PhaseInterval{
+			StartGameSecond: iv.StartGameSecond, EndGameSecond: iv.EndGameSecond,
+			GlobalPhase: string(iv.GlobalPhase), RoundIndex: iv.RoundIndex,
+		})
+	}
+	ov := &review.PhaseOverlay{Machine: machine}
+	req.EligibleSeconds = ph.EligibleSeconds
+	effective, err := ov.Apply(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Resolve the machine value for the correction record (authoritative).
+	var truth review.MachineTruth
+	if req.Op == review.OpAdd {
+		truth = review.MachineTruth{
+			ReplaySHA256:     s.replaySHA(req.MatchID),
+			AlgorithmVersion: ph.RuleVersion,
+			MachineValue:     json.RawMessage(`{}`),
+		}
+	} else {
+		truth, err = s.machinePhaseTruth(req.MatchID, req.EventRef)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	effJSON, _ := json.Marshal(req.Effective)
+	if len(effJSON) == 0 {
+		effJSON = json.RawMessage(`{}`)
+	}
 	rv, err := s.Reviews.AddAuthoritative(req.MatchID, review.Correction{
 		MatchID: req.MatchID, Kind: review.KindPhaseInterval, Author: req.Author,
-		Reason: req.Reason, PreviousValue: req.PreviousValue, EffectiveValue: req.EffectiveValue,
-		EvidenceIDs: req.EvidenceIDs, EventRef: req.EventRef,
+		Reason: req.Reason, EffectiveValue: effJSON, EventRef: req.EventRef,
 	}, truth)
 	if err != nil {
 		if strings.Contains(err.Error(), "tamper") {
@@ -239,31 +251,13 @@ func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "correction_persist_failed")
 		return
 	}
-	// Apply and persist the effective phase overlay.
-	s.applyAndPersistEffective(req.MatchID, req.Author)
-	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
-}
-
-// applyAndPersistEffective recomputes and persists the effective phase overlay
-// for a match from machine intervals + corrections.
-func (s *Server) applyAndPersistEffective(matchID, author string) {
-	var ph phase.Output
-	if err := s.Store.ReadJSON(matchID, store.ArtifactPhases, &ph); err != nil {
+	// Durably persist the validated effective overlay; propagate errors.
+	effRaw := review.ToJSON(effective)
+	if _, err := s.Reviews.SetEffectivePhases(req.MatchID, effRaw, req.Author); err != nil {
+		writeErr(w, http.StatusInternalServerError, "effective_overlay_persist_failed")
 		return
 	}
-	machine := []json.RawMessage{}
-	for _, iv := range ph.Intervals {
-		b, _ := json.Marshal(map[string]interface{}{
-			"start_game_second": iv.StartGameSecond, "end_game_second": iv.EndGameSecond,
-			"global_phase": iv.GlobalPhase, "round_index": iv.RoundIndex,
-			"event_ref": fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond),
-		})
-		machine = append(machine, b)
-	}
-	if rv, err := s.Reviews.Load(matchID); err == nil {
-		effective := review.ApplyPhaseOverlay(machine, rv.Corrections)
-		s.Reviews.SetEffectivePhases(matchID, effective, author)
-	}
+	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
 }
 
 // eventCorrectionReq is the behavior-event correction mutation payload.
@@ -434,13 +428,24 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 			prevRole = eff.NominalRole
 		}
 	}
-	// Persist to the authoritative override file under the data root.
+	// Persist to the authoritative override file under the data root. The
+	// latest override for a (match, account) pair REPLACES any earlier one so
+	// a new review decision always takes effect (roles.Effective applies the
+	// first matching override).
 	override := roles.Override{
 		MatchID: req.MatchID, AccountID: req.AccountID, NominalRole: req.NominalRole,
 		Reason: req.Reason, AppliedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	of := s.loadOverrideFile()
-	of.Overrides = append(of.Overrides, override)
+	kept := make([]roles.Override, 0, len(of.Overrides)+1)
+	for _, o := range of.Overrides {
+		if o.MatchID == req.MatchID && o.AccountID == req.AccountID {
+			continue // replaced by the new override below
+		}
+		kept = append(kept, o)
+	}
+	kept = append(kept, override)
+	of.Overrides = kept
 	of.SchemaVersion = version.RoleSchema
 	if err := s.Store.WriteRootJSON("role-overrides-effective.json", of); err != nil {
 		writeErr(w, http.StatusInternalServerError, "override_persist_failed")
@@ -464,6 +469,17 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "override_correction_failed")
 		return
+	}
+	// Synchronously recompute the corpus scores so match/tournament APIs
+	// immediately reflect the effective role. A recompute failure is returned
+	// as an error; success is only reported after durable recomputation.
+	if s.ScoringContract != nil {
+		cs, err := scoring.ComputeAndPersist(s.Store, s.ScoringContract, s.TeamContract, s.MetricReg, s.RoleReg, s.effectiveOverrides())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "override_recompute_failed")
+			return
+		}
+		rv.RecomputeVersion = cs.ContractVersion
 	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/identity"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
@@ -38,33 +39,76 @@ type CorpusScores struct {
 // BuildCorpusFromStore loads every verified match's report + metrics from the
 // store and builds the scoring corpus (player-match rows). Matches that are not
 // verified or have no metrics are excluded from the comparison population.
-func BuildCorpusFromStore(st *store.Store, c *Contract, mreg *metrics.Registry, roleReg *roles.Registry, overrides *roles.OverrideFile) (*Corpus, error) {
+// tc is the frozen team scoring registry (may be nil → team scoring fails
+// closed). Roles are resolved authoritatively from roleReg + the effective
+// override store (data-root overrides win over the frozen registry), never
+// copied from a possibly-stale persisted report.
+func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *metrics.Registry, roleReg *roles.Registry, overrides *roles.OverrideFile) (*Corpus, error) {
 	var cat store.Catalog
 	if err := st.ReadJSONFile(st.CatalogPath(), &cat); err != nil {
 		if os.IsNotExist(err) {
-			return NewCorpus(c, mreg, nil), nil
+			return NewCorpusWithTeam(c, tc, mreg, nil), nil
 		}
 		return nil, fmt.Errorf("scoring: read catalog: %w", err)
+	}
+	// Effective overrides: the authoritative data-root override store wins;
+	// fall back to the passed-in overrides (frozen manifest file).
+	effective := overrides
+	var of roles.OverrideFile
+	if err := st.ReadJSONFile(st.Root+"/role-overrides-effective.json", &of); err == nil && len(of.Overrides) > 0 {
+		effective = &of
 	}
 	var players []*PlayerMatch
 	for _, row := range cat.Matches {
 		if row.Status != store.StatusVerified {
 			continue
 		}
+		// Participants: prefer the persisted report, fall back to the identity
+		// artifact when the report is absent. Roles are NEVER taken from the
+		// report — they are resolved from roleReg + effective overrides below.
+		var part []partLite
+		var haveReport bool
 		var rep reportLite
-		if err := st.ReadJSON(row.MatchID, store.ArtifactReport, &rep); err != nil {
-			continue
+		if err := st.ReadJSON(row.MatchID, store.ArtifactReport, &rep); err == nil {
+			haveReport = true
+			for _, p := range rep.Participants {
+				part = append(part, partLite{AccountID: p.AccountID, TeamID: p.TeamID, NominalRole: p.NominalRole, Side: p.Side})
+			}
+		} else {
+			var idn identity.Identity
+			if err := st.ReadJSON(row.MatchID, store.ArtifactIdentity, &idn); err == nil {
+				teamBySide := map[string]string{}
+				for _, tm := range idn.Teams {
+					teamBySide[tm.Side] = tm.TeamID
+				}
+				for _, p := range idn.Participants {
+					part = append(part, partLite{AccountID: p.AccountID, TeamID: teamBySide[p.Side], NominalRole: "", Side: p.Side})
+				}
+			}
 		}
+		_ = haveReport
 		var met metrics.Output
 		if err := st.ReadJSON(row.MatchID, store.ArtifactMetrics, &met); err != nil {
 			continue
 		}
-		roleByAcct := map[string]string{}
 		teamByAcct := map[string]string{}
-		for _, p := range rep.Participants {
+		for _, p := range part {
 			if p.AccountID != "" {
-				roleByAcct[p.AccountID] = p.NominalRole
 				teamByAcct[p.AccountID] = p.TeamID
+			}
+		}
+		// Resolve the effective nominal role from the registry + overrides.
+		roleByAcct := map[string]string{}
+		if roleReg != nil {
+			for _, p := range part {
+				if p.AccountID == "" {
+					continue
+				}
+				if eff, ok := roleReg.Effective(row.MatchID, p.AccountID, effective); ok {
+					roleByAcct[p.AccountID] = eff.NominalRole
+				} else if p.NominalRole != "" {
+					roleByAcct[p.AccountID] = p.NominalRole
+				}
 			}
 		}
 		byAcct := map[string]map[string]MetricValue{}
@@ -90,6 +134,18 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, mreg *metrics.Registry, 
 				f := *v.Denominator
 				mv.Denominator = &f
 			}
+			// Preserve the typed fact->episode/phase->metric lineage.
+			for _, ev := range v.EvidenceIDs {
+				mv.Lineage = append(mv.Lineage, EvidenceRef{
+					MatchID:       row.MatchID,
+					Kind:          "fact",
+					ID:            fmt.Sprintf("%s:%d", v.MetricID, ev),
+					SourceFactSeq: ev,
+				})
+			}
+			if len(mv.Lineage) == 0 {
+				mv.Lineage = []EvidenceRef{{MatchID: row.MatchID, Kind: "metric", ID: v.MetricID}}
+			}
 			byAcct[v.AccountID][v.MetricID] = mv
 		}
 		for acct, mvs := range byAcct {
@@ -105,7 +161,7 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, mreg *metrics.Registry, 
 		}
 		return players[i].AccountID < players[j].AccountID
 	})
-	return NewCorpus(c, mreg, players), nil
+	return NewCorpusWithTeam(c, tc, mreg, players), nil
 }
 
 // reportLite is the report subset the scorer needs (participants with roles).
@@ -114,14 +170,31 @@ type reportLite struct {
 		AccountID   string `json:"account_id"`
 		TeamID      string `json:"team_id"`
 		NominalRole string `json:"nominal_role"`
+		Side        string `json:"side"`
 	} `json:"participants"`
+}
+
+// partLite is a participant row for role/team resolution.
+type partLite struct {
+	AccountID   string
+	TeamID      string
+	NominalRole string
+	Side        string
+}
+
+// teamScoringVersionOf returns the team registry version (or empty).
+func teamScoringVersionOf(tc *TeamContract) string {
+	if tc == nil {
+		return ""
+	}
+	return tc.SchemaVersion
 }
 
 // ComputeAndPersist computes player-tournament and team-tournament scores from
 // persisted metrics and writes per-match rows plus the corpus catalog. It is
 // deterministic and rebuildable.
-func ComputeAndPersist(st *store.Store, c *Contract, mreg *metrics.Registry, roleReg *roles.Registry, overrides *roles.OverrideFile) (*CorpusScores, error) {
-	cor, err := BuildCorpusFromStore(st, c, mreg, roleReg, overrides)
+func ComputeAndPersist(st *store.Store, c *Contract, tc *TeamContract, mreg *metrics.Registry, roleReg *roles.Registry, overrides *roles.OverrideFile) (*CorpusScores, error) {
+	cor, err := BuildCorpusFromStore(st, c, tc, mreg, roleReg, overrides)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +202,7 @@ func ComputeAndPersist(st *store.Store, c *Contract, mreg *metrics.Registry, rol
 		SchemaVersion:        version.ScoreSchema,
 		RuleVersion:          version.ScoreRuleVersion,
 		ContractVersion:      c.SchemaVersion,
-		TeamScoringVersion:   TeamScoringVersion,
+		TeamScoringVersion:   teamScoringVersionOf(tc),
 		ComparisonPopulation: c.ComparisonPopulation,
 		CorpusMatches:        cor.MatchCount(),
 		Matches:              map[string]*MatchScores{},

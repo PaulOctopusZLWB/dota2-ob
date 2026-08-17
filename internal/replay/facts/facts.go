@@ -695,14 +695,26 @@ func (b *Builder) factBuyback(c *raw.Combat, gs float64) *Fact {
 
 func (b *Builder) factEconomy(c *raw.Combat, gs float64) *Fact {
 	es := &EconomySample{}
-	if c.AttackerName != "" {
-		if a, ok := b.playerRef(c.AttackerName); ok {
+	// GOLD/XP combat-log entries carry the receiving hero in TargetName (the
+	// attacker is empty for these event types); purchases carry the buyer in
+	// TargetName. Resolve the account from TargetName first, then AttackerName
+	// as a fallback, so economy attribution is not lost.
+	hero := ""
+	if c.TargetName != "" {
+		hero = c.TargetName
+	} else if c.AttackerName != "" {
+		hero = c.AttackerName
+	}
+	if hero != "" {
+		if a, ok := b.playerRef(hero); ok {
 			es.AccountID = a
-			es.HeroName = c.AttackerName
+			es.HeroName = hero
 		} else {
-			es.HeroName = c.AttackerName
-			es.Missing = append(es.Missing, "attacker_account_unresolved")
+			es.HeroName = hero
+			es.Missing = append(es.Missing, "economy_account_unresolved")
 		}
+	} else {
+		es.Missing = append(es.Missing, "economy_target_missing")
 	}
 	es.Networth = c.Networth
 	es.LastHits = c.LastHits
