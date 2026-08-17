@@ -25,6 +25,9 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	if handled, status := runRehearsalCommand(args, repo); handled {
+		return status
+	}
 	switch args[0] {
 	case "preflight":
 		flags := flag.NewFlagSet("m4-match preflight", flag.ContinueOnError)
@@ -102,5 +105,5 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: m4-match {preflight|live|verify|cleanup} [flags]")
+	fmt.Fprintln(os.Stderr, "usage: m4-match {preflight|live|verify|cleanup|rehearsal-preflight|rehearsal-attempt|rehearsal-terminal-verify|rehearsal-cleanup} [flags]")
 }

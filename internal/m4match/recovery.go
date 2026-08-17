@@ -76,6 +76,34 @@ type recoveryProof struct {
 	RawInputs      []Artifact `json:"raw_inputs"`
 }
 
+// rehearsalRecoveryIdentity is the rehearsal-specific no-cache boundary. It
+// derives one functional identity from retained raw order and the freshly
+// regenerated production suppression population; no cache or caller-provided
+// completion fact participates.
+func rehearsalRecoveryIdentity(sessionID string, records []RehearsalRawIdentityV1, suppression RehearsalSuppressionEvidenceV1) (string, error) {
+	if sessionID == "" || len(records) != int(suppression.FrameCount) {
+		return "", errors.New("rehearsal recovery population mismatch")
+	}
+	for index, record := range records {
+		if record.Sequence != uint64(index+1) || len(record.RawRecordSHA256) != 64 || len(record.RawPayloadSHA256) != 64 {
+			return "", errors.New("rehearsal recovery raw order mismatch")
+		}
+	}
+	value := rehearsalRecoveryV1{SchemaVersion: "public_match_rehearsal_recovery.v1", SessionID: sessionID, Records: records, Suppression: suppression}
+	payload, err := canonical(value)
+	if err != nil {
+		return "", err
+	}
+	return payloadSHA(payload), nil
+}
+
+type rehearsalRecoveryV1 struct {
+	SchemaVersion string                         `json:"schema_version"`
+	SessionID     string                         `json:"session_id"`
+	Records       []RehearsalRawIdentityV1       `json:"records"`
+	Suppression   RehearsalSuppressionEvidenceV1 `json:"suppression"`
+}
+
 func captureFinalEndpoints(root, tokenPath string) ([]Artifact, error) {
 	token, err := os.ReadFile(tokenPath)
 	if err != nil {

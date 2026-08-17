@@ -95,6 +95,23 @@ func TestEvaluateLiveOnlyEmitsNoHistoryFamilies(t *testing.T) {
 	if string(a) != string(b) {
 		t.Fatal("live-only evaluation is nondeterministic")
 	}
+	production, err := insight.EvaluateLiveOnlyProduction(input, insight.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionCandidates, _ := contracts.MarshalCanonical(production.Candidates)
+	if string(productionCandidates) != string(a) {
+		t.Fatal("production dependency instrumentation changed accepted visible candidate bytes")
+	}
+	wantFamilies := contracts.HistoricalDisabledFamiliesV1()
+	if len(production.History) != len(wantFamilies) {
+		t.Fatalf("family execution count=%d", len(production.History))
+	}
+	for index, audit := range production.History {
+		if audit.Family != wantFamilies[index] || !audit.Executed || audit.Reason != "historical_unavailable" || audit.Evidence != observation.Evidence || !strings.HasPrefix(audit.EligibilitySite, audit.Family+".") {
+			t.Fatalf("family branch %d did not emit at its production site: %+v", index, audit)
+		}
+	}
 	if len(first) != 1 || insight.Family(first[0].RuleVersion) != "objective" {
 		t.Fatalf("history-dependent output escaped: %#v", first)
 	}
