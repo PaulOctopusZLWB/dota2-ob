@@ -1385,19 +1385,34 @@ and excluded samples are reported, never silently removed.
 - Use one live professional/tournament DotaTV game that reaches a normal
   post-game terminal state. Before arming, bind the in-client public DotaTV
   listing and nonzero Valve match ID to machine-verifiable authority evidence.
-  A non-TI tournament run pins an immutable, independently reviewed
-  `MatchAuthorityRootV1` that establishes the Valve league/event or organizer
-  origin from a Valve source. The harness then performs bounded retrieval and
-  retains content-addressed response/page bytes plus deterministic sanitized
-  exports. `MatchAuthorityEvidenceV1` must bind exact match ID, league/event,
-  series/game, teams, and start window to reviewed JSON Pointers or byte ranges
-  in those artifacts so an independent verifier can re-extract every fact.
-  Caller-supplied authority, an official-looking or unrelated page, an
-  out-of-root redirect, incomplete pagination, missing fact locator,
-  fetch/hash mismatch, or source conflict fails closed. Secrets enter only by
-  an external channel and are absent from persisted URLs, headers, logs, and
-  exported evidence. Community indexes may supplement discovery but cannot be
-  the sole authority or independent corroboration for a Valve-derived fact.
+  A non-TI tournament run uses exactly one immutable `MatchAuthorityRootV1`
+  whose canonical bytes are committed in and embedded by the independently
+  reviewed exact harness candidate. Its SHA-256 is compiled into candidate and
+  binary identity; startup recalculates it, and no CLI, path, environment,
+  configuration, issue field, or live input can override it. Any root change
+  requires a new candidate, full exact-SHA review, and fresh readiness. The root
+  establishes the Valve league/event or organizer origin from a Valve source.
+  The harness then performs bounded retrieval with at most 12 logical pages,
+  eight pages per endpoint/paginator, 48 total HTTP transactions including
+  redirects, three redirects per page, no retries or backoff, a five-second
+  per-transaction deadline from before DNS/connect through bounded decoded EOF,
+  and a 45-second overall deadline. Identity/gzip wire and decoded bytes are
+  independently capped at 2 MiB per response and 8 MiB per artifact set.
+  Cursor/request cycles, duplicate page hashes, unsupported encoding, compressed
+  expansion, or any count/time/byte exhaustion fails closed. Retain
+  content-addressed response/page bytes plus deterministic
+  sanitized exports. `MatchAuthorityEvidenceV1` binds exact match ID,
+  league/event, series/game, teams, and start window to reviewed JSON Pointers
+  or byte ranges so an independent verifier can re-extract every fact. Seal
+  `MatchAuthorityPreflightV1` over exact candidate, binary, spec, embedded root,
+  match, artifact-set, authority-evidence, and evidence-index identities; bind
+  those same identities into `DOT-70`, live, finalization, and recovery.
+  Caller-supplied authority, root/preflight substitution, an official-looking or
+  unrelated page, an out-of-root redirect, incomplete pagination, missing fact
+  locator, fetch/hash mismatch, or source conflict fails closed. Secrets enter
+  only by an external channel and are absent from persisted URLs, headers, logs,
+  and exported evidence. Community indexes may supplement discovery but cannot
+  be the sole authority or independent corroboration for a Valve-derived fact.
   Missing competition, series/game, team, or match identity fails closed. Arm
   the exact candidate, isolated data root, sanitized evidence sink, operator
   UI, native 750x640 Browser Source, and OBS recording before Paul manually
@@ -1451,8 +1466,14 @@ and emits TI-specific human instructions. It must not be bypassed or used
 unchanged for a non-TI match. Before this amendment can authorize a live run,
 one narrow immutable harness successor must bind this exact spec revision,
 implement separate closed `RunPurposeV1` and `MatchClassV1` enums plus the
-authority contracts, replace only the directly dependent identity/source,
-evidence, verifier, golden, and human wording, preserve all accepted process,
+authority contracts. Its permitted production surface is closed to purpose/
+class and authority validation, embedded-root binding and bounded retrieval;
+purpose-specific readiness/evidence/root/terminal schemas and verifiers;
+value-free coverage normalization/delta; directly required typed-unavailable
+suppression/audit adapters; candidate/spec/root/preflight binding; dependent
+goldens/tests; and command/operator/runbook wording. It changes no unrelated
+insight calculations, thresholds, queues, capture, projection, delivery,
+rendering, OBS behavior, or persistence. Preserve all accepted process,
 timing, evidence, privacy, fault, resource, recovery, and cleanup semantics,
 and pass full independent exact-SHA review. The only acceptance pairs are
 `p4_acceptance + ti` and `p4_acceptance + public_tournament`; every other pair
@@ -1460,8 +1481,9 @@ fails closed.
 
 The P4 order is immutable spec acceptance, exact-parent harness implementation,
 independent exact-SHA review, fresh readiness reproduction, qualifying-match
-selection and authority preflight, update/reopen existing `DOT-70` with that
-exact identity and one absolute China Standard Time window of at most 30
+selection and authority preflight against the exact embedded root, seal the
+exact root/evidence/index/artifact identities, update/reopen existing `DOT-70`
+with those identities and one absolute China Standard Time window of at most 30
 minutes, execute once, then independently evaluate sealed evidence. Match
 acceptance is not a prerequisite to its only manual checkpoint. `DOT-70`
 remains closed until the first five prerequisites pass and is reused rather
@@ -1493,12 +1515,22 @@ than duplicated.
   qualification checks are `not_applicable_rehearsal`, never passes.
 - Produce value-free `FieldCoverageDeltaV1` bound to captured-schedule SHA-256
   `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`,
-  exact raw-session/evidence hashes, and algorithm version. Type-prefixed fixed,
-  array, and reviewed dynamic-key segments eliminate path collisions; dynamic
-  keys aggregate only counts/types/collision counts and retain no raw key or
-  scalar sample. The full canonical union assigns every path exactly one of
-  `same`, `missing_in_rehearsal`, `additional_in_rehearsal`, or
-  `different_type_or_nullability`, with frame/seen/null counts and JSON types.
+  exact raw-session/evidence hashes, and algorithm version. Each compared root
+  has a nonzero source-frame count and strictly increasing unique RawRecord
+  `(sequence, raw_record_sha256)` identities; duplicate sequence/tuple, missing
+  component, hash mismatch, or out-of-order identity fails. Type-prefixed fixed,
+  array, and reviewed dynamic-key segments eliminate path collisions;
+  dynamic keys aggregate only counts/types/collision counts and retain no raw
+  key or scalar sample. Per side and path, record unique containing-frame count,
+  total seen count, null count, sorted JSON types, `never|sometimes|always`
+  presence, nullable state, dynamic-collision count, and collision-present state.
+  The full canonical union assigns every path exactly one label with this
+  precedence: baseline-only is `missing_in_rehearsal`, rehearsal-only is
+  `additional_in_rehearsal`, any presence/nullability/type/collision-state
+  difference is `different_type_or_nullability`, otherwise `same`. Both-never,
+  omitted/duplicate union paths, malformed keys, count invariant failures, or
+  more than one label fail generation. Absolute counts remain evidence and need
+  not match when the defined structural profile matches.
 - A later qualifying attempt uses a fresh isolated root and complete unchanged
   P4. No rehearsal artifact, hash, manual confirmation, or result can be
   imported, resumed, spliced, relabeled, or used to skip a check.

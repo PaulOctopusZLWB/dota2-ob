@@ -65,24 +65,46 @@ below; that mode cannot produce or be relabeled as P4 evidence.
   professional league or tournament.
 - Before arming, bind a stable nonzero Valve match ID, competition/league,
   series/game, both public teams, and the expected start window.
-- A `public_tournament` run must pin one immutable, independently reviewed
-  `MatchAuthorityRootV1` SHA-256 before match selection. The root declares the
-  league/event identity, its Valve identity when available, the exact trusted
-  HTTPS origins, bounded endpoint templates, extraction-profile version, and
-  the Valve announcement/league record that establishes each organizer origin.
-  A URL, display name, operator assertion, DNS result, or page supplied only by
-  the live-run caller cannot establish authority. Changes require a new root
-  and review.
+- A `public_tournament` run accepts exactly one `MatchAuthorityRootV1`. Its
+  canonical JSON bytes are committed inside the exact harness successor and
+  embedded in the built verifier. The successor records
+  `authority_root_sha256 = SHA-256(canonical root bytes)` in its candidate and
+  binary identity; startup recalculates the digest and requires exact equality
+  with the compiled value. No CLI argument, path, environment variable,
+  configuration, issue field, or live-run input can replace the bytes or
+  digest. Exact-SHA harness review covers the root bytes and derived digest.
+  Any root change requires a new harness candidate, complete independent
+  exact-SHA review, and fresh dual-root readiness before match selection.
+- The embedded root declares the league/event identity, its Valve identity when
+  available, exact trusted HTTPS origins, bounded endpoint templates,
+  extraction-profile version, and the Valve announcement/league record that
+  establishes each organizer origin. A URL, display name, operator assertion,
+  DNS result, or page supplied only by the live-run caller cannot establish
+  authority.
 - The harness, not the operator, retrieves every authority artifact after the
-  match is selected. Retrieval uses a bounded HTTPS client, permits at most
-  three redirects only among origins named by the pinned root, rejects
-  credentials in URLs and non-success status, caps each response at 2 MiB and
-  the artifact set at 8 MiB, and records start/end time, final sanitized URL,
-  status, media type, response-byte count, redirect chain, pagination request
-  and terminal state, and retrieval error. A provider secret may enter only
-  through the external secret channel; it is stripped from persisted URLs,
-  headers, logs, artifacts, hashes exposed outside the private root, and issue
-  evidence.
+  match is selected. One authority retrieval has fixed limits: at most 12
+  logical pages total, at most eight pages for one endpoint/paginator, at most
+  48 HTTP transactions total including redirects, at most three redirects for
+  one logical page, a five-second deadline for each transaction, and a
+  45-second deadline for the complete retrieval. Retry count is exactly zero
+  and there is no backoff: a connection error, timeout, HTTP 408, 429, 5xx, or
+  other non-success response is terminal. Each transaction deadline starts
+  before DNS/connect and ends only after the bounded decoded body reaches EOF.
+  Redirects remain
+  restricted to origins and endpoint shapes in the embedded root. A repeated
+  canonical request/cursor, cursor cycle, duplicate page SHA-256 under different
+  cursors, page/request/transaction exhaustion, deadline, or non-success terminal
+  response fails closed.
+- Retrieval permits only identity and gzip content encoding and streams both
+  wire and decoded bytes through independent limits: at most 2 MiB of each per
+  response and 8 MiB of each for the artifact set. A declared or observed limit
+  breach, unsupported encoding, truncated decode, or trailing compressed member
+  fails closed. It records retrieval start/end time, final sanitized URL,
+  status, media type, wire/decoded byte counts, encoding, redirect chain,
+  logical-page key, cursor, transaction count, `retry_count:0`, pagination
+  terminal state, and retrieval error. A provider secret may enter only through
+  channel; it is stripped from persisted URLs, headers, logs, artifacts, hashes
+  exposed outside the private root, and issue evidence.
 - `MatchAuthorityEvidenceV1` retains the exact fetched response/page bytes in
   the isolated private evidence root, their SHA-256 identities, and a
   deterministic sanitized export plus its SHA-256 for independent review. Its
@@ -92,6 +114,15 @@ below; that mode cannot produce or be relabeled as P4 evidence.
   a JSON Pointer or exact byte range plus bound-span SHA-256. The independent
   verifier re-extracts every fact from retained bytes and rejects an unmatched,
   missing, ambiguous, out-of-range, or hash-mismatched binding.
+- Successful authority preflight emits `MatchAuthorityPreflightV1`, binding the
+  exact candidate commit, binary digest, accepted amendment commit, embedded
+  authority-root digest, match ID, retained artifact-set digest,
+  authority-evidence digest,
+  evidence-index digest, retrieval-limit version, and terminal retrieval
+  counters. The subsequent `DOT-70` update binds these exact identities. Live,
+  finalization, and recovery reject any root, evidence, index, artifact, match,
+  candidate, binary, or spec mismatch; substitution requires a new reviewed
+  candidate/readiness/preflight cycle.
 - Valve-provided league/match metadata may establish the complete authority
   chain directly. An organizer schedule is accepted only under a pinned
   organizer origin and only when the retained artifact set also binds the exact
@@ -118,6 +149,15 @@ below; that mode cannot produce or be relabeled as P4 evidence.
   purpose-specific schemas above. A public-tournament identity must carry the
   complete qualifying authority evidence. Reject missing, unknown, duplicate,
   conflicting, private/local, credential-bearing, or non-HTTPS sources.
+- The allowed production implementation surface is closed to: purpose/class and
+  authority types, validation, embedded-root binding, and bounded retrieval;
+  purpose-specific readiness/evidence/root/terminal schemas and verifiers;
+  value-free coverage normalization and delta generation; directly required
+  typed-unavailability suppression and audit adapters; candidate/spec/root/
+  preflight identity binding; directly dependent goldens/tests; and command,
+  operator, or runbook wording. Do not change insight calculations, policy
+  thresholds, queues, persistence formats outside those schemas, capture,
+  projection, delivery, rendering, OBS behavior, or unrelated packages.
 - Replace only TI-specific runbook and human-instruction wording. Keep the same
   four manual actions and the same at-most-30-minute pregame window.
 - Preserve every accepted candidate/parent/remote/PR/binary/environment/process
@@ -125,14 +165,16 @@ below; that mode cannot produce or be relabeled as P4 evidence.
   overlay reconciliation, five-second measurement, 100 ms visibility trace,
   resource bound, fault matrix, recovery, byte comparison, privacy scan,
   confinement, cleanup, and non-resumable failure rule.
-- Rerun two fresh deterministic preflight roots against the successor and exact
-  current environment. Prior readiness hashes do not authorize the successor.
+- Rerun two fresh deterministic harness evidence roots against the successor and
+  exact current environment. Prior readiness hashes do not authorize the
+  successor.
 - Update the existing `DOT-70` only after independent exact-SHA review, a new
   exact readiness result pass, and preflight validation of one selected
-  qualifying match and its authority evidence. The update identifies that
-  match and one absolute China Standard Time start interval of at most 30
-  minutes. It authorizes one attempt; it is not match acceptance. Never create
-  another P4 manual checkpoint issue.
+  qualifying match and its authority evidence. The update identifies the exact
+  root/preflight/artifact/evidence/index identities, match, and one absolute
+  China Standard Time start interval of at most 30 minutes. It authorizes one
+  attempt; it is not match acceptance. Never create another P4 manual checkpoint
+  issue.
 
 ### Public-match rehearsal is structurally non-acceptance
 
@@ -168,19 +210,44 @@ below; that mode cannot produce or be relabeled as P4 evidence.
   `2c87c90fe9bb472ff8ad44efd5838b9ea20eab9b932f20df26719785cc4ae30e`,
   exact rehearsal raw-session SHA-256, normalization-algorithm version, and
   evidence-root SHA-256. It retains no scalar value or raw object key classified
-  as dynamic/sensitive. Each canonical path reports frame, seen, and null counts
-  plus JSON type set and receives exactly one classification: `same`,
-  `missing_in_rehearsal`, `additional_in_rehearsal`, or
-  `different_type_or_nullability`.
+  as dynamic/sensitive. Each compared root has a nonzero `source_frame_count`.
+  A frame identity is the tuple `(sequence, raw_record_sha256)` for one accepted
+  RawRecord. Sequence is strictly increasing; a duplicate sequence or tuple,
+  missing identity component, record-hash mismatch, or out-of-order identity
+  fails generation rather than being deduplicated.
+- For each normalized path and each side, the canonical profile records:
+  `frame_count`, the number of unique frames containing at least one occurrence;
+  `seen_count`, all occurrences after normalization and aggregation;
+  `null_count`, occurrences whose JSON value is null; sorted `json_types` drawn
+  only from `null|boolean|number|string|array|object`, including `null` when
+  observed;
+  `presence`, which is `never` when `frame_count == 0`, `always` when
+  `frame_count == source_frame_count`, and `sometimes` otherwise; `nullable`,
+  which equals `(null_count > 0)`; `dynamic_collision_count`; and
+  `has_dynamic_collision = (dynamic_collision_count > 0)`. Counts must satisfy
+  `0 <= frame_count <= source_frame_count`, `seen_count >= frame_count`, and
+  `0 <= null_count <= seen_count`.
 - Path normalization uses escaped, type-prefixed segments: fixed schema keys use
   `k:<escaped-key>`, every array element uses `a:[]`, and non-schema object keys
   use only a reviewed kind token such as `d:decimal`, `d:uuid`, or `d:opaque`.
-  Dynamic observations that map to one token aggregate counts/type sets and an
-  explicit collision count; they never overwrite one another. Prefixes prevent
-  fixed/dynamic/array collisions. An unclassifiable key, invalid escape,
-  normalization collision across segment kinds, omitted union path, or more
-  than one classification for a path fails generation. The existing profiler's
+  Dynamic observations that map to one token aggregate counts/type sets and
+  never overwrite one another. For each parent/path/frame,
+  `dynamic_collision_count` increases by one for every distinct concrete
+  dynamic key after the first that maps to the same reviewed token; raw keys are
+  discarded before canonical output. Array occurrences increase `seen_count`
+  but are not dynamic collisions. Prefixes prevent fixed/dynamic/array
+  collisions. An unclassifiable key, invalid escape, normalization collision
+  across segment kinds, omitted or duplicate union path, or more than one
+  classification for a path fails generation. The existing profiler's
   first-scalar sample is prohibited from this artifact.
+- The canonical union contains every path observed on either side exactly once.
+  Classification uses this precedence: observed in baseline but `never` in
+  rehearsal is `missing_in_rehearsal`; `never` in baseline but observed in
+  rehearsal is `additional_in_rehearsal`; when both are observed, any difference
+  in `presence`, `nullable`, `json_types`, or `has_dynamic_collision` is
+  `different_type_or_nullability`; otherwise it is `same`. A union path that is
+  `never` on both sides is invalid. Absolute counts are evidence and do not need
+  equality once the defined structural profile is equal.
 - Every accepted check meaningful for rehearsal remains unchanged, including
   process correlation, sender limitation, privacy, five-second resource
   samples, 100 ms visibility, raw-first capture, gaps/saturation, operator
@@ -200,9 +267,11 @@ below; that mode cannot produce or be relabeled as P4 evidence.
 1. Accept one immutable spec successor after complete independent re-review.
 2. Implement a harness successor whose sole parent is exact `abb4210257...`.
 3. Independently review the exact harness SHA and reproduce fresh readiness.
-4. Select one qualifying match and validate its authority evidence in preflight.
-5. Update/reopen existing `DOT-70` with the exact match and bounded window, then
-   execute one complete attempt.
+4. Select one qualifying match and validate its authority evidence against the
+   exact embedded root; seal `MatchAuthorityPreflightV1`.
+5. Update/reopen existing `DOT-70` with the exact preflight/root/evidence/index/
+   artifact identities, match, and bounded window, then execute one complete
+   attempt.
 6. Independently evaluate the sealed result before accepting P4 or opening
    `DOT-62`; match acceptance is never a prerequisite to step 5.
 
@@ -220,18 +289,26 @@ non-acceptance implementation/execution path and changes none of these states.
 
 - Independent spec review reports no blocking ambiguity or gate weakening on one
   immutable remote commit.
-- The implementation successor changes only the typed identity/source boundary,
-  bound spec identity, directly dependent goldens/tests, and operator/runbook
-  wording required by this amendment.
+- The implementation successor changes only the closed surface enumerated under
+  **Narrow harness successor**: purpose/class and authority validation/retrieval;
+  purpose-specific schemas/verifiers; value-free coverage normalization/delta;
+  required suppression/audit adapters; bound identities; directly dependent
+  goldens/tests; and command/operator/runbook wording.
 - Adversarial tests reject arbitrary matchmaking, replay/demo input, synthetic
   feeds, unsafe URLs, credentials, unknown source classes, missing hashes/times,
   metadata conflict, match-ID drift, fabricated/unrelated organizer pages,
-  caller-supplied authority, out-of-root redirect, source/fact locator mismatch,
-  incomplete pagination, and TI/non-TI substitution.
+  caller-supplied or unembedded authority, root/preflight substitution,
+  out-of-root redirect, source/fact locator mismatch, request/page/transaction/
+  byte exhaustion, cursor cycle, duplicate page, unexpected retry, compressed
+  expansion, incomplete pagination, and TI/non-TI substitution.
 - Exhaustive purpose/class tests reject every illegal cross-product. Rehearsal
   tests prove its roots cannot pass P4, it cannot emit `ARMED` or a P4 issue
   transition, sensitive scalar values never enter `FieldCoverageDeltaV1`, and
   two clean roots produce byte-identical full-union coverage classifications.
+  Coverage tests include null versus absent, intermittent presence, JSON type
+  change, repeated frame identity, multiple dynamic keys in one frame, arrays,
+  malformed/unclassifiable keys, omitted/duplicate union paths, sensitive-value
+  rejection, and exact baseline-hash mismatch.
 - The complete accepted DOT-65 verification matrix, dual-root canonical byte
   comparison, uninterrupted full race run, browser/OBS suites, privacy/source
   scans, remote/PR equality, and clean tree pass at the successor SHA.
