@@ -6,9 +6,9 @@ Amended: 2026-08-17
 
 Decision owner: Paul
 
-Status: M0-M3 and the M4 functional/harness candidates accepted; the P4
-public-tournament/rehearsal spec successor is pending complete independent
-re-review
+Status: M0-M3 and the M4 functional/harness candidates accepted; public-match
+rehearsal extraction is pending independent review while P4 authority remains
+blocked
 
 ## Objective
 
@@ -1539,6 +1539,17 @@ The focused amendment
 `docs/specs/2026-08-17-m4-public-tournament-match-substitution.md` defines the
 complete authority, schema-separation, normalization, adversarial-test, and
 ordering contract.
+
+The non-acceptance rehearsal may be extracted into a separately reviewed
+exact-parent successor before public-tournament authority is available. That
+package preserves the accepted TI-only P4 implementation and
+`AcceptedP4Spec` identity unchanged, adds no `public_tournament` acceptance path
+or authority root, cannot emit `ARMED`, and cannot update `DOT-64`, `DOT-62`,
+or `DOT-70`. Its only purpose is pre-TI operational rehearsal and value-free
+field-coverage measurement. The exact extraction contract is
+`docs/specs/2026-08-17-m4-public-match-rehearsal-extraction.md`; its pass is not
+M4/P4 acceptance, and a later qualifying match still requires a fresh reviewed
+P4 candidate and readiness cycle.
 
 ### P5 — production rehearsal latency
 
