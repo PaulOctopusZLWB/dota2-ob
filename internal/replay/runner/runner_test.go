@@ -439,6 +439,279 @@ func TestFingerprintVersionChangeRebuilds(t *testing.T) {
 	}
 }
 
+// TestResumeRebuildsAfterDeletedReport: deleting report.json after a verified
+// run must NOT resume as verified; the completion tree includes the report, so
+// the runner rebuilds (report absent => canonical tree invalid).
+func TestResumeRebuildsAfterDeletedReport(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("initial status=%s", res.Status)
+	}
+	// Delete report.json, then rerun: must rebuild (not resume verified).
+	if err := os.Remove(st.ArtifactPath("1000000001", store.ArtifactReport)); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Reason == "resumed_completed_match" {
+		t.Fatal("resumed verified over deleted report.json")
+	}
+	if res2.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res2.Status)
+	}
+	// report.json must exist again.
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactReport)); err != nil {
+		t.Fatalf("report.json not rebuilt: %v", err)
+	}
+}
+
+// TestResumeFailsClosedOnCorruptReport: corrupting report.json must not resume
+// verified; the runner rebuilds or fails closed.
+func TestResumeFailsClosedOnCorruptReport(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	if _, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := st.ArtifactPath("1000000001", store.ArtifactReport)
+	if err := os.WriteFile(reportPath, []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed verified over corrupted report.json")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+}
+
+// TestQuarantineResumeStaysQuarantined: a first run with incomplete role
+// provenance quarantines; an unchanged rerun must remain quarantined (never
+// become verified), with the reason preserved.
+func TestQuarantineResumeStaysQuarantined(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := Options{RoleRegistry: partialRoleReg(), RoleRegistrySHA256: "partial"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("first run status=%s want quarantined", res.Status)
+	}
+	// Persisted status must record the quarantine.
+	sr, serr := st.ReadStatus("1000000001")
+	if serr != nil {
+		t.Fatalf("read status: %v", serr)
+	}
+	if sr.Status != store.StatusQuarantined {
+		t.Fatalf("persisted status=%s want quarantined", sr.Status)
+	}
+	if sr.Reason == "" {
+		t.Fatal("persisted quarantine has empty reason")
+	}
+	// Unchanged rerun must stay quarantined with the reason preserved.
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Status != store.StatusQuarantined {
+		t.Fatalf("rerun status=%s want quarantined (never verified)", res2.Status)
+	}
+	if !strings.Contains(res2.Reason, sr.Reason) && res2.Reason != sr.Reason {
+		t.Fatalf("rerun reason=%q not preserving persisted reason %q", res2.Reason, sr.Reason)
+	}
+	// The persisted quarantine must also be visible via catalog and report.
+	cat, err := st.RebuildCatalog("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Matches) != 1 || cat.Matches[0].Status != store.StatusQuarantined {
+		t.Fatalf("catalog status=%v want quarantined", cat.Matches)
+	}
+	if cat.Matches[0].Publication != "suppressed" {
+		t.Fatalf("catalog publication=%s want suppressed", cat.Matches[0].Publication)
+	}
+	// Report must carry the quarantined state (not published).
+	var rep struct {
+		Status      string `json:"status"`
+		Reason      string `json:"reason"`
+		Publication string `json:"publication_state"`
+	}
+	if err := st.ReadJSON("1000000001", store.ArtifactReport, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != store.StatusQuarantined || rep.Publication != "suppressed" {
+		t.Fatalf("report status=%s pub=%s want quarantined/suppressed", rep.Status, rep.Publication)
+	}
+}
+
+// TestInterruptionBeforeReportNeverResumesVerified: simulate interruption
+// after source artifacts + canonical were written by an earlier version but
+// before report/status/gate completed. Because the completion tree requires
+// report.json + status.json, a missing report must never resume verified.
+func TestInterruptionBeforeReportNeverResumesVerified(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	// Write only source artifacts + a canonical marker covering source only
+	// (as if an old/partial run finished source but not report/status/gate).
+	if err := os.MkdirAll(st.MatchDir("1000000001"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range sourceArtifacts() {
+		b := []byte("x")
+		if a == store.ArtifactRaw || a == store.ArtifactFacts {
+			b = syntheticRawEvents("1000000001", true, 300)
+		}
+		if err := os.WriteFile(st.ArtifactPath("1000000001", a), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fp := store.Fingerprint(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID, opts.RoleRegistrySHA256, opts.RoleOverridesSHA256)
+	if _, err := st.WriteCanonical("1000000001", fp, sourceArtifacts()); err != nil {
+		t.Fatal(err)
+	}
+	// Rerun: no report/status in the completion tree => must rebuild and
+	// reach verified via full pipeline (never resume as verified).
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed verified over an incomplete completion tree")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+	// report.json + status.json must now exist.
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactReport)); err != nil {
+		t.Fatalf("report.json missing after rebuild: %v", err)
+	}
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactStatus)); err != nil {
+		t.Fatalf("status.json missing after rebuild: %v", err)
+	}
+}
+
+// TestOverrideProvenanceSurvivesRestart: an effective manual override must be
+// persisted in the report (source=manual_override, reason, timestamp) and
+// survive a resume/rebuild.
+func TestOverrideProvenanceSurvivesRestart(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	// Full registry + explicit overrides that swap roles 1<->2 on radiant
+	// (preserving the one-per-role-per-side invariant).
+	ovr := &roles.OverrideFile{Overrides: []roles.Override{
+		{MatchID: "1000000001", AccountID: "1000", NominalRole: "2", Reason: "manual adjudication", AppliedAt: "2026-08-17T08:00:00Z"},
+		{MatchID: "1000000001", AccountID: "1001", NominalRole: "1", Reason: "manual adjudication", AppliedAt: "2026-08-17T08:00:00Z"},
+	}}
+	opts := Options{RoleRegistry: fullRoleReg(), Overrides: ovr, RoleRegistrySHA256: "reg-hash", RoleOverridesSHA256: "ovr-hash"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified", res.Status)
+	}
+	// Report must carry the override provenance for account 1000.
+	var rep struct {
+		Participants []struct {
+			AccountID       string  `json:"account_id"`
+			NominalRole     string  `json:"nominal_role"`
+			RoleSourceKind  string  `json:"role_source_kind"`
+			RoleSourceURL   string  `json:"role_source_url"`
+			OverrideApplied bool    `json:"override_applied"`
+			OverrideReason  *string `json:"override_reason"`
+			OverrideAt      *string `json:"override_at"`
+		} `json:"participants"`
+	}
+	if err := st.ReadJSON("1000000001", store.ArtifactReport, &rep); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range rep.Participants {
+		if p.AccountID == "1000" {
+			found = true
+			if p.NominalRole != "2" {
+				t.Fatalf("overridden role=%s want 2", p.NominalRole)
+			}
+			if p.RoleSourceKind != "manual_override" {
+				t.Fatalf("source=%s want manual_override", p.RoleSourceKind)
+			}
+			if p.OverrideReason == nil || *p.OverrideReason != "manual adjudication" {
+				t.Fatalf("override reason=%v", p.OverrideReason)
+			}
+			if p.OverrideAt == nil || *p.OverrideAt != "2026-08-17T08:00:00Z" {
+				t.Fatalf("override at=%v", p.OverrideAt)
+			}
+			if p.RoleSourceURL == "" {
+				t.Fatal("base registry source URL lost")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("account 1000 not in report participants")
+	}
+	// Resume (same inputs) must preserve the override provenance.
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Reason != "resumed_completed_match" {
+		t.Fatalf("expected resume, got %s", res2.Reason)
+	}
+	var rep2 struct {
+		Participants []struct {
+			AccountID       string `json:"account_id"`
+			RoleSourceKind  string `json:"role_source_kind"`
+			OverrideApplied bool   `json:"override_applied"`
+		} `json:"participants"`
+	}
+	if err := st.ReadJSON("1000000001", store.ArtifactReport, &rep2); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range rep2.Participants {
+		if p.AccountID == "1000" && (!p.OverrideApplied || p.RoleSourceKind != "manual_override") {
+			t.Fatalf("override provenance lost on resume: %+v", p)
+		}
+	}
+}
+
+// TestOverrideMissingTimestampFailsClosed: an override without a timestamp
+// must fail the publication gate deterministically (not fabricate wall clock).
+func TestOverrideMissingTimestampFailsClosed(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	ovr := &roles.OverrideFile{Overrides: []roles.Override{
+		{MatchID: "1000000001", AccountID: "1000", NominalRole: "2", Reason: "no timestamp"},
+		{MatchID: "1000000001", AccountID: "1001", NominalRole: "1", Reason: "no timestamp"},
+	}}
+	opts := Options{RoleRegistry: fullRoleReg(), Overrides: ovr, RoleRegistrySHA256: "reg-hash", RoleOverridesSHA256: "ovr"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined (override missing timestamp)", res.Status)
+	}
+	if !strings.Contains(res.Reason, "override_timestamp_required") {
+		t.Fatalf("reason=%s want override_timestamp_required", res.Reason)
+	}
+}
+
 func TestRunMatchCorruptIsolated(t *testing.T) {
 	mt, root, _ := writeSyntheticArchive(t, "1000000002", true, 300)
 	// Corrupt the archive bytes.

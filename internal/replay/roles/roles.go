@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
@@ -142,11 +141,15 @@ func (r *Registry) Effective(matchID, accountID string, overrides *OverrideFile)
 				eff.OverrideApplied = true
 				reason := o.Reason
 				eff.OverrideReason = &reason
-				at := o.AppliedAt
-				if at == "" {
-					at = time.Now().UTC().Format(time.RFC3339)
+				// Deterministic: preserve the override's applied timestamp
+				// verbatim. An empty timestamp is kept empty so the publication
+				// gate can fail closed (override_timestamp_required) instead of
+				// fabricating a wall-clock value that would break byte-identical
+				// reruns.
+				if o.AppliedAt != "" {
+					at := o.AppliedAt
+					eff.OverrideAt = &at
 				}
-				eff.OverrideAt = &at
 				break
 			}
 		}

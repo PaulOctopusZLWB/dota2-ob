@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/archive"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/clock"
@@ -23,7 +24,9 @@ import (
 )
 
 // Participant is the report view of one verified participant with its nominal
-// role and provenance.
+// role and full provenance. When a manual override is effective, the override
+// source/reason/timestamp are carried alongside the underlying registry
+// provenance so both are auditable.
 type Participant struct {
 	Slot         int32  `json:"slot"`
 	AccountID    string `json:"account_id"`
@@ -34,11 +37,19 @@ type Participant struct {
 	TeamID       string `json:"team_id"`
 	TeamName     string `json:"team_name"`
 	NominalRole  string `json:"nominal_role"`
-	RoleSource   string `json:"role_source_kind"`
+	// RoleSourceKind is the effective source of the nominal role: the base
+	// registry source kind, or "manual_override" when an override applies.
+	RoleSourceKind string `json:"role_source_kind"`
+	// Base registry provenance retained separately from any override.
 	RoleSourceURL string `json:"role_source_url"`
 	RoleSourceRetrievedAt string `json:"role_source_retrieved_at"`
 	RoleConfidence string `json:"role_confidence"`
 	RoleRecordVersion string `json:"role_record_version"`
+	// Effective manual-override provenance (present only when an override is
+	// applied to this participant's role).
+	OverrideApplied bool    `json:"override_applied"`
+	OverrideReason  *string `json:"override_reason,omitempty"`
+	OverrideAt      *string `json:"override_at,omitempty"`
 }
 
 // Team is the report view of one team.
@@ -55,6 +66,7 @@ type Report struct {
 	MatchID          string            `json:"match_id"`
 	Category         string            `json:"category"`
 	Status           string            `json:"status"`
+	Reason           string            `json:"reason,omitempty"`
 	Publication      string            `json:"publication_state"`
 	Verification     *archive.Verification `json:"verification"`
 	Identity         *identity.Identity `json:"identity"`
@@ -157,19 +169,30 @@ func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *
 			if roleReg == nil {
 				part.NominalRole = "unassigned"
 				part.RoleConfidence = "unavailable"
+				part.RoleSourceKind = "unavailable"
 				r.UnavailableReasons = append(r.UnavailableReasons, fmt.Sprintf("role:%s:registry_unavailable", p.AccountID))
 			} else if eff, ok := roleReg.Effective(matchID, p.AccountID, overrides); ok {
 				part.NominalRole = eff.NominalRole
 				part.TeamID = eff.TeamID
 				part.TeamName = eff.TeamName
-				part.RoleSource = eff.SourceKind
+				// Effective source: manual_override when applied, else base.
+				part.RoleSourceKind = eff.SourceKind
+				// Underlying registry provenance retained separately.
 				part.RoleSourceURL = eff.SourceURL
 				part.RoleSourceRetrievedAt = eff.RetrievedAt
 				part.RoleConfidence = eff.Confidence
 				part.RoleRecordVersion = eff.RecordVersion
+				// Effective manual-override provenance.
+				part.OverrideApplied = eff.OverrideApplied
+				part.OverrideReason = eff.OverrideReason
+				part.OverrideAt = eff.OverrideAt
+				if eff.OverrideApplied {
+					part.RoleSourceKind = "manual_override"
+				}
 			} else {
 				part.NominalRole = "unassigned"
 				part.RoleConfidence = "unavailable"
+				part.RoleSourceKind = "unavailable"
 				r.UnavailableReasons = append(r.UnavailableReasons, fmt.Sprintf("role:%s:no_registry_record", p.AccountID))
 			}
 			r.Participants = append(r.Participants, part)
@@ -182,40 +205,47 @@ func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *
 		}
 	}
 
-	// Terminal status derivation mirrors the store catalog logic.
-	r.Status, r.Publication = deriveStatus(r)
+	// Authoritative gated state: source gates plus the publication (role
+	// provenance) gate. The report never independently claims published; the
+	// runner persists this state and status.json is the single source of
+	// truth consumed by catalog and API.
+	r.Status, r.Publication, r.Reason = ComputeState(r)
 	sort.Strings(r.UnavailableReasons)
 	return r, nil
 }
 
-func deriveStatus(r *Report) (status, publication string) {
+// ComputeState derives the authoritative terminal status, publication, and
+// reason from the report's source gates and the role-provenance publication
+// gate. It is used by the runner, report build, and any consumer that needs
+// the gated state without re-deriving it independently.
+func ComputeState(r *Report) (status, publication, reason string) {
 	if r.Verification == nil {
-		return store.StatusMissing, "suppressed"
+		return store.StatusMissing, "suppressed", "verification_missing"
 	}
 	switch r.Verification.State {
 	case archive.StateMissing:
-		return store.StatusMissing, "suppressed"
+		return store.StatusMissing, "suppressed", r.Verification.Reason
 	case archive.StateCorrupt:
-		return store.StatusCorrupt, "suppressed"
+		return store.StatusCorrupt, "suppressed", r.Verification.Reason
 	case archive.StateParseFailed:
-		return store.StatusParseFailed, "suppressed"
+		return store.StatusParseFailed, "suppressed", r.Verification.Reason
 	}
 	if r.Verification.State != archive.StateVerified {
-		return store.StatusQuarantined, "suppressed"
+		return store.StatusQuarantined, "suppressed", "verification_" + r.Verification.Reason
 	}
 	if r.Identity == nil || r.Identity.State != identity.StateVerified {
-		return store.StatusQuarantined, "suppressed"
+		return store.StatusQuarantined, "suppressed", "identity_gate_not_verified"
 	}
 	if r.Clock == nil || r.Clock.State != clock.StateCalibrated {
-		return store.StatusQuarantined, "suppressed"
-	}
-	if r.Canonical == nil || r.Canonical.TreeSHA256 == "" {
-		return store.StatusQuarantined, "suppressed"
+		return store.StatusQuarantined, "suppressed", "clock_gate_not_calibrated"
 	}
 	if r.Phases == nil {
-		return store.StatusQuarantined, "suppressed"
+		return store.StatusQuarantined, "suppressed", "phases_missing"
 	}
-	return store.StatusVerified, "published"
+	if gate := r.PublicationGate(); !gate.OK {
+		return store.StatusQuarantined, "suppressed", "role_provenance_gate: " + strings.Join(gate.Reasons, "; ")
+	}
+	return store.StatusVerified, "published", "all_gates_pass"
 }
 
 // CanonicalJSON returns the deterministic encoding.
@@ -261,9 +291,31 @@ func (r *Report) PublicationGate() GateResult {
 			g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:invalid_or_missing(%s)", p.AccountID, p.NominalRole))
 			continue
 		}
-		if p.RoleSource == "" {
-			g.OK = false
-			g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:missing_source", p.AccountID))
+		// Effective source must be present. For an override, the source must
+		// be manual_override with a deterministic reason and timestamp.
+		if p.OverrideApplied {
+			if p.RoleSourceKind != "manual_override" {
+				g.OK = false
+				g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:override_source_must_be_manual_override", p.AccountID))
+			}
+			if p.OverrideReason == nil || *p.OverrideReason == "" {
+				g.OK = false
+				g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:override_reason_required", p.AccountID))
+			}
+			if p.OverrideAt == nil || *p.OverrideAt == "" {
+				g.OK = false
+				g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:override_timestamp_required", p.AccountID))
+			}
+			// Base registry provenance still required for audit.
+			if p.RoleSourceURL == "" || p.RoleSourceRetrievedAt == "" {
+				g.OK = false
+				g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:base_source_required", p.AccountID))
+			}
+		} else {
+			if p.RoleSourceKind == "" {
+				g.OK = false
+				g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:missing_source", p.AccountID))
+			}
 		}
 		if p.RoleConfidence == "" || p.RoleConfidence == "unavailable" {
 			g.OK = false

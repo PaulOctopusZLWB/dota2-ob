@@ -115,7 +115,7 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 	matchID := parts[0]
 	switch {
 	case len(parts) == 1:
-		rep, err := report.Build(s.Store, matchID, s.RoleReg, s.Overrides)
+		rep, err := s.loadReport(matchID)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "report_build_failed")
 			return
@@ -129,6 +129,24 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusNotFound, "not_found")
 	}
+}
+
+// loadReport returns the authoritative persisted report artifact when present.
+// The persisted report carries the gated status/reason written by the runner;
+// the API consumes that durable state rather than independently re-deriving
+// publication from source artifacts. The canonical record (written after the
+// report) is attached for display. Only when no persisted report exists (e.g.
+// pre-existing data root) does it fall back to a rebuild.
+func (s *Server) loadReport(matchID string) (*report.Report, error) {
+	var rep report.Report
+	if err := s.Store.ReadJSON(matchID, store.ArtifactReport, &rep); err == nil {
+		var can store.Canonical
+		if err := s.Store.ReadJSON(matchID, store.ArtifactCanonical, &can); err == nil {
+			rep.Canonical = &can
+		}
+		return &rep, nil
+	}
+	return report.Build(s.Store, matchID, s.RoleReg, s.Overrides)
 }
 
 // timeline merges the phase stream and episodes into one renderable timeline.
@@ -233,7 +251,7 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 		"matches":    []map[string]interface{}{},
 	}
 	for _, row := range cat.Matches {
-		rep, err := report.Build(s.Store, row.MatchID, s.RoleReg, s.Overrides)
+		rep, err := s.loadReport(row.MatchID)
 		if err != nil {
 			continue
 		}
@@ -245,7 +263,8 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 				"match_id": row.MatchID, "status": rep.Status, "publication": rep.Publication,
 				"team_id": p.TeamID, "team_name": p.TeamName, "side": p.Side,
 				"hero": p.HeroName, "nominal_role": p.NominalRole,
-				"role_source": p.RoleSource, "role_source_url": p.RoleSourceURL,
+				"role_source": p.RoleSourceKind, "role_source_url": p.RoleSourceURL,
+				"override_applied": p.OverrideApplied, "override_reason": p.OverrideReason, "override_at": p.OverrideAt,
 			}
 			if rep.Phases != nil {
 				entry["phase_intervals"] = len(rep.Phases.Intervals)
@@ -278,7 +297,7 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 		"matches": []map[string]interface{}{},
 	}
 	for _, row := range cat.Matches {
-		rep, err := report.Build(s.Store, row.MatchID, s.RoleReg, s.Overrides)
+		rep, err := s.loadReport(row.MatchID)
 		if err != nil {
 			continue
 		}

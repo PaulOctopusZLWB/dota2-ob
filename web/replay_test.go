@@ -120,6 +120,38 @@ func TestReplayMatchPageEscapesUntrustedValues(t *testing.T) {
 	}
 }
 
+// TestReplayMatchPageRendersOverrideProvenance verifies the match page renders
+// the effective manual-override provenance (source manual_override, reason,
+// timestamp) for an overridden role, escaped and with no raw interpolation.
+func TestReplayMatchPageRendersOverrideProvenance(t *testing.T) {
+	data, err := os.ReadFile("replay/match.html")
+	if err != nil {
+		t.Fatalf("read replay/match.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		"手动覆盖",
+		"p.override_applied",
+		"p.override_reason",
+		"p.override_at",
+		"esc(p.override_reason",
+		"esc(p.override_at",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay match page missing override-provenance marker %q", want)
+		}
+	}
+	// No raw override interpolation without escaping.
+	for _, forbidden := range []string{
+		`${p.override_reason}`,
+		`${p.override_at}`,
+	} {
+		if strings.Contains(html, forbidden) {
+			t.Fatalf("replay match page has unescaped override interpolation %q", forbidden)
+		}
+	}
+}
+
 // TestReplayCorpusPageEscapesRows verifies the corpus page does not embed
 // untrusted match/category strings into HTML without escaping.
 func TestReplayCorpusPageEscapesRows(t *testing.T) {

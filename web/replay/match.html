@@ -126,9 +126,12 @@ function render(r) {
 
   // 选手与角色
   let pt = `<div class="panel"><h3 style="margin-top:0">选手与名义角色</h3><table><thead><tr>
-    <th>槽位</th><th>选手</th><th>英雄</th><th>队伍</th><th>边</th><th>角色</th><th>角色来源</th><th>来源链接</th></tr></thead><tbody>`;
+    <th>槽位</th><th>选手</th><th>英雄</th><th>队伍</th><th>边</th><th>角色</th><th>角色来源</th><th>来源链接</th><th>手动覆盖</th></tr></thead><tbody>`;
   for (const p of (r.participants || [])) {
     const url = safeUrl(p.role_source_url);
+    const overrideCell = p.override_applied
+      ? `${esc(p.override_reason || "手动覆盖")}<span class="hint">@${esc(p.override_at || "")}</span>`
+      : "-";
     pt += `<tr>
       <td class="num">${esc(p.slot)}</td>
       <td>${esc(p.player_name)} <span class="hint">(${esc(p.account_id)})</span></td>
@@ -137,7 +140,8 @@ function render(r) {
       <td class="${p.side === 'radiant' ? 'ok' : p.side === 'dire' ? 'err' : ''}">${esc(p.side || "-")}</td>
       <td><span class="role">${esc(p.nominal_role || "?")}</span>${esc(p.role_confidence || "")}</td>
       <td class="hint">${esc(p.role_source_kind || p.role_source || "-")}</td>
-      <td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">来源</a>` : "-"}</td></tr>`;
+      <td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">来源</a>` : "-"}</td>
+      <td class="hint">${overrideCell}</td></tr>`;
   }
   pt += `</tbody></table></div>`;
   c.insertAdjacentHTML("beforeend", pt);

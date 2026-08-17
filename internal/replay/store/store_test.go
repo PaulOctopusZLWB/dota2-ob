@@ -1,9 +1,13 @@
 package store
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
 
 func TestWriteAtomic(t *testing.T) {
@@ -145,5 +149,74 @@ func TestDeriveStatusGates(t *testing.T) {
 	cat, _ = st.RebuildCatalog("t")
 	if cat.Matches[0].Status != StatusCorrupt && cat.Matches[0].Status != StatusQuarantined {
 		t.Fatalf("status=%s", cat.Matches[0].Status)
+	}
+}
+
+// TestHashFileStreamLarge proves hashing is streaming and bounded: a large
+// artifact is hashed correctly without whole-file reads, and matches a
+// reference SHA-256 computed in chunks.
+func TestHashFileStreamLarge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.bin")
+	// 8 MiB of deterministic bytes (larger than the 64 KiB buffer).
+	data := make([]byte, 8<<20)
+	for i := range data {
+		data[i] = byte(i * 31)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := hashFileStream(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reference: whole-file hash.
+	h := sha256.Sum256(data)
+	want := fmt.Sprintf("%x", h)
+	if got != want {
+		t.Fatalf("streaming hash mismatch: got %s want %s", got, want)
+	}
+}
+
+// TestStatusConsumedByCatalog proves the catalog consumes the authoritative
+// gated status record: a persisted quarantine stays quarantined/suppressed in
+// the catalog even when source artifacts would otherwise derive published.
+func TestStatusConsumedByCatalog(t *testing.T) {
+	root := t.TempDir()
+	st, _ := New(root)
+	// Write source artifacts that would derive published...
+	st.WriteJSON("m1", ArtifactVerification, map[string]string{"state": "verified", "reason": "ok"})
+	st.WriteJSON("m1", ArtifactIdentity, map[string]string{"state": "verified"})
+	st.WriteJSON("m1", ArtifactClock, map[string]interface{}{"state": "calibrated"})
+	st.WriteJSON("m1", ArtifactCanonical, map[string]interface{}{"tree_sha256": "abc", "schema_version": version.ReportSchema})
+	// ...but the authoritative status record says quarantined (role gate).
+	st.WriteStatus("m1", &StatusRecord{
+		SchemaVersion: StatusSchema, MatchID: "m1", Status: StatusQuarantined,
+		Publication: "suppressed", Reason: "role_provenance_gate: missing",
+	})
+	cat, err := st.RebuildCatalog("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Matches) != 1 {
+		t.Fatalf("matches=%d", len(cat.Matches))
+	}
+	if cat.Matches[0].Status != StatusQuarantined || cat.Matches[0].Publication != "suppressed" {
+		t.Fatalf("catalog=%+v want quarantined/suppressed", cat.Matches[0])
+	}
+	if cat.Matches[0].Reason == "" {
+		t.Fatal("catalog missing quarantine reason")
+	}
+	// A verified status record flips the catalog to verified/published.
+	st.WriteStatus("m1", &StatusRecord{
+		SchemaVersion: StatusSchema, MatchID: "m1", Status: StatusVerified,
+		Publication: "published", Reason: "all_gates_pass",
+	})
+	cat, err = st.RebuildCatalog("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Matches[0].Status != StatusVerified || cat.Matches[0].Publication != "published" {
+		t.Fatalf("catalog=%+v want verified/published", cat.Matches[0])
 	}
 }

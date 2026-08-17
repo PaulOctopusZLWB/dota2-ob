@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,6 +33,7 @@ const (
 	ArtifactPhases       = "phases.json"
 	ArtifactMetrics      = "metrics.json"
 	ArtifactReport       = "report.json"
+	ArtifactStatus       = "status.json"
 	ArtifactCanonical    = "canonical.json"
 )
 
@@ -120,7 +122,10 @@ const (
 	StatusSchema = "replay.status.v1"
 )
 
-// StatusRecord is the persisted per-match terminal status.
+// StatusRecord is the persisted per-match terminal status. It is part of the
+// canonical completion tree, so it must be byte-identical across unchanged
+// reruns: it carries no wall-clock timestamp (audit timestamps live in the
+// operator run logs, not in the content-addressed artifact).
 type StatusRecord struct {
 	SchemaVersion string   `json:"schema_version"`
 	MatchID       string   `json:"match_id"`
@@ -132,14 +137,41 @@ type StatusRecord struct {
 	Publication   string   `json:"publication_state"`
 	Reason        string   `json:"reason"`
 	Mismatches    []string `json:"mismatches,omitempty"`
-	UpdatedAt     string   `json:"updated_at"`
+	DurationSec   *float64 `json:"duration_seconds,omitempty"`
+	GameStartUnix *int64   `json:"game_start_unix,omitempty"`
+	// InputHash is the version-complete resume fingerprint hash; it lets a
+	// durable terminal state (e.g. quarantined) be resumed only for the same
+	// unchanged input.
+	InputHash string `json:"input_hash,omitempty"`
+}
+
+// WriteStatus atomically persists the authoritative terminal state for a
+// match. This record is the single source of truth for report/catalog/API
+// status; it is written only after the publication gate is evaluated.
+func (s *Store) WriteStatus(matchID string, sr *StatusRecord) error {
+	return s.WriteJSON(matchID, ArtifactStatus, sr)
+}
+
+// ReadStatus loads the persisted authoritative terminal state for a match.
+// os.ErrNotExist is returned when no status has been recorded yet.
+func (s *Store) ReadStatus(matchID string) (*StatusRecord, error) {
+	var sr StatusRecord
+	if err := s.ReadJSON(matchID, ArtifactStatus, &sr); err != nil {
+		return nil, err
+	}
+	return &sr, nil
+}
+
+// StatusExists reports whether an authoritative status record exists.
+func (s *Store) StatusExists(matchID string) bool {
+	_, err := s.ReadStatus(matchID)
+	return err == nil
 }
 
 // WriteAtomic writes data to path via a temporary file and atomic rename.
 // The file is fsynced before promotion so an interrupted run never observes a
 // partial artifact as canonical.
-func WriteAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
+func WriteAtomic(path string, data []byte) error {	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
@@ -355,7 +387,8 @@ func (s *Store) ValidateCanonical(matchID string, fp InputFingerprint, expected 
 		}
 	}
 
-	// Re-hash every recorded file and recompute the tree hash.
+	// Re-hash every recorded file (streaming, bounded memory) and recompute
+	// the tree hash.
 	entries := map[string]string{}
 	h := sha256.New()
 	names := make([]string, 0, len(c.Files))
@@ -365,12 +398,10 @@ func (s *Store) ValidateCanonical(matchID string, fp InputFingerprint, expected 
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(s.MatchDir(matchID), name)
-		b, err := os.ReadFile(path)
+		got, err := hashFileStream(path)
 		if err != nil {
 			return nil, &IntegrityError{MatchID: matchID, Reason: fmt.Sprintf("artifact_missing_%s", name)}
 		}
-		fh := sha256.Sum256(b)
-		got := hex.EncodeToString(fh[:])
 		if got != c.Files[name] {
 			return nil, &IntegrityError{MatchID: matchID, Reason: fmt.Sprintf("artifact_hash_mismatch_%s", name)}
 		}
@@ -405,8 +436,27 @@ func (s *Store) InvalidateCanonical(matchID string) error {
 	return nil
 }
 
+// hashFileStream computes the SHA-256 of a file through a fixed-size buffer
+// (64 KiB) so memory usage is bounded regardless of artifact size. Never loads
+// the whole file into memory.
+func hashFileStream(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	buf := make([]byte, 64*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // WriteCanonical computes the artifact-tree hash over the persisted artifact
-// files and writes the canonical record.
+// files (streaming, bounded memory) and writes the canonical record. It must
+// be called only after every completion artifact (including report.json and
+// status.json) is durably in place; the marker is the terminal publish gate.
 func (s *Store) WriteCanonical(matchID string, fp InputFingerprint, artifacts []string) (*Canonical, error) {
 	dir := s.MatchDir(matchID)
 	entries := map[string]string{}
@@ -415,13 +465,12 @@ func (s *Store) WriteCanonical(matchID string, fp InputFingerprint, artifacts []
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(dir, name)
-		b, err := os.ReadFile(path)
+		got, err := hashFileStream(path)
 		if err != nil {
 			return nil, fmt.Errorf("store: canonical read %s: %w", name, err)
 		}
-		fh := sha256.Sum256(b)
-		entries[name] = hex.EncodeToString(fh[:])
-		fmt.Fprintf(h, "%s\x00%s\x00", name, entries[name])
+		entries[name] = got
+		fmt.Fprintf(h, "%s\x00%s\x00", name, got)
 	}
 	tree := hex.EncodeToString(h.Sum(nil))
 	c := &Canonical{
@@ -495,6 +544,26 @@ func (s *Store) RebuildCatalog(now string) (*Catalog, error) {
 
 func (s *Store) catalogRow(matchID string) CatalogRow {
 	row := CatalogRow{MatchID: matchID}
+	// Authoritative gated state: prefer the persisted status record written
+	// after the publication gate. It is the single source of truth for
+	// terminal status and publication; derivation is only a fallback for
+	// matches that predate status persistence.
+	if sr, err := s.ReadStatus(matchID); err == nil && sr.Status != "" {
+		row.Status = sr.Status
+		row.Publication = sr.Publication
+		row.Reason = sr.Reason
+		var can Canonical
+		if err := s.ReadJSON(matchID, ArtifactCanonical, &can); err == nil {
+			row.TreeSHA256 = can.TreeSHA256
+		}
+		if sr.DurationSec != nil {
+			row.DurationSec = sr.DurationSec
+		}
+		if sr.GameStartUnix != nil {
+			row.GameStartUnix = sr.GameStartUnix
+		}
+		return row
+	}
 	var ver struct {
 		State  string `json:"state"`
 		Reason string `json:"reason"`

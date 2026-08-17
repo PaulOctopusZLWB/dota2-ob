@@ -6,6 +6,7 @@
 package runner
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ type MatchResult struct {
 	MatchID string
 	Status  string
 	Reason  string
+	Publication string
 	// Canonical tree hash when the match completed a verified artifact tree.
 	TreeSHA256 string
 	Elapsed    time.Duration
@@ -73,11 +75,16 @@ type Options struct {
 
 // RunMatch executes the full pipeline for one manifest entry. replayRoot is
 // the corpus root; st is the store; opts carries role provenance inputs.
-// parseStage is the parse adapter (nil uses the manta-backed default). A
-// completed match resumes only after the complete canonical tree validates:
-// every recorded artifact must exist and match its SHA-256 and the tree hash
-// must recompute identically. Any integrity mismatch invalidates the marker
-// and rebuilds the match (fail closed on rebuild failure).
+// parseStage is the parse adapter (nil uses the manta-backed default).
+//
+// Completion is a single durable fail-closed state transition: the canonical
+// marker is written only AFTER report.json and status.json (the authoritative
+// gated state) are durably in place, and it covers the complete output tree
+// (source artifacts + report + status). Resume validates that full tree and
+// consumes the persisted status: a verified match resumes verified, a
+// quarantined match resumes quarantined, and a missing/corrupt report or
+// status record (or any other integrity mismatch) invalidates the marker and
+// rebuilds. A quarantine or interruption can never become verified on rerun.
 func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Options, parseStage ParseStage, progress ProgressFn) (*MatchResult, error) {
 	if parseStage == nil {
 		parseStage = DefaultParseStage
@@ -89,14 +96,34 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 	}
 
 	fp := store.Fingerprint(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID, opts.RoleRegistrySHA256, opts.RoleOverridesSHA256)
-	expected := sourceArtifacts()
+	expected := completionArtifacts()
 	if can, err := st.ValidateCanonical(mt.MatchID, fp, expected); err == nil {
-		res.Status = store.StatusVerified
-		res.Reason = "resumed_completed_match"
-		res.TreeSHA256 = can.TreeSHA256
-		res.Elapsed = time.Since(t0)
-		progress(fmt.Sprintf("match %s: resumed (canonical %s)", mt.MatchID, can.TreeSHA256))
-		return res, nil
+		// Consume the authoritative persisted gated state.
+		if sr, rerr := st.ReadStatus(mt.MatchID); rerr == nil && sr.Status == store.StatusVerified {
+			res.Status = store.StatusVerified
+			res.Publication = "published"
+			res.Reason = "resumed_completed_match"
+			res.TreeSHA256 = can.TreeSHA256
+			res.Elapsed = time.Since(t0)
+			progress(fmt.Sprintf("match %s: resumed verified (canonical %s)", mt.MatchID, can.TreeSHA256))
+			return res, nil
+		}
+		// A valid tree whose persisted status is not verified must NOT resume
+		// as verified: preserve the durable quarantine/terminal state.
+		if sr, rerr := st.ReadStatus(mt.MatchID); rerr == nil && sr.Status != "" {
+			res.Status = sr.Status
+			res.Publication = sr.Publication
+			if res.Publication == "" {
+				res.Publication = "suppressed"
+			}
+			res.Reason = "resumed_" + sr.Status + ": " + sr.Reason
+			res.TreeSHA256 = can.TreeSHA256
+			res.Elapsed = time.Since(t0)
+			progress(fmt.Sprintf("match %s: resumed %s (%s)", mt.MatchID, sr.Status, sr.Reason))
+			return res, nil
+		}
+		// Valid canonical but no status record: incomplete completion; rebuild.
+		progress(fmt.Sprintf("match %s: canonical valid but no status; rebuilding", mt.MatchID))
 	} else {
 		var ie *store.IntegrityError
 		if errors.As(err, &ie) {
@@ -139,7 +166,9 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 			res.Status = store.StatusMissing
 		}
 		res.Reason = ver.Reason
+		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
+		_ = writeTerminalStatus(st, res, fp)
 		progress(fmt.Sprintf("match %s: terminal %s (%s)", mt.MatchID, res.Status, ver.Reason))
 		return res, nil
 	}
@@ -153,7 +182,9 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		_ = st.WriteJSON(mt.MatchID, store.ArtifactRawMeta, rawErr)
 		res.Status = store.StatusParseFailed
 		res.Reason = err.Error()
+		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
+		_ = writeTerminalStatus(st, res, fp)
 		progress(fmt.Sprintf("match %s: parse failed: %v", mt.MatchID, err))
 		return res, nil
 	}
@@ -182,7 +213,9 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 	if idn.State != identity.StateVerified {
 		res.Status = store.StatusQuarantined
 		res.Reason = "identity_" + idn.Reason
+		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
+		_ = writeTerminalStatus(st, res, fp)
 		progress(fmt.Sprintf("match %s: quarantined identity (%s)", mt.MatchID, idn.Reason))
 		return res, nil
 	}
@@ -206,7 +239,9 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 	if clk.State != clock.StateCalibrated {
 		res.Status = store.StatusQuarantined
 		res.Reason = "clock_" + clk.Reason
+		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
+		_ = writeTerminalStatus(st, res, fp)
 		progress(fmt.Sprintf("match %s: quarantined clock (%s)", mt.MatchID, clk.Reason))
 		return res, nil
 	}
@@ -258,14 +293,12 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		return nil, err
 	}
 
-	// Stage 6: canonical tree over the recomputable source artifacts, then the
-	// report (a derived view that reads the canonical from disk).
-	progress(fmt.Sprintf("match %s: writing canonical artifact tree", mt.MatchID))
-	sourceArtifacts := sourceArtifacts()
-	can, err := st.WriteCanonical(mt.MatchID, fp, sourceArtifacts)
-	if err != nil {
-		return nil, err
-	}
+	// Stage 6: authoritative gated state. Build the report (which evaluates
+	// the role-provenance publication gate), persist report.json and
+	// status.json, and only then write the canonical marker over the complete
+	// output tree (source + report + status). A quarantine or an interrupted
+	// report/gate stage therefore never leaves a resumable verified marker.
+	progress(fmt.Sprintf("match %s: evaluating publication gate + persisting report/status", mt.MatchID))
 	rep, err := report.Build(st, mt.MatchID, opts.RoleRegistry, opts.Overrides)
 	if err != nil {
 		return nil, fmt.Errorf("runner: report: %w", err)
@@ -274,29 +307,50 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 	if err := st.WriteJSON(mt.MatchID, store.ArtifactReport, rep); err != nil {
 		return nil, err
 	}
-	// Role provenance gate: a publishable match must expose exactly ten
-	// identity-bound participants, each with a valid nominal role and source
-	// provenance. Missing/invalid role data quarantines and suppresses
-	// publication with an explicit auditable reason (never a silent skip).
-	if gate := rep.PublicationGate(); !gate.OK {
-		res.Status = store.StatusQuarantined
-		res.Reason = "role_provenance_gate: " + strings.Join(gate.Reasons, "; ")
-		res.Elapsed = time.Since(t0)
-		progress(fmt.Sprintf("match %s: quarantined role provenance (%s)", mt.MatchID, res.Reason))
-		return res, nil
+	res.Status, res.Publication, res.Reason = rep.Status, rep.Publication, rep.Reason
+	sr := &store.StatusRecord{
+		SchemaVersion: store.StatusSchema,
+		MatchID:       mt.MatchID,
+		Status:        res.Status,
+		Publication:   res.Publication,
+		Reason:        res.Reason,
+		InputHash:     fpHash(fp),
 	}
-	res.Status = store.StatusVerified
-	res.Reason = "all_stages_complete"
+	if clk2 := rep.Clock; clk2 != nil {
+		sr.ClockState = clk2.State
+		sr.DurationSec = clk2.GameDurationSeconds
+		sr.GameStartUnix = clk2.GameStartUnix
+	}
+	if idn2 := rep.Identity; idn2 != nil {
+		sr.IdentityState = idn2.State
+	}
+	if ver := rep.Verification; ver != nil {
+		sr.ArchiveState = ver.State
+	}
+	if err := st.WriteStatus(mt.MatchID, sr); err != nil {
+		return nil, err
+	}
+
+	// Canonical marker covers the complete output tree; write it last so an
+	// interrupted run has no valid marker to resume as verified.
+	completion := completionArtifacts()
+	can, err := st.WriteCanonical(mt.MatchID, fp, completion)
+	if err != nil {
+		return nil, err
+	}
 	res.TreeSHA256 = can.TreeSHA256
 	res.Elapsed = time.Since(t0)
-	res.OutputBytes = outputBytes(st, mt.MatchID, append(sourceArtifacts, store.ArtifactReport))
-	progress(fmt.Sprintf("match %s: verified (canonical %s, %s, %.1f MiB output, %.1fs)",
-		mt.MatchID, can.TreeSHA256, metOut.Summary(), float64(res.OutputBytes)/(1<<20), res.Elapsed.Seconds()))
+	res.OutputBytes = outputBytes(st, mt.MatchID, completion)
+	if res.Status == store.StatusVerified {
+		progress(fmt.Sprintf("match %s: verified (canonical %s, %s, %.1f MiB output, %.1fs)",
+			mt.MatchID, can.TreeSHA256, metOut.Summary(), float64(res.OutputBytes)/(1<<20), res.Elapsed.Seconds()))
+	} else {
+		progress(fmt.Sprintf("match %s: quarantined (canonical %s, reason: %s)", mt.MatchID, can.TreeSHA256, res.Reason))
+	}
 	return res, nil
 }
 
-// sourceArtifacts returns the recomputable source artifact set covered by the
-// canonical tree (the report is a derived view and is not part of the tree).
+// sourceArtifacts returns the recomputable source artifact set.
 func sourceArtifacts() []string {
 	return []string{
 		store.ArtifactInput, store.ArtifactVerification, store.ArtifactRaw,
@@ -304,6 +358,37 @@ func sourceArtifacts() []string {
 		store.ArtifactFacts, store.ArtifactFactsSummary, store.ArtifactEpisodes,
 		store.ArtifactPhases, store.ArtifactMetrics,
 	}
+}
+
+// completionArtifacts returns the complete output tree covered by the
+// canonical marker: source artifacts plus the report and the authoritative
+// status record. A valid resume therefore requires the report and status to be
+// present and uncorrupted.
+func completionArtifacts() []string {
+	return append(sourceArtifacts(), store.ArtifactReport, store.ArtifactStatus)
+}
+
+// fpHash produces a deterministic short hash of the version-complete
+// fingerprint for the status record.
+func fpHash(fp store.InputFingerprint) string {
+	b, _ := json.Marshal(fp)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h[:8])
+}
+
+// writeTerminalStatus durably persists the terminal state for the early-fail
+// paths (verify/parse/identity/clock) so quarantine/interruption states are
+// recorded authoritatively and can never be resumed as verified.
+func writeTerminalStatus(st *store.Store, res *MatchResult, fp store.InputFingerprint) error {
+	sr := &store.StatusRecord{
+		SchemaVersion: store.StatusSchema,
+		MatchID:       res.MatchID,
+		Status:        res.Status,
+		Publication:   "suppressed",
+		Reason:        res.Reason,
+		InputHash:     fpHash(fp),
+	}
+	return st.WriteStatus(res.MatchID, sr)
 }
 
 type rawMetaPayload struct {
@@ -608,25 +693,6 @@ func RunBatch(st *store.Store, matches []*archive.Match, replayRoot string, opts
 		<-done
 	}
 	return results
-}
-
-// WriteStatusRecords persists a status record per match (used by CLI for
-// explicit terminal reporting).
-func WriteStatusRecords(st *store.Store, results []*MatchResult) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, r := range results {
-		sr := &store.StatusRecord{
-			SchemaVersion: store.StatusSchema,
-			MatchID:       r.MatchID,
-			Status:        r.Status,
-			Reason:        r.Reason,
-			UpdatedAt:     now,
-		}
-		if err := st.WriteJSON(r.MatchID, "status.json", sr); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // SummarizeResults returns a deterministic multi-line summary of a batch.

@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
@@ -17,14 +19,29 @@ func testStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a verified match artifact tree.
+	// Simulate a verified match artifact tree with ten identity-bound
+	// participants (5 radiant, 5 dire).
+	parts := []map[string]interface{}{}
+	for i := 0; i < 10; i++ {
+		side := "radiant"
+		team := int32(2)
+		if i >= 5 {
+			side = "dire"
+			team = 3
+		}
+		parts = append(parts, map[string]interface{}{
+			"slot": i, "account_id": fmt.Sprintf("%d", 1000+i), "player_name": fmt.Sprintf("p%d", i),
+			"hero_name": "npc_dota_hero_kez", "hero_id": 145, "side": side, "team": team,
+		})
+	}
 	st.WriteJSON("m1", store.ArtifactVerification, map[string]string{"state": "verified", "reason": "ok"})
 	st.WriteJSON("m1", store.ArtifactIdentity, map[string]interface{}{
 		"state": "verified", "match_id": "m1",
-		"participants": []map[string]interface{}{
-			{"slot": 0, "account_id": "1000", "player_name": "p1", "hero_name": "npc_dota_hero_kez", "hero_id": 145, "side": "radiant"},
+		"participants": parts,
+		"teams": []map[string]interface{}{
+			{"team_id": "T1", "team_name": "Team One", "side": "radiant"},
+			{"team_id": "T2", "team_name": "Team Two", "side": "dire"},
 		},
-		"teams": []map[string]interface{}{{"team_id": "T1", "team_name": "Team One", "side": "radiant"}},
 	})
 	st.WriteJSON("m1", store.ArtifactClock, map[string]interface{}{"state": "calibrated", "game_duration_seconds": 100})
 	st.WriteJSON("m1", store.ArtifactFactsSummary, map[string]interface{}{"families": []interface{}{}})
@@ -43,6 +60,12 @@ func testStore(t *testing.T) *store.Store {
 	st.WriteJSON("m1", store.ArtifactCanonical, map[string]interface{}{
 		"schema_version": "replay.report.v1", "tree_sha256": "abc123", "input_fingerprint": map[string]interface{}{"match_id": "m1"},
 	})
+	// Authoritative gated status: verified/published (all gates pass).
+	st.WriteStatus("m1", &store.StatusRecord{
+		SchemaVersion: store.StatusSchema, MatchID: "m1", Status: store.StatusVerified,
+		Publication: "published", Reason: "all_gates_pass", ArchiveState: "verified",
+		IdentityState: "verified", ClockState: "calibrated",
+	})
 	if _, err := st.RebuildCatalog("2026-08-17T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
@@ -53,12 +76,28 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	st := testStore(t)
 	reg := &roles.Registry{SchemaVersion: "ti2026.roles.v1", TournamentID: "ti2026", Matches: []roles.RoleMatch{{
-		MatchID: "m1", Teams: []roles.RoleTeam{{
-			TeamID: "T1", TeamName: "Team One", Side: "radiant",
-			SourceKind: "reliable_public_database", SourceURL: "https://example.com", RetrievedAt: "2026-08-17T00:00:00Z",
-			Participants: []roles.RoleRecord{{AccountID: "1000", NominalRole: "1", RoleConfidence: "high"}},
-		}},
+		MatchID: "m1", Teams: []roles.RoleTeam{
+			{
+				TeamID: "T1", TeamName: "Team One", Side: "radiant",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com", RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+			{
+				TeamID: "T2", TeamName: "Team Two", Side: "dire",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com", RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+		},
 	}}}
+	rolesList := []string{"1", "2", "3", "4", "5"}
+	for i := 0; i < 5; i++ {
+		reg.Matches[0].Teams[0].Participants = append(reg.Matches[0].Teams[0].Participants, roles.RoleRecord{
+			AccountID: fmt.Sprintf("%d", 1000+i), NominalRole: rolesList[i], RoleConfidence: "high",
+		})
+	}
+	for i := 0; i < 5; i++ {
+		reg.Matches[0].Teams[1].Participants = append(reg.Matches[0].Teams[1].Participants, roles.RoleRecord{
+			AccountID: fmt.Sprintf("%d", 1005+i), NominalRole: rolesList[i], RoleConfidence: "high",
+		})
+	}
 	srv := New(st, reg, nil, "")
 	ts := httptest.NewServer(srv.Handler())
 	return srv, ts
@@ -121,7 +160,7 @@ func TestEndpoints(t *testing.T) {
 	if report.Data.Status != store.StatusVerified || report.Data.Publication != "published" {
 		t.Fatalf("match status=%s pub=%s", report.Data.Status, report.Data.Publication)
 	}
-	if len(report.Data.Participants) != 1 {
+	if len(report.Data.Participants) != 10 {
 		t.Fatalf("participants=%d", len(report.Data.Participants))
 	}
 	p := report.Data.Participants[0]
@@ -195,6 +234,65 @@ func TestEndpoints(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("POST matches status=%d", resp.StatusCode)
+	}
+}
+
+// TestQuarantinedMatchConsumesAuthoritativeState proves the API does NOT
+// independently re-derive published: a match whose persisted status is
+// quarantined stays quarantined/suppressed (with reason) in the API even when
+// its source artifacts would otherwise look publishable.
+func TestQuarantinedMatchConsumesAuthoritativeState(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same source-artifact set as a publishable match...
+	st.WriteJSON("q1", store.ArtifactVerification, map[string]string{"state": "verified", "reason": "ok"})
+	st.WriteJSON("q1", store.ArtifactIdentity, map[string]interface{}{
+		"state": "verified", "match_id": "q1", "participants": []interface{}{},
+	})
+	st.WriteJSON("q1", store.ArtifactClock, map[string]interface{}{"state": "calibrated", "game_duration_seconds": 100})
+	st.WriteJSON("q1", store.ArtifactPhases, map[string]interface{}{"state": "complete", "intervals": []interface{}{}})
+	// ...but the authoritative gated status is quarantined.
+	st.WriteStatus("q1", &store.StatusRecord{
+		SchemaVersion: store.StatusSchema, MatchID: "q1", Status: store.StatusQuarantined,
+		Publication: "suppressed", Reason: "role_provenance_gate: participants=0_want_10",
+	})
+	if _, err := st.RebuildCatalog("t"); err != nil {
+		t.Fatal(err)
+	}
+	reg := &roles.Registry{SchemaVersion: "ti2026.roles.v1", TournamentID: "ti2026"}
+	srv := New(st, reg, nil, "")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	var report struct {
+		Data struct {
+			Status      string `json:"status"`
+			Publication string `json:"publication_state"`
+			Reason      string `json:"reason"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/matches/q1", &report); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	if report.Data.Status != store.StatusQuarantined || report.Data.Publication != "suppressed" {
+		t.Fatalf("api status=%s pub=%s want quarantined/suppressed", report.Data.Status, report.Data.Publication)
+	}
+	if !strings.Contains(report.Data.Reason, "role_provenance_gate") {
+		t.Fatalf("api reason=%q", report.Data.Reason)
+	}
+	// Corpus/matches views must also report quarantined.
+	var corpus struct {
+		Data struct {
+			Matches []store.CatalogRow `json:"matches"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/corpus", &corpus); code != 200 {
+		t.Fatalf("corpus status %d", code)
+	}
+	if len(corpus.Data.Matches) != 1 || corpus.Data.Matches[0].Status != store.StatusQuarantined {
+		t.Fatalf("corpus=%+v want quarantined", corpus.Data.Matches)
 	}
 }
 
