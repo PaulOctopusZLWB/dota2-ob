@@ -22,10 +22,11 @@ import (
 )
 
 type PreflightConfig struct {
-	DataRoot string
-	RepoRoot string
-	Width    int
-	Height   int
+	DataRoot       string
+	RepoRoot       string
+	Width          int
+	Height         int
+	Classification RunClassificationV1
 }
 
 type commandResult struct {
@@ -34,6 +35,12 @@ type commandResult struct {
 }
 
 func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
+	if err := config.Classification.Validate(); err != nil {
+		return Readiness{}, err
+	}
+	if _, err := EmbeddedAuthorityRoot(); err != nil {
+		return Readiness{}, err
+	}
 	repo, err := filepath.Abs(config.RepoRoot)
 	if err != nil {
 		return Readiness{}, err
@@ -57,15 +64,22 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	}
 	artifacts = append(artifacts, policyArtifacts...)
 	evidence := Evidence{
-		SchemaVersion: SchemaVersion, Mode: "preflight", AcceptedBase: AcceptedFunctionalBase, AcceptedSpec: AcceptedP4Spec,
+		SchemaVersion: config.Classification.evidenceSchema(), Mode: "preflight", AcceptedBase: AcceptedFunctionalBase, AcceptedSpec: AcceptedP4Spec,
 		FixtureSHA256: CapturedScheduleSHA256, GoldenSHA256: ProductionGoldenSHA256, Bounds: AcceptedBounds(),
 		Faults: append([]string(nil), RequiredFaults...), Artifacts: artifacts,
 		StartBoundary:     "capture health, operator endpoint, overlay endpoint, isolated OBS preview, and recording are armed before the first accepted game-clock sample",
 		GameZeroBoundary:  "first accepted map.clock_time >= 0 after an accepted negative pre-game clock; missing negative clock is a late join",
 		PostGameBoundary:  "accepted GSI map.game_state equals a normal post-game terminal state and raw/projected/policy identities reconcile",
 		RecordingBoundary: "OBS reports recording stop and finalized MKV exists, is non-empty, and has no active partial file",
-		OperatorScript:    HumanInstruction, NonResumable: true, SyntheticOnly: true, ClaimsP4: false, ReadinessIssueText: HumanInstruction,
+		OperatorScript:    config.Classification.instruction(), NonResumable: true, SyntheticOnly: true, ClaimsP4: false, ReadinessIssueText: config.Classification.instruction(),
 		LocalhostGSI: LocalhostGSITrustEvidence{PerRequestAttested: false, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}},
+		RunPurpose:   config.Classification.Purpose, MatchClass: config.Classification.Class, RootDomain: config.Classification.rootDomain(),
+		QualifyingMatch: false, AcceptanceEligible: false, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256,
+	}
+	if config.Classification.Purpose == PurposePublicMatchRehearsal {
+		evidence.AcceptanceGate = "none"
+	} else {
+		evidence.AcceptanceGate = "manual_dot70_after_review"
 	}
 	add := func(id string, passed bool, detail string) {
 		evidence.Checks = append(evidence.Checks, Check{ID: id, Passed: passed, Detail: detail})
@@ -121,9 +135,9 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 		logPath := filepath.Join(root, "evidence/logs", command.id+".log")
 		var result commandResult
 		if command.lockedInstall {
-			result = runLockedInstall(ctx, command.dir, logPath)
+			result = withVerificationProgress(command.id, func() commandResult { return runLockedInstall(ctx, command.dir, logPath) })
 		} else {
-			result = runLogged(ctx, command.dir, logPath, command.name, command.args...)
+			result = withVerificationProgress(command.id, func() commandResult { return runLogged(ctx, command.dir, logPath, command.name, command.args...) })
 		}
 		add(command.id, result.err == nil, "exit status recorded in noncanonical run log")
 	}
@@ -187,7 +201,7 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	add("secret_generated_scan", secretErr == nil, "tracked secret and generated/private-data scan")
 	status, statusErr = runText(ctx, repo, "git", "status", "--porcelain=v1", "--untracked-files=all")
 	add("clean_tree_final", statusErr == nil && status == "", "repository remains clean after complete matrix")
-	identity, identityEvidence, identityDiagnostics, identityErr := identityCollector.complete(ctx, repo, binary, env, identityStart)
+	identity, identityEvidence, identityDiagnostics, identityErr := identityCollector.completeForClassification(ctx, repo, binary, env, identityStart, config.Classification)
 	evidence.CandidateIdentityEvidence = identityEvidence
 	if len(identityDiagnostics) != 0 {
 		diagnosticPayload := []byte(strings.TrimSpace(strings.Join(identityDiagnostics, "\n---\n")) + "\n")
@@ -209,7 +223,11 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 	}
 	evidence.Artifacts = append(evidence.Artifacts, logArtifacts...)
 	sortEvidence(&evidence)
-	indexPayload, marshalErr := canonical(evidence)
+	var indexContract any = evidence
+	if config.Classification.Purpose == PurposePublicMatchRehearsal {
+		indexContract = PublicMatchRehearsalEvidenceV1{Evidence: evidence, RehearsalContractVersion: rehearsalContractV1, AcceptanceChecks: rehearsalAcceptanceChecks(), SuppressionAudits: rehearsalSuppressionAudits()}
+	}
+	indexPayload, marshalErr := canonical(indexContract)
 	if marshalErr != nil {
 		return Readiness{}, marshalErr
 	}
@@ -224,11 +242,30 @@ func Preflight(ctx context.Context, config PreflightConfig) (Readiness, error) {
 		}
 	}
 	identitySHA, _ := candidateIdentitySHA(evidence.CandidateIdentity)
-	readiness := Readiness{SchemaVersion: ReadinessSchemaVersion, Ready: len(failures) == 0, Mode: "preflight", CandidateCommit: head, CandidateIdentitySHA256: identitySHA, EnvironmentSHA256: evidence.CandidateIdentity.EnvironmentSHA256, EvidenceIndexSHA256: payloadSHA(indexPayload), Failures: failures, ClaimsP4: false, HumanInstruction: HumanInstruction}
-	if err := writeJSON(filepath.Join(root, "evidence/readiness.json"), readiness, 0o600); err != nil {
+	readiness := Readiness{SchemaVersion: config.Classification.readinessSchema(), Ready: len(failures) == 0, Mode: "preflight", CandidateCommit: head, CandidateIdentitySHA256: identitySHA, EnvironmentSHA256: evidence.CandidateIdentity.EnvironmentSHA256, EvidenceIndexSHA256: payloadSHA(indexPayload), Failures: failures, ClaimsP4: false, HumanInstruction: config.Classification.instruction(), RunPurpose: config.Classification.Purpose, MatchClass: config.Classification.Class, RootDomain: config.Classification.rootDomain(), QualifyingMatch: false, AcceptanceEligible: false, AcceptanceGate: evidence.AcceptanceGate, ConsoleState: config.Classification.consoleState()}
+	var readinessContract any = readiness
+	if config.Classification.Purpose == PurposePublicMatchRehearsal {
+		readinessContract = PublicMatchRehearsalReadinessV1{Readiness: readiness, RehearsalContractVersion: rehearsalContractV1}
+	}
+	if err := writeJSON(filepath.Join(root, "evidence/readiness.json"), readinessContract, 0o600); err != nil {
 		return Readiness{}, err
 	}
 	return readiness, nil
+}
+
+func withVerificationProgress(id string, operation func() commandResult) commandResult {
+	done := make(chan commandResult, 1)
+	go func() { done <- operation() }()
+	ticker := time.NewTicker(55 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-done:
+			return result
+		case <-ticker.C:
+			_, _ = fmt.Fprintf(os.Stderr, "verification_progress check=%s state=running\n", id)
+		}
+	}
 }
 
 func runText(ctx context.Context, dir, name string, args ...string) (string, error) {

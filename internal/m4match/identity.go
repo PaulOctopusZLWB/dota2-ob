@@ -60,9 +60,13 @@ func environmentIdentity(environment Environment) (string, error) {
 }
 
 func currentCandidateIdentity(ctx context.Context, repo, binary string, environment Environment) (CandidateIdentity, CandidateIdentityEvidence, []string, error) {
+	return currentCandidateIdentityForClassification(ctx, repo, binary, environment, RunClassificationV1{Purpose: PurposeP4Acceptance, Class: MatchClassTI})
+}
+
+func currentCandidateIdentityForClassification(ctx context.Context, repo, binary string, environment Environment, classification RunClassificationV1) (CandidateIdentity, CandidateIdentityEvidence, []string, error) {
 	collector := defaultIdentityCollector()
 	start := collector.captureRepository(ctx, repo, "start")
-	return collector.complete(ctx, repo, binary, environment, start)
+	return collector.completeForClassification(ctx, repo, binary, environment, start, classification)
 }
 
 func (collector identityCollector) captureRepository(ctx context.Context, repo, phase string) repositoryCapture {
@@ -186,8 +190,15 @@ func splitRemoteReason(reason string) (string, string) {
 }
 
 func (collector identityCollector) complete(ctx context.Context, repo, binary string, environment Environment, start repositoryCapture) (CandidateIdentity, CandidateIdentityEvidence, []string, error) {
+	return collector.completeForClassification(ctx, repo, binary, environment, start, RunClassificationV1{Purpose: PurposeP4Acceptance, Class: MatchClassTI})
+}
+
+func (collector identityCollector) completeForClassification(ctx context.Context, repo, binary string, environment Environment, start repositoryCapture, classification RunClassificationV1) (CandidateIdentity, CandidateIdentityEvidence, []string, error) {
+	if err := classification.Validate(); err != nil {
+		return CandidateIdentity{}, CandidateIdentityEvidence{}, nil, err
+	}
 	end := collector.captureRepository(ctx, repo, "end")
-	evidence := CandidateIdentityEvidence{Start: start.snapshot, End: end.snapshot}
+	evidence := CandidateIdentityEvidence{Start: start.snapshot, End: end.snapshot, RunPurpose: classification.Purpose, MatchClass: classification.Class, AcceptedAmendment: AcceptedP4Spec, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256}
 	evidence.Checks = append(evidence.Checks, start.checks...)
 	evidence.Checks = append(evidence.Checks, end.checks...)
 	diagnostics := append(append([]string{}, start.diagnostics...), end.diagnostics...)
@@ -230,6 +241,7 @@ func (collector identityCollector) complete(ctx context.Context, repo, binary st
 		RemoteURL: end.snapshot.RemoteURL, RemoteBranchCommit: end.snapshot.RemoteBranchCommit, PRHeadCommit: end.snapshot.PRHeadCommit,
 		BinarySHA256: evidence.BinarySHA256, BinaryVCSRevision: binaryRevision, BinaryVCSModified: binaryModified,
 		HarnessVCSRevision: harnessRevision, HarnessVCSModified: harnessModified, EnvironmentSHA256: environmentHash,
+		RunPurpose: classification.Purpose, MatchClass: classification.Class, AcceptedAmendment: AcceptedP4Spec, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256,
 	}
 	return identity, evidence, diagnostics, nil
 }

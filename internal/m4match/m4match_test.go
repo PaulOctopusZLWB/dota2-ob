@@ -465,8 +465,8 @@ func successfulIdentityFixture() (CandidateIdentity, CandidateIdentityEvidence) 
 	hash := strings.Repeat("c", 64)
 	environment := strings.Repeat("d", 64)
 	snapshot := CandidateRepositorySnapshot{Commit: head, SoleParent: RequiredSuccessorParent, RepositoryRootSHA: tree, RemoteURL: ExpectedRemoteURL, RemoteBranchCommit: head, PRHeadCommit: head}
-	identity := CandidateIdentity{Commit: head, SoleParent: RequiredSuccessorParent, RepositoryRootSHA: tree, RemoteURL: ExpectedRemoteURL, RemoteBranchCommit: head, PRHeadCommit: head, BinarySHA256: hash, BinaryVCSRevision: head, HarnessVCSRevision: head, EnvironmentSHA256: environment}
-	evidence := CandidateIdentityEvidence{Start: snapshot, End: snapshot, BinarySHA256: hash, BinaryVCSRevision: head, HarnessVCSRevision: head, EnvironmentSHA256: environment}
+	identity := CandidateIdentity{Commit: head, SoleParent: RequiredSuccessorParent, RepositoryRootSHA: tree, RemoteURL: ExpectedRemoteURL, RemoteBranchCommit: head, PRHeadCommit: head, BinarySHA256: hash, BinaryVCSRevision: head, HarnessVCSRevision: head, EnvironmentSHA256: environment, RunPurpose: PurposeP4Acceptance, MatchClass: MatchClassTI, AcceptedAmendment: AcceptedP4Spec, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256}
+	evidence := CandidateIdentityEvidence{Start: snapshot, End: snapshot, BinarySHA256: hash, BinaryVCSRevision: head, HarnessVCSRevision: head, EnvironmentSHA256: environment, RunPurpose: PurposeP4Acceptance, MatchClass: MatchClassTI, AcceptedAmendment: AcceptedP4Spec, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256}
 	for _, id := range []string{
 		"local_head_start", "sole_parent_start", "repository_tree_start", "origin_start", "remote_branch_start", "pr_head_start",
 		"local_head_end", "sole_parent_end", "repository_tree_end", "origin_end", "remote_branch_end", "pr_head_end",
@@ -512,7 +512,7 @@ func TestBoundariesRequireContinuousIdentityCadenceAndNormalPostgame(t *testing.
 }
 
 func TestVerifierRejectsReadinessCandidateMutationAndMissingLog(t *testing.T) {
-	identity := CandidateIdentity{Commit: "1111111111111111111111111111111111111111", SoleParent: RequiredSuccessorParent, EnvironmentSHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+	identity := CandidateIdentity{Commit: "1111111111111111111111111111111111111111", SoleParent: RequiredSuccessorParent, EnvironmentSHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", RunPurpose: PurposeP4Acceptance, MatchClass: MatchClassTI, AcceptedAmendment: AcceptedP4Spec, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256}
 	identitySHA, _ := candidateIdentitySHA(identity)
 	evidence := Evidence{CandidateCommit: identity.Commit, CandidateParent: RequiredSuccessorParent, CandidateIdentity: identity, Faults: append([]string(nil), RequiredFaults...)}
 	for _, id := range []string{"accepted_ancestry", "candidate_commit", "candidate_parent", "candidate_identity", "candidate_binary_hash", "captured_schedule", "production_golden", "clean_tree", "clean_tree_final", "isolated_process_state", "focused_twice", "m4_fault_matrix", "full_go", "full_race", "vet", "build_all", "module_verify", "browser_install", "browser_tests", "obs_overlay_install", "obs_overlay_tests", "production_endpoints", "product_sigkill_restart", "privacy_and_source_boundary", "secret_generated_scan", "dependency_boundary", "diff_check"} {
@@ -524,7 +524,7 @@ func TestVerifierRejectsReadinessCandidateMutationAndMissingLog(t *testing.T) {
 	for _, path := range []string{"evidence/canonical/fault-proof-manifest.json", "evidence/logs/focused_twice.log", "evidence/logs/m4_fault_matrix.log", "evidence/logs/full_go.log", "evidence/logs/full_race.log", "evidence/logs/vet.log", "evidence/logs/build_all.log", "evidence/logs/module_verify.log", "evidence/logs/browser_tests.log", "evidence/logs/obs_overlay_tests.log", "evidence/logs/product-probe.log", "evidence/logs/product-sigkill-restart.log"} {
 		evidence.Artifacts = append(evidence.Artifacts, Artifact{Path: path})
 	}
-	readiness := Readiness{CandidateCommit: identity.Commit, CandidateIdentitySHA256: identitySHA, EnvironmentSHA256: identity.EnvironmentSHA256}
+	readiness := Readiness{CandidateCommit: identity.Commit, CandidateIdentitySHA256: identitySHA, EnvironmentSHA256: identity.EnvironmentSHA256, RunPurpose: PurposeP4Acceptance, MatchClass: MatchClassTI}
 	if err := validateIdentityBindings(readiness, evidence, identity); err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestRawOnlyRecoveryDoesNotCopyFakePolicyOutput(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sessionDir, "00000000000000000001.pcl3"), []byte("fake-derived-output"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := performRawOnlyRecovery(context.Background(), root, sessionID); err == nil {
+	if _, _, err := performRawOnlyRecovery(context.Background(), root, sessionID, nil); err == nil {
 		t.Fatal("fake recovery unexpectedly succeeded")
 	}
 	_ = filepath.WalkDir(filepath.Join(root, "evidence/recovery-work/data"), func(path string, entry os.DirEntry, err error) error {

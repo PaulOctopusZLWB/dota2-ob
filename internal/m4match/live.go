@@ -23,12 +23,14 @@ import (
 )
 
 type LiveConfig struct {
-	DataRoot      string
-	ReadinessRoot string
-	RepoRoot      string
-	IdentityPath  string
-	Input         io.Reader
-	Output        io.Writer
+	DataRoot       string
+	ReadinessRoot  string
+	RepoRoot       string
+	IdentityPath   string
+	AuthorityRoot  string
+	Input          io.Reader
+	Output         io.Writer
+	Classification RunClassificationV1
 }
 
 type liveBoundary struct {
@@ -239,7 +241,10 @@ func (proxy *deliveryProxy) stop() error {
 }
 
 func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr error) {
-	preflight, err := Verify(ctx, config.ReadinessRoot, config.RepoRoot, "preflight")
+	if err := config.Classification.Validate(); err != nil {
+		return Readiness{}, err
+	}
+	preflight, err := VerifyClassification(ctx, config.ReadinessRoot, config.RepoRoot, "preflight", config.Classification)
 	if err != nil || !preflight.Ready {
 		return Readiness{}, errors.New("exact environment preflight is not ready")
 	}
@@ -252,13 +257,25 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	if err != nil {
 		return Readiness{}, err
 	}
-	var preflightEvidence Evidence
-	if json.Unmarshal(preflightIndex, &preflightEvidence) != nil {
+	preflightEvidence, _, decodeErr := decodeEvidenceContract(preflightIndex, config.Classification)
+	if decodeErr != nil {
 		return Readiness{}, errors.New("verified preflight identity cannot be loaded")
 	}
-	identity, err := readIdentity(config.IdentityPath)
+	identity, err := readIdentityForClassification(config.IdentityPath, config.Classification)
 	if err != nil {
 		return Readiness{}, err
+	}
+	authorityPreflightSHA := ""
+	if config.Classification.Class == MatchClassPublicTournament {
+		authorityPreflightSHA, err = verifyAuthorityEvidenceRoot(config.AuthorityRoot, config.RepoRoot, preflight, preflightEvidence, identity.MatchID)
+		if err != nil {
+			return Readiness{}, err
+		}
+		preflightEvidence.AuthorityPreflightSHA256 = authorityPreflightSHA
+		preflightEvidence.AuthoritySelectionSHA256, err = verifyAuthorityLiveIdentityRoot(config.AuthorityRoot, config.RepoRoot, identity)
+		if err != nil {
+			return Readiness{}, err
+		}
 	}
 	lease, err := acquireFreshRoot(config.DataRoot, config.RepoRoot)
 	if err != nil {
@@ -266,11 +283,16 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	}
 	defer lease.Close()
 	root := lease.abs
+	if config.Classification.Class == MatchClassPublicTournament {
+		if err := importAuthorityEvidenceRoot(root, config.AuthorityRoot, config.RepoRoot); err != nil {
+			return Readiness{}, fmt.Errorf("import verified authority evidence: %w", err)
+		}
+	}
 	artifacts, err := Prepare(root, 1920, 1080)
 	if err != nil {
 		return Readiness{}, err
 	}
-	sessionID := "ti-" + identity.MatchID
+	sessionID := strings.ReplaceAll(string(config.Classification.Purpose), "_", "-") + "-" + identity.MatchID
 	policyArtifacts, err := writeLiveArtifacts(root, sessionID)
 	if err != nil {
 		return Readiness{}, err
@@ -353,13 +375,13 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 		productStopErr := stopProcess(product, productDone, 15*time.Second)
 		obsStopErr := stopProcess(obs, obsDone, 30*time.Second)
 		proxyStopErr := proxy.stop()
-		sealed, sealErr := sealFailedLive(root, preflight, preflightEvidence, artifacts, identity, reason)
+		sealed, sealErr := sealFailedLive(root, config.RepoRoot, preflight, preflightEvidence, artifacts, identity, reason)
 		return sealed, errors.Join(sealErr, productStopErr, obsStopErr, proxyStopErr)
 	}
 
 	boundary := liveBoundary{ArmedAt: time.Now().UTC(), IdentityContinuous: true, DotaProvenance: true, ConfigSHA256: configHash, ConfigUserOnly: true, ExclusiveListener: true, KnownProducerAbsent: true, CorrelationStartSHA256: startCorrelation.SHA256}
 	startDeadline := boundary.ArmedAt.Add(MaxArmingWindow)
-	fmt.Fprintf(config.Output, "ARMED candidate=%s match_id=%s operator=%s/operator/ overlay=%s/overlay/\n", preflight.CandidateCommit, identity.MatchID, DeliveryOrigin, DeliveryOrigin)
+	fmt.Fprintf(config.Output, "%s candidate=%s match_id=%s operator=%s/operator/ overlay=%s/overlay/\n", config.Classification.consoleState(), preflight.CandidateCommit, identity.MatchID, DeliveryOrigin, DeliveryOrigin)
 	confirmationPhrase := fmt.Sprintf("CONFIRM_PREVIEW %s %s %s %s %s %s DOTA_PID=%d", identity.MatchID, identity.Tournament, identity.Series, identity.Game, identity.Radiant, identity.Dire, identity.DotaPID)
 	fmt.Fprintf(config.Output, "After confirming the isolated OBS preview, recording indicator, official identity, and Dota process, type: %s\n", confirmationPhrase)
 	confirmation, err := readLineBefore(ctx, config.Input, startDeadline)
@@ -468,7 +490,11 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	productStopErr := stopProcess(product, productDone, 15*time.Second)
 	obsStopErr := stopProcess(obs, obsDone, 30*time.Second)
 	proxyStopErr := proxy.stop()
-	validation, validationArtifacts, validationErr := validateCompletedAttempt(root, sessionID, productStopErr == nil, obsStopErr == nil)
+	var authorityRecovery *authorityRecoveryContext
+	if config.Classification.Class == MatchClassPublicTournament {
+		authorityRecovery = &authorityRecoveryContext{Readiness: preflight, Harness: preflightEvidence, MatchID: identity.MatchID}
+	}
+	validation, validationArtifacts, validationErr := validateCompletedAttempt(root, sessionID, productStopErr == nil, obsStopErr == nil, authorityRecovery)
 	artifacts = append(artifacts, validationArtifacts...)
 	boundary.RecordingFinalized = validation.RecordingFinalized
 	boundary.OperatorComplete = validation.OperatorComplete
@@ -483,7 +509,7 @@ func Live(ctx context.Context, config LiveConfig) (result Readiness, retErr erro
 	if finalErr != nil || correlationErr != nil || validationErr != nil || productStopErr != nil || obsStopErr != nil || proxyStopErr != nil {
 		boundary.Aborted = true
 	}
-	result, retErr = sealCompletedLive(root, preflight, preflightEvidence, artifacts, identity, boundary)
+	result, retErr = sealCompletedLive(root, config.RepoRoot, preflight, preflightEvidence, artifacts, identity, boundary)
 	retErr = errors.Join(retErr, productStopErr, obsStopErr, proxyStopErr)
 	return result, retErr
 }
@@ -518,6 +544,10 @@ func collectVisibility(rawPath, tokenPath string) VisibilitySample {
 }
 
 func readIdentity(path string) (LiveIdentity, error) {
+	return readIdentityForClassification(path, RunClassificationV1{Purpose: PurposeP4Acceptance, Class: MatchClassTI})
+}
+
+func readIdentityForClassification(path string, classification RunClassificationV1) (LiveIdentity, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return LiveIdentity{}, err
@@ -532,7 +562,10 @@ func readIdentity(path string) (LiveIdentity, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return identity, errors.New("public match identity must contain exactly one JSON value")
 	}
-	values := []string{identity.Tournament, identity.Series, identity.Game, identity.Radiant, identity.Dire, identity.MatchID}
+	values := []string{identity.MatchID}
+	if classification.Purpose == PurposeP4Acceptance {
+		values = append(values, identity.Tournament, identity.Series, identity.Game, identity.Radiant, identity.Dire)
+	}
 	for _, value := range values {
 		if value == "" || len(value) > 160 || strings.ContainsAny(value, "\r\n<>/\\") {
 			return identity, errors.New("public match identity is incomplete or unsafe")
@@ -547,8 +580,28 @@ func readIdentity(path string) (LiveIdentity, error) {
 		return identity, errors.New("match_id must be nonzero")
 	}
 	parsedURL, err := url.Parse(identity.OfficialSourceURL)
-	if err != nil || parsedURL.Scheme != "https" || (parsedURL.Host != "www.dota2.com.cn" && parsedURL.Host != "www.dota2.com") || !strings.Contains(strings.ToLower(parsedURL.Path), "international") {
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.User != nil {
+		return identity, errors.New("public DotaTV identity source URL is invalid")
+	}
+	if classification.Class == MatchClassTI && ((parsedURL.Host != "www.dota2.com.cn" && parsedURL.Host != "www.dota2.com") || !strings.Contains(strings.ToLower(parsedURL.Path), "international")) {
 		return identity, errors.New("official TI identity source URL is invalid")
+	}
+	if classification.Class == MatchClassPublicTournament {
+		root, rootErr := EmbeddedAuthorityRoot()
+		trusted := false
+		for _, endpoint := range root.EndpointTemplates {
+			trusted = trusted || endpoint.Origin == parsedURL.Scheme+"://"+parsedURL.Host && endpoint.Path == parsedURL.Path && parsedURL.RawQuery == "" && parsedURL.Fragment == ""
+		}
+		if rootErr != nil || !trusted {
+			return identity, errors.New("public tournament identity is outside embedded authority origins")
+		}
+	}
+	if classification.Class == MatchClassPublicMatch {
+		if parsedURL.Host != "www.dota2.com" && parsedURL.Host != "www.dota2.com.cn" {
+			return identity, errors.New("public rehearsal requires a DotaTV source")
+		}
+		identity.Tournament, identity.Series, identity.Game = string(UnavailableForPublicMatch), string(UnavailableForPublicMatch), string(UnavailableForPublicMatch)
+		identity.Radiant, identity.Dire = "radiant", "dire"
 	}
 	confirmedAt, err := time.Parse(time.RFC3339Nano, identity.ConfirmedAt)
 	if err != nil || confirmedAt.UTC().Format(time.RFC3339Nano) != identity.ConfirmedAt || time.Since(confirmedAt) < -time.Minute || time.Since(confirmedAt) > 15*time.Minute {
@@ -1157,12 +1210,15 @@ func obsFrames(path string) (rendered, missed, skipped uint64) {
 	return parseLast("Total frames output:"), parseLast("lagged frames"), parseLast("number of skipped frames due to encoding lag:")
 }
 
-func sealFailedLive(root string, preflight Readiness, preflightEvidence Evidence, artifacts []Artifact, identity LiveIdentity, reason string) (Readiness, error) {
-	return sealLive(root, preflight, preflightEvidence, artifacts, identity, liveBoundary{}, []string{reason})
+func sealFailedLive(root, repo string, preflight Readiness, preflightEvidence Evidence, artifacts []Artifact, identity LiveIdentity, reason string) (Readiness, error) {
+	return sealLive(root, repo, preflight, preflightEvidence, artifacts, identity, liveBoundary{}, []string{reason})
 }
 
-func sealCompletedLive(root string, preflight Readiness, preflightEvidence Evidence, artifacts []Artifact, identity LiveIdentity, boundary liveBoundary) (Readiness, error) {
-	failures := []string{"independent_p4_acceptance_required"}
+func sealCompletedLive(root, repo string, preflight Readiness, preflightEvidence Evidence, artifacts []Artifact, identity LiveIdentity, boundary liveBoundary) (Readiness, error) {
+	failures := []string{}
+	if preflight.RunPurpose == PurposeP4Acceptance {
+		failures = append(failures, "independent_p4_acceptance_required")
+	}
 	if !boundary.Pregame {
 		failures = append(failures, "late_join")
 	}
@@ -1202,33 +1258,77 @@ func sealCompletedLive(root string, preflight Readiness, preflightEvidence Evide
 	if !boundary.CleanShutdown {
 		failures = append(failures, "unclean_product_obs_or_recovery_shutdown")
 	}
-	return sealLive(root, preflight, preflightEvidence, artifacts, identity, boundary, failures)
+	return sealLive(root, repo, preflight, preflightEvidence, artifacts, identity, boundary, failures)
 }
 
-func sealLive(root string, preflight Readiness, preflightEvidence Evidence, artifacts []Artifact, identity LiveIdentity, boundary liveBoundary, failures []string) (Readiness, error) {
+func sealLive(root, repo string, preflight Readiness, preflightEvidence Evidence, artifacts []Artifact, identity LiveIdentity, boundary liveBoundary, failures []string) (Readiness, error) {
+	if preflight.MatchClass == MatchClassPublicTournament {
+		authorityRoot := filepath.Join(root, "evidence/authority-root")
+		authoritySHA, authorityErr := verifyAuthorityEvidenceAt(authorityRoot, preflight, preflightEvidence, identity.MatchID)
+		selectionSHA, selectionErr := verifyAuthorityLiveIdentityAt(authorityRoot, identity)
+		if authorityErr != nil || authoritySHA != preflightEvidence.AuthorityPreflightSHA256 || selectionErr != nil || selectionSHA != preflightEvidence.AuthoritySelectionSHA256 {
+			failures = append(failures, "authority_finalization_continuity_failed")
+		}
+	}
+	var coverageBinding *RehearsalCoverageBindingV1
+	if preflight.RunPurpose == PurposePublicMatchRehearsal {
+		sessionID := strings.ReplaceAll(string(preflight.RunPurpose), "_", "-") + "-" + identity.MatchID
+		binding, coverageErr := generateRehearsalCoverage(root, repo, sessionID, preflight.CandidateCommit)
+		if coverageErr != nil {
+			failures = append(failures, "field_coverage_generation_failed")
+		} else {
+			coverageBinding = &binding
+		}
+	}
 	liveArtifacts, err := collectLiveArtifacts(root)
 	if err != nil {
 		return Readiness{}, err
 	}
 	artifacts = mergeArtifacts(artifacts, liveArtifacts)
-	evidence := Evidence{SchemaVersion: SchemaVersion, Mode: "live", CandidateCommit: preflight.CandidateCommit, CandidateParent: AcceptedFunctionalBase,
+	evidence := Evidence{SchemaVersion: preflightEvidence.SchemaVersion, Mode: "live", CandidateCommit: preflight.CandidateCommit, CandidateParent: AcceptedFunctionalBase,
 		AcceptedBase: AcceptedFunctionalBase, AcceptedSpec: AcceptedP4Spec, FixtureSHA256: CapturedScheduleSHA256, GoldenSHA256: ProductionGoldenSHA256,
 		Bounds: AcceptedBounds(), Faults: append([]string(nil), RequiredFaults...), Artifacts: artifacts, StartBoundary: "capture/operator/overlay/OBS armed before manual preview confirmation",
 		GameZeroBoundary: "negative clock followed by nonnegative clock", PostGameBoundary: "normal post-game GSI state", RecordingBoundary: "OBS finalization required",
-		OperatorScript: HumanInstruction, NonResumable: true, SyntheticOnly: false, ClaimsP4: false, ReadinessIssueText: HumanInstruction}
+		OperatorScript: preflight.HumanInstruction, NonResumable: true, SyntheticOnly: false, ClaimsP4: false, ReadinessIssueText: preflight.HumanInstruction,
+		RunPurpose: preflight.RunPurpose, MatchClass: preflight.MatchClass, RootDomain: preflight.RootDomain, QualifyingMatch: preflight.RunPurpose == PurposeP4Acceptance, AcceptanceEligible: false,
+		AcceptanceGate: preflight.AcceptanceGate, AuthorityRootSHA256: EmbeddedAuthorityRootSHA256}
+	evidence.AuthorityPreflightSHA256 = preflightEvidence.AuthorityPreflightSHA256
+	if preflight.MatchClass == MatchClassPublicTournament {
+		evidence.AuthorityMatchID = identity.MatchID
+		evidence.AuthorityReadinessIndexSHA256 = preflight.EvidenceIndexSHA256
+		evidence.AuthoritySelectionSHA256 = preflightEvidence.AuthoritySelectionSHA256
+	}
+	if preflight.RunPurpose == PurposePublicMatchRehearsal {
+		if len(failures) == 0 {
+			evidence.TerminalOutcome = "rehearsal_complete"
+		} else {
+			evidence.TerminalOutcome = "rehearsal_failed"
+		}
+	} else {
+		evidence.TerminalOutcome = "p4_independent_review_required"
+	}
 	evidence.CandidateParent = RequiredSuccessorParent
 	evidence.CandidateIdentity = preflightEvidence.CandidateIdentity
 	evidence.CandidateIdentityEvidence = preflightEvidence.CandidateIdentityEvidence
 	evidence.Environment = preflightEvidence.Environment
 	evidence.LocalhostGSI = LocalhostGSITrustEvidence{ConfigSHA256: boundary.ConfigSHA256, ConfigURI: "http://" + CaptureAddress + "/gsi", ConfigUserOnly: boundary.ConfigUserOnly, ExclusiveListener: boundary.ExclusiveListener, ListenerProductOwned: boundary.ExclusiveListener, ListenerURI: "http://" + CaptureAddress + "/gsi", DotaProcessStable: boundary.DotaProvenance, KnownProducerAbsent: boundary.KnownProducerAbsent, CorrelationStartSHA256: boundary.CorrelationStartSHA256, CorrelationEndSHA256: boundary.CorrelationEndSHA256, IdentityContinuous: boundary.IdentityContinuous, Requests: boundary.Requests, Accepted: boundary.Accepted, Rejected: boundary.Rejected, RawRecords: boundary.RawRecords, TerminalOutcomes: boundary.TerminalOutcomes, RecordingCoextensive: boundary.RecordingCoextensive, PaulConfirmedIdentity: boundary.PaulConfirmed, PerRequestAttested: false, ResidualReasonCodes: []string{"localhost_gsi_sender_unattested"}}
 	trustOK := validateLocalhostGSITrust(evidence.LocalhostGSI) == nil
-	evidence.Checks = []Check{{"pregame_boundary", boundary.Pregame, "negative game clock observed after complete arming"}, {"game_zero_boundary", boundary.Zero, "clock zero transition observed"}, {"post_game_boundary", boundary.Post && boundary.WinnerObserved, "normal post-game state and winner observed"}, {"recording_finalized", boundary.RecordingFinalized, "clean OBS stop, EBML MKV, frame counters, and no partial recording"}, {"operator_script", boundary.OperatorComplete, "ordered durable command attempts/revisions/audits present"}, {"operator_input_bounds", boundary.OperatorInputBounds, "durable raw operator inputs are present and within 16 KiB"}, {"privacy", boundary.PrivacySafe, "raw payload key scan passed"}, {"reconciliation", boundary.Reconciled, "every raw record reached exactly one terminal cursor outcome"}, {"no_cache_recovery", boundary.NoCacheRecovery, "genuine isolated product restart rebuilt from raw inputs and byte-matched five planes"}, {"measurement_bounds", boundary.MeasurementsPassed, "complete five-second process-tree/body/state/resource plane passed"}, {"visibility_fail_closed", boundary.VisibilityPassed, "100ms samples prove two-second claim-free output, no stale revival, and continued raw capture"}, {"live_identity_continuity", boundary.IdentityContinuous && boundary.DotaProvenance && boundary.Frames > 0, "nonzero match identity and bound Dota process remained stable for every frame"}, {"clean_shutdown", boundary.CleanShutdown, "product, OBS, and recovery product stopped cleanly"}, {"public_match_identity", identity.MatchID != "" && identity.OfficialSourceURL != "", "explicit official public TI identity supplied"}, {"independent_acceptance", false, "live command never self-accepts P4"}}
+	evidence.Checks = []Check{{"pregame_boundary", boundary.Pregame, "negative game clock observed after complete arming"}, {"game_zero_boundary", boundary.Zero, "clock zero transition observed"}, {"post_game_boundary", boundary.Post && boundary.WinnerObserved, "normal post-game state and winner observed"}, {"recording_finalized", boundary.RecordingFinalized, "clean OBS stop, EBML MKV, frame counters, and no partial recording"}, {"operator_script", boundary.OperatorComplete, "ordered durable command attempts/revisions/audits present"}, {"operator_input_bounds", boundary.OperatorInputBounds, "durable raw operator inputs are present and within 16 KiB"}, {"privacy", boundary.PrivacySafe, "raw payload key scan passed"}, {"reconciliation", boundary.Reconciled, "every raw record reached exactly one terminal cursor outcome"}, {"no_cache_recovery", boundary.NoCacheRecovery, "genuine isolated product restart rebuilt from raw inputs and byte-matched five planes"}, {"measurement_bounds", boundary.MeasurementsPassed, "complete five-second process-tree/body/state/resource plane passed"}, {"visibility_fail_closed", boundary.VisibilityPassed, "100ms samples prove two-second claim-free output, no stale revival, and continued raw capture"}, {"live_identity_continuity", boundary.IdentityContinuous && boundary.DotaProvenance && boundary.Frames > 0, "nonzero match identity and bound Dota process remained stable for every frame"}, {"clean_shutdown", boundary.CleanShutdown, "product, OBS, and recovery product stopped cleanly"}, {"public_match_identity", identity.MatchID != "" && identity.OfficialSourceURL != "", "explicit public DotaTV match identity supplied"}}
+	if preflight.RunPurpose == PurposeP4Acceptance {
+		evidence.Checks = append(evidence.Checks, Check{"independent_acceptance", false, "live command never self-accepts P4"})
+	} else {
+		evidence.Checks = append(evidence.Checks, Check{"field_coverage", coverageBinding != nil, "value-free baseline/rehearsal delta generated from exact raw frames"})
+	}
 	evidence.Checks = append(evidence.Checks, Check{"localhost_gsi_trust_boundary", trustOK, "accepted localhost-GSI trust boundary and residual limitation recorded"})
 	for _, failure := range failures {
 		evidence.Checks = append(evidence.Checks, Check{ID: failure, Passed: false, Detail: "sealed live attempt failure"})
 	}
 	sortEvidence(&evidence)
-	index, err := canonical(evidence)
+	var indexContract any = evidence
+	if preflight.RunPurpose == PurposePublicMatchRehearsal {
+		indexContract = PublicMatchRehearsalEvidenceV1{Evidence: evidence, RehearsalContractVersion: rehearsalContractV1, FieldCoverage: coverageBinding, AcceptanceChecks: rehearsalAcceptanceChecks(), SuppressionAudits: rehearsalSuppressionAudits()}
+	}
+	index, err := canonical(indexContract)
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -1241,8 +1341,18 @@ func sealLive(root string, preflight Readiness, preflightEvidence Evidence, arti
 			allFailures = append(allFailures, check.ID)
 		}
 	}
-	result := Readiness{SchemaVersion: ReadinessSchemaVersion, Ready: false, Mode: "live", CandidateCommit: preflight.CandidateCommit, CandidateIdentitySHA256: preflight.CandidateIdentitySHA256, EnvironmentSHA256: preflight.EnvironmentSHA256, EvidenceIndexSHA256: payloadSHA(index), Failures: allFailures, ClaimsP4: false, HumanInstruction: HumanInstruction}
-	if err := writeJSON(filepath.Join(root, "evidence/readiness.json"), result, 0o600); err != nil {
+	mode := "live"
+	ready := false
+	if preflight.RunPurpose == PurposePublicMatchRehearsal {
+		mode = evidence.TerminalOutcome
+		ready = mode == "rehearsal_complete" && len(allFailures) == 0
+	}
+	result := Readiness{SchemaVersion: preflight.SchemaVersion, Ready: ready, Mode: mode, CandidateCommit: preflight.CandidateCommit, CandidateIdentitySHA256: preflight.CandidateIdentitySHA256, EnvironmentSHA256: preflight.EnvironmentSHA256, EvidenceIndexSHA256: payloadSHA(index), Failures: allFailures, ClaimsP4: false, HumanInstruction: preflight.HumanInstruction, RunPurpose: preflight.RunPurpose, MatchClass: preflight.MatchClass, RootDomain: preflight.RootDomain, QualifyingMatch: preflight.RunPurpose == PurposeP4Acceptance, AcceptanceEligible: false, AcceptanceGate: preflight.AcceptanceGate, ConsoleState: preflight.ConsoleState}
+	var readinessContract any = result
+	if preflight.RunPurpose == PurposePublicMatchRehearsal {
+		readinessContract = PublicMatchRehearsalReadinessV1{Readiness: result, RehearsalContractVersion: rehearsalContractV1, TerminalOutcome: evidence.TerminalOutcome}
+	}
+	if err := writeJSON(filepath.Join(root, "evidence/readiness.json"), readinessContract, 0o600); err != nil {
 		return Readiness{}, err
 	}
 	return result, nil
@@ -1250,7 +1360,7 @@ func sealLive(root string, preflight Readiness, preflightEvidence Evidence, arti
 
 func collectLiveArtifacts(root string) ([]Artifact, error) {
 	var artifacts []Artifact
-	for _, relativeRoot := range []string{"data/sessions", "evidence/logs", "evidence/samples.jsonl", "evidence/visibility.jsonl", "evidence/raw-operator-input.jsonl", "evidence/recovery-input", "evidence/recovery-work", "evidence/canonical", "recordings"} {
+	for _, relativeRoot := range []string{"data/sessions", "evidence/logs", "evidence/samples.jsonl", "evidence/visibility.jsonl", "evidence/raw-operator-input.jsonl", "evidence/recovery-input", "evidence/recovery-work", "evidence/authority-root", "evidence/canonical", "recordings"} {
 		base := filepath.Join(root, filepath.FromSlash(relativeRoot))
 		err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
 			if errors.Is(walkErr, os.ErrNotExist) {

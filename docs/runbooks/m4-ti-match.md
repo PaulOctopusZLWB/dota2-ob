@@ -1,6 +1,6 @@
-# M4 P4 complete-TI-match harness
+# M4 P4 authority-verified public-tournament harness
 
-This runbook prepares and measures one complete official TI DotaTV game. The
+This runbook prepares and measures one complete authority-verified public tournament DotaTV game. The
 synthetic preflight never claims P4, and the live command always leaves final
 acceptance to the independent reviewer and G胖.
 
@@ -28,8 +28,8 @@ Run only after the exact clean candidate has been pushed to
 of draft PR #19. Dota and OBS must be stopped:
 
 ```sh
-go run -buildvcs=true ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-a
-go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
+go run -buildvcs=true ./cmd/m4-match preflight --purpose p4_acceptance --match-class public_tournament --data-root /var/tmp/dot77-p4-preflight-a
+go run -buildvcs=true ./cmd/m4-match verify --purpose p4_acceptance --match-class public_tournament --data-root /var/tmp/dot77-p4-preflight-a --expect preflight
 ```
 
 Preflight fails closed unless local HEAD has exactly one parent—the rejected
@@ -53,15 +53,15 @@ byte-identical.
 Run a second root and compare:
 
 ```sh
-go run -buildvcs=true ./cmd/m4-match preflight --data-root /var/tmp/dot65-preflight-b
-go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-b --expect preflight
-cmp /var/tmp/dot65-preflight-a/evidence/canonical/evidence-index.json \
-    /var/tmp/dot65-preflight-b/evidence/canonical/evidence-index.json
-diff -qr /var/tmp/dot65-preflight-a/evidence/canonical \
-    /var/tmp/dot65-preflight-b/evidence/canonical
-cmp /var/tmp/dot65-preflight-a/evidence/readiness.json \
-    /var/tmp/dot65-preflight-b/evidence/readiness.json
-sha256sum /var/tmp/dot65-preflight-{a,b}/evidence/canonical/evidence-index.json
+go run -buildvcs=true ./cmd/m4-match preflight --purpose p4_acceptance --match-class public_tournament --data-root /var/tmp/dot77-p4-preflight-b
+go run -buildvcs=true ./cmd/m4-match verify --purpose p4_acceptance --match-class public_tournament --data-root /var/tmp/dot77-p4-preflight-b --expect preflight
+cmp /var/tmp/dot77-p4-preflight-a/evidence/canonical/evidence-index.json \
+    /var/tmp/dot77-p4-preflight-b/evidence/canonical/evidence-index.json
+diff -qr /var/tmp/dot77-p4-preflight-a/evidence/canonical \
+    /var/tmp/dot77-p4-preflight-b/evidence/canonical
+cmp /var/tmp/dot77-p4-preflight-a/evidence/readiness.json \
+    /var/tmp/dot77-p4-preflight-b/evidence/readiness.json
+sha256sum /var/tmp/dot77-p4-preflight-{a,b}/evidence/canonical/evidence-index.json
 ```
 
 `evidence/readiness.json` is the machine-readable decision. `ready` cannot be
@@ -71,18 +71,45 @@ instruction payload for the single readiness issue.
 
 ## Live command
 
+After independent exact-SHA review, select a match and write the canonical
+`MatchAuthoritySelectionV1` JSON. Pass the Steam Web API key only on an inherited
+file descriptor; it never enters arguments, environment variables, URLs, logs,
+artifacts, or retained headers. Seal the authority retrieval before any live run:
+
+```sh
+go run -buildvcs=true ./cmd/m4-match authority-preflight \
+  --readiness-root /var/tmp/dot77-p4-preflight-a \
+  --data-root /var/tmp/dot77-authority-1234567890 \
+  --selection /var/tmp/dot77-authority-selection.json \
+  --webapi-key-fd 3 3</path/to/private-key-file
+```
+
+The command retrieves only the compiled Valve Web API and Valve Dota 2 esports
+endpoint shapes, with no retry, and seals exact retained bytes, sanitized exports, fact locators, bounded
+counters, the selected match, candidate, binary, amendment, authority root, and
+readiness evidence index. Any missing, ambiguous, conflicting, redirected,
+credential-bearing, over-bound, compressed-trailing, or hash-mismatched fact
+fails closed.
+
+The embedded independently reviewable trust anchor is the historical Valve
+Stockholm Major record (league `14173`). It proves the code path without
+self-asserting a 2026 organizer origin, but it cannot authorize a current live
+match. A usable future tournament requires a new immutable harness successor
+with a defensible Valve event/league record and fresh exact-SHA review.
+
 Create a private JSON file containing only public match identity:
 
 ```json
-{"tournament":"The International 2026","series":"Upper bracket","game":"Game 1","radiant":"Public Team A","dire":"Public Team B","match_id":"1234567890","official_source_url":"https://www.dota2.com.cn/international/2026","confirmed_at":"2026-08-15T10:00:00Z","dota_pid":12345,"dota_executable_sha256":"<sha256 of /proc/12345/exe>","dota_process_start_ticks":123456789}
+{"tournament":"The Stockholm Major","series":"Upper bracket","game":"Game 1","radiant":"Public Team A","dire":"Public Team B","match_id":"1234567890","official_source_url":"https://www.dota2.com/esports/springmajor22/watch/14173/130/game3details","confirmed_at":"2026-08-17T10:00:00Z","dota_pid":12345,"dota_executable_sha256":"<sha256 of /proc/12345/exe>","dota_process_start_ticks":123456789}
 ```
 
 Then run the foreground command:
 
 ```sh
-go run -buildvcs=true ./cmd/m4-match live \
-  --readiness-root /var/tmp/dot65-preflight-a \
-  --data-root /var/tmp/dot65-live-1234567890 \
+go run -buildvcs=true ./cmd/m4-match live --purpose p4_acceptance --match-class public_tournament \
+  --readiness-root /var/tmp/dot77-p4-preflight-a \
+  --data-root /var/tmp/dot77-p4-live-1234567890 \
+  --authority-root /var/tmp/dot77-authority-1234567890 \
   --identity /var/tmp/dot65-match-identity.json
 ```
 
@@ -90,15 +117,17 @@ go run -buildvcs=true ./cmd/m4-match live \
 start window, which is at most 30 minutes).
 `dota_pid`, executable hash, and `/proc/<pid>/stat` start ticks bind the manually
 launched Dota process instance; the harness rechecks all three throughout the
-attempt. It verifies the exact preflight, creates a new isolated root, seals the accepted
-live-only artifacts for the match session, installs the unique GSI config,
+attempt. It descriptor-confines and verifies the complete retained authority
+graph, imports it for finalization and recovery verification, creates a new
+isolated root, seals the accepted live-only artifacts for the match session,
+installs the unique GSI config,
 starts the exact candidate and isolated OBS profile/collection, and waits for
 the single bounded four-action human payload. Paul performs exactly these
 actions; dependency preparation and troubleshooting are not part of the
 notification:
 
 1. Manually launch Dota 2 within the assigned start window (maximum 30 minutes).
-2. After the agent reports `ARMED`, join the identified official TI DotaTV game
+2. After the agent reports `ARMED`, join the authority-verified public tournament DotaTV game
    before `0:00` and confirm the public tournament, series, game, teams, and
    match ID printed by the command.
 3. Execute the prescribed operator script: confirm preview; approve or record
@@ -157,8 +186,8 @@ self-accept P4.
 Verify before retention or deletion:
 
 ```sh
-go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-preflight-a --expect preflight
-go run -buildvcs=true ./cmd/m4-match verify --data-root /var/tmp/dot65-live-1234567890 --expect live
+go run -buildvcs=true ./cmd/m4-match verify --purpose p4_acceptance --match-class public_tournament --data-root /var/tmp/dot77-p4-preflight-a --expect preflight
+go run -buildvcs=true ./cmd/m4-match verify --purpose p4_acceptance --match-class public_tournament --data-root /var/tmp/dot77-p4-live-1234567890 --expect live
 ```
 
 Cleanup requires the exact index hash printed in `evidence/readiness.json` and
@@ -166,6 +195,7 @@ refuses an unverifiable or protected root:
 
 ```sh
 go run -buildvcs=true ./cmd/m4-match cleanup \
+  --purpose p4_acceptance --match-class public_tournament \
   --data-root /var/tmp/dot65-preflight-a \
   --confirm-index-sha256 '<exact evidence_index_sha256>'
 ```

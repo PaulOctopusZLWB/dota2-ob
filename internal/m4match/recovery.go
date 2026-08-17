@@ -24,33 +24,34 @@ import (
 )
 
 type attemptValidation struct {
-	SchemaVersion          string             `json:"schema_version"`
-	RawCount               uint64             `json:"raw_count"`
-	CursorSequence         uint64             `json:"cursor_sequence"`
-	PolicyCommits          uint64             `json:"policy_commits"`
-	ObservationCommits     uint64             `json:"observation_commits"`
-	LastObservation        uint64             `json:"last_observation_sequence"`
-	LastStateSHA256        string             `json:"last_state_sha256"`
-	AuditSHA256            []string           `json:"audit_sha256"`
-	OperatorActions        []string           `json:"operator_actions"`
-	OperatorResults        []string           `json:"operator_results"`
-	OperatorTerminals      []operatorTerminal `json:"operator_terminals"`
-	RecordingFinalized     bool               `json:"recording_finalized"`
-	OperatorComplete       bool               `json:"operator_complete"`
-	PrivacySafe            bool               `json:"privacy_safe"`
-	Reconciled             bool               `json:"reconciled"`
-	NoCacheRecovery        bool               `json:"no_cache_recovery"`
-	MeasurementsPassed     bool               `json:"measurements_passed"`
-	VisibilityPassed       bool               `json:"visibility_passed"`
-	OperatorInputBounds    bool               `json:"operator_input_bounds"`
-	EveryRawTerminal       bool               `json:"every_raw_terminal"`
-	RecoveryCursorSHA256   string             `json:"recovery_cursor_sha256"`
-	RecoveryPolicySHA256   string             `json:"recovery_policy_sha256"`
-	RecoveryAuditSHA256    string             `json:"recovery_audit_sha256"`
-	RecoveryOperatorSHA256 string             `json:"recovery_operator_sha256"`
-	RecoveryOverlaySHA256  string             `json:"recovery_overlay_sha256"`
-	RecoveryMaxRSSBytes    int64              `json:"recovery_max_rss_bytes"`
-	RecoveryCleanShutdown  bool               `json:"recovery_clean_shutdown"`
+	SchemaVersion           string             `json:"schema_version"`
+	RawCount                uint64             `json:"raw_count"`
+	CursorSequence          uint64             `json:"cursor_sequence"`
+	PolicyCommits           uint64             `json:"policy_commits"`
+	ObservationCommits      uint64             `json:"observation_commits"`
+	LastObservation         uint64             `json:"last_observation_sequence"`
+	LastStateSHA256         string             `json:"last_state_sha256"`
+	AuditSHA256             []string           `json:"audit_sha256"`
+	OperatorActions         []string           `json:"operator_actions"`
+	OperatorResults         []string           `json:"operator_results"`
+	OperatorTerminals       []operatorTerminal `json:"operator_terminals"`
+	RecordingFinalized      bool               `json:"recording_finalized"`
+	OperatorComplete        bool               `json:"operator_complete"`
+	PrivacySafe             bool               `json:"privacy_safe"`
+	Reconciled              bool               `json:"reconciled"`
+	NoCacheRecovery         bool               `json:"no_cache_recovery"`
+	MeasurementsPassed      bool               `json:"measurements_passed"`
+	VisibilityPassed        bool               `json:"visibility_passed"`
+	OperatorInputBounds     bool               `json:"operator_input_bounds"`
+	EveryRawTerminal        bool               `json:"every_raw_terminal"`
+	RecoveryCursorSHA256    string             `json:"recovery_cursor_sha256"`
+	RecoveryPolicySHA256    string             `json:"recovery_policy_sha256"`
+	RecoveryAuditSHA256     string             `json:"recovery_audit_sha256"`
+	RecoveryOperatorSHA256  string             `json:"recovery_operator_sha256"`
+	RecoveryOverlaySHA256   string             `json:"recovery_overlay_sha256"`
+	RecoveryMaxRSSBytes     int64              `json:"recovery_max_rss_bytes"`
+	RecoveryCleanShutdown   bool               `json:"recovery_clean_shutdown"`
+	RecoveryAuthoritySHA256 string             `json:"recovery_authority_preflight_sha256,omitempty"`
 }
 
 type operatorTerminal struct {
@@ -66,14 +67,21 @@ type operatorTerminal struct {
 }
 
 type recoveryProof struct {
-	CursorSHA256   string     `json:"cursor_sha256"`
-	PolicySHA256   string     `json:"policy_sha256"`
-	AuditSHA256    string     `json:"audit_sha256"`
-	OperatorSHA256 string     `json:"operator_sha256"`
-	OverlaySHA256  string     `json:"overlay_sha256"`
-	MaxRSSBytes    int64      `json:"max_rss_bytes"`
-	CleanShutdown  bool       `json:"clean_shutdown"`
-	RawInputs      []Artifact `json:"raw_inputs"`
+	CursorSHA256             string     `json:"cursor_sha256"`
+	PolicySHA256             string     `json:"policy_sha256"`
+	AuditSHA256              string     `json:"audit_sha256"`
+	OperatorSHA256           string     `json:"operator_sha256"`
+	OverlaySHA256            string     `json:"overlay_sha256"`
+	MaxRSSBytes              int64      `json:"max_rss_bytes"`
+	CleanShutdown            bool       `json:"clean_shutdown"`
+	RawInputs                []Artifact `json:"raw_inputs"`
+	AuthorityPreflightSHA256 string     `json:"authority_preflight_sha256,omitempty"`
+}
+
+type authorityRecoveryContext struct {
+	Readiness Readiness
+	Harness   Evidence
+	MatchID   string
 }
 
 func captureFinalEndpoints(root, tokenPath string) ([]Artifact, error) {
@@ -108,7 +116,7 @@ func captureFinalEndpoints(root, tokenPath string) ([]Artifact, error) {
 	return artifacts, nil
 }
 
-func validateCompletedAttempt(root, sessionID string, productClean, obsClean bool) (attemptValidation, []Artifact, error) {
+func validateCompletedAttempt(root, sessionID string, productClean, obsClean bool, authority *authorityRecoveryContext) (attemptValidation, []Artifact, error) {
 	sessionDir := filepath.Join(root, "data/sessions", sessionID)
 	validation, err := summarizeAttempt(sessionDir)
 	if err != nil {
@@ -126,7 +134,7 @@ func validateCompletedAttempt(root, sessionID string, productClean, obsClean boo
 	for _, input := range operatorInputs {
 		validation.OperatorInputBounds = validation.OperatorInputBounds && len(input) <= 16<<10
 	}
-	proof, recoveryArtifacts, recoveryErr := performRawOnlyRecovery(context.Background(), root, sessionID)
+	proof, recoveryArtifacts, recoveryErr := performRawOnlyRecovery(context.Background(), root, sessionID, authority)
 	validation.RecoveryCursorSHA256 = proof.CursorSHA256
 	validation.RecoveryPolicySHA256 = proof.PolicySHA256
 	validation.RecoveryAuditSHA256 = proof.AuditSHA256
@@ -134,7 +142,11 @@ func validateCompletedAttempt(root, sessionID string, productClean, obsClean boo
 	validation.RecoveryOverlaySHA256 = proof.OverlaySHA256
 	validation.RecoveryMaxRSSBytes = proof.MaxRSSBytes
 	validation.RecoveryCleanShutdown = proof.CleanShutdown
+	validation.RecoveryAuthoritySHA256 = proof.AuthorityPreflightSHA256
 	validation.NoCacheRecovery = recoveryErr == nil && proof.CleanShutdown && proof.MaxRSSBytes > 0 && proof.MaxRSSBytes <= AcceptedBounds().RecoveryRSSBytes
+	if authority != nil {
+		validation.NoCacheRecovery = validation.NoCacheRecovery && proof.AuthorityPreflightSHA256 == authority.Harness.AuthorityPreflightSHA256
+	}
 	payload, _ := canonical(validation)
 	relative := "evidence/canonical/live-validation.json"
 	if err := writePrivate(filepath.Join(root, relative), payload); err != nil {
@@ -196,7 +208,7 @@ func summarizeAttempt(sessionDir string) (attemptValidation, error) {
 	return result, nil
 }
 
-func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recoveryProof, []Artifact, error) {
+func performRawOnlyRecovery(ctx context.Context, root, sessionID string, authority *authorityRecoveryContext) (recoveryProof, []Artifact, error) {
 	var proof recoveryProof
 	sourceSession := filepath.Join(root, "data/sessions", sessionID)
 	inputRoot := filepath.Join(root, "evidence/recovery-input", sessionID)
@@ -252,6 +264,16 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 	}
 	if _, err := writeLiveArtifacts(recoveryRoot, sessionID); err != nil {
 		return proof, nil, err
+	}
+	if authority != nil {
+		if err := copyAuthoritySnapshot(filepath.Join(root, "evidence/authority-root"), filepath.Join(recoveryRoot, "evidence/authority-root")); err != nil {
+			return proof, nil, err
+		}
+		authoritySHA, verifyErr := verifyAuthorityEvidenceAt(filepath.Join(recoveryRoot, "evidence/authority-root"), authority.Readiness, authority.Harness, authority.MatchID)
+		if verifyErr != nil || authoritySHA != authority.Harness.AuthorityPreflightSHA256 {
+			return proof, nil, errors.New("recovery authority graph continuity failed")
+		}
+		proof.AuthorityPreflightSHA256 = authoritySHA
 	}
 	for _, directory := range []string{"runtime", "evidence/canonical", "evidence/logs"} {
 		if err := rootMkdirAll(filepath.Join(recoveryRoot, directory), 0o700); err != nil {
@@ -402,6 +424,22 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 	artifacts := append([]Artifact(nil), proof.RawInputs...)
 	artifacts = append(artifacts, Artifact{Path: "evidence/canonical/raw-only-recovery.json", SHA256: payloadSHA(proofPayload), Bytes: int64(len(proofPayload))})
 	return proof, artifacts, nil
+}
+
+func copyAuthoritySnapshot(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return rootMkdirAll(filepath.Join(destination, relative), 0o700)
+		}
+		return copyFile(path, filepath.Join(destination, relative), 0o600)
+	})
 }
 
 func readOperatorInputs(path string) ([][]byte, error) {
