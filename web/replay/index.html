@@ -106,6 +106,17 @@ const STATUS = {
   quarantined: ["warn", "隔离"],
 };
 
+// esc escapes untrusted strings for safe HTML interpolation. Match/category/
+// reason values come from persisted artifacts and are never trusted.
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function load() {
   try {
     const resp = await fetch("/api/replay/v1/corpus");
@@ -117,15 +128,15 @@ async function load() {
       const [cls, label] = STATUS[m.status] || ["warn", m.status];
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td><a href="match.html?id=${m.match_id}">${m.match_id}</a></td>
-        <td class="hint">${m.category || "-"}</td>
-        <td><span class="badge ${cls}">${label}</span></td>
-        <td class="hint">${m.identity_state || "-"}</td>
-        <td class="hint">${m.clock_state || "-"}</td>
-        <td class="hint">${m.parse_state || "-"}</td>
-        <td class="hint">${m.publication || "-"}</td>
-        <td class="num">${m.tree_sha256 ? m.tree_sha256.slice(0, 12) + "…" : "-"}</td>
-        <td class="num">${m.duration_seconds != null ? Math.round(m.duration_seconds) : "-"}</td>`;
+        <td><a href="match.html?id=${esc(m.match_id)}">${esc(m.match_id)}</a></td>
+        <td class="hint">${esc(m.category || "-")}</td>
+        <td><span class="badge ${esc(cls)}">${esc(label)}</span></td>
+        <td class="hint">${esc(m.identity_state || "-")}</td>
+        <td class="hint">${esc(m.clock_state || "-")}</td>
+        <td class="hint">${esc(m.parse_state || "-")}</td>
+        <td class="hint">${esc(m.publication || "-")}</td>
+        <td class="num">${esc(m.tree_sha256 ? m.tree_sha256.slice(0, 12) + "…" : "-")}</td>
+        <td class="num">${esc(m.duration_seconds != null ? Math.round(m.duration_seconds) : "-")}</td>`;
       tbody.appendChild(tr);
     }
     document.getElementById("status").textContent = `${matches.length} 场比赛`;

@@ -59,7 +59,7 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 			Participants: []roles.RoleRecord{{AccountID: "1000", NominalRole: "1", RoleConfidence: "high"}},
 		}},
 	}}}
-	srv := New(st, reg, "")
+	srv := New(st, reg, nil, "")
 	ts := httptest.NewServer(srv.Handler())
 	return srv, ts
 }

@@ -72,7 +72,12 @@ type Report struct {
 
 // Build loads the persisted artifacts for one match from the store and merges
 // them into a report. Missing artifacts are tolerated and reported.
-func Build(st *store.Store, matchID string, roleReg *roles.Registry) (*Report, error) {
+// Build loads the persisted artifacts for one match from the store and merges
+// them into a report. roleReg (and overrides) supply nominal-role provenance;
+// when they are nil the participants are still listed (with unassigned roles
+// and explicit reasons) so the failure is auditable instead of a silent empty
+// table. Publication still requires the role gate via PublicationGate.
+func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *roles.OverrideFile) (*Report, error) {
 	r := &Report{
 		SchemaVersion: version.ReportSchema,
 		MatchID:       matchID,
@@ -140,14 +145,20 @@ func Build(st *store.Store, matchID string, roleReg *roles.Registry) (*Report, e
 		r.Category = input.Category
 	}
 
-	// Participants with role provenance from the frozen registry.
-	if r.Identity != nil && roleReg != nil {
+	// Participants with role provenance from the frozen registry. Identity
+	// participants are ALWAYS listed; when role data is unavailable the row
+	// carries an explicit unassigned role and reason so the gap is auditable.
+	if r.Identity != nil {
 		for _, p := range r.Identity.Participants {
 			part := Participant{
 				Slot: p.Slot, AccountID: p.AccountID, PlayerName: p.PlayerName,
 				HeroName: p.HeroName, HeroID: p.HeroID, Side: p.Side,
 			}
-			if eff, ok := roleReg.Effective(matchID, p.AccountID, nil); ok {
+			if roleReg == nil {
+				part.NominalRole = "unassigned"
+				part.RoleConfidence = "unavailable"
+				r.UnavailableReasons = append(r.UnavailableReasons, fmt.Sprintf("role:%s:registry_unavailable", p.AccountID))
+			} else if eff, ok := roleReg.Effective(matchID, p.AccountID, overrides); ok {
 				part.NominalRole = eff.NominalRole
 				part.TeamID = eff.TeamID
 				part.TeamName = eff.TeamName
@@ -213,4 +224,66 @@ func (r *Report) CanonicalJSON() ([]byte, error) { return json.Marshal(r) }
 // SortParticipants orders participants by slot for deterministic output.
 func (r *Report) SortParticipants() {
 	sort.Slice(r.Participants, func(i, j int) bool { return r.Participants[i].Slot < r.Participants[j].Slot })
+}
+
+// GateResult is the outcome of the publication gate.
+type GateResult struct {
+	OK      bool
+	Reasons []string
+}
+
+// PublicationGate verifies the role-provenance publication gate: exactly ten
+// identity-bound participants, each with a valid nominal role 1-5 and source
+// provenance (source kind and confidence present). Missing registry, missing
+// participant rows, or an invalid role fails the gate with explicit reasons.
+func (r *Report) PublicationGate() GateResult {
+	g := GateResult{OK: true, Reasons: []string{}}
+	if r.Identity == nil || r.Identity.State != identity.StateVerified {
+		g.OK = false
+		g.Reasons = append(g.Reasons, "identity_gate_not_verified")
+	}
+	if len(r.Participants) != 10 {
+		g.OK = false
+		g.Reasons = append(g.Reasons, fmt.Sprintf("participants=%d_want_10", len(r.Participants)))
+	}
+	rolesBySide := map[string]map[string]bool{
+		"radiant": {},
+		"dire":    {},
+	}
+	for _, p := range r.Participants {
+		valid := false
+		switch p.NominalRole {
+		case "1", "2", "3", "4", "5":
+			valid = true
+		}
+		if !valid {
+			g.OK = false
+			g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:invalid_or_missing(%s)", p.AccountID, p.NominalRole))
+			continue
+		}
+		if p.RoleSource == "" {
+			g.OK = false
+			g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:missing_source", p.AccountID))
+		}
+		if p.RoleConfidence == "" || p.RoleConfidence == "unavailable" {
+			g.OK = false
+			g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:missing_confidence", p.AccountID))
+		}
+		if m, ok := rolesBySide[p.Side]; ok {
+			m[p.NominalRole] = true
+		}
+	}
+	// Exactly two participants per role per side (frozen roster contract).
+	for side, m := range rolesBySide {
+		for _, role := range []string{"1", "2", "3", "4", "5"} {
+			if !m[role] {
+				g.OK = false
+				g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:%s_missing", side, role))
+			}
+		}
+	}
+	if len(g.Reasons) == 0 {
+		g.OK = true
+	}
+	return g
 }

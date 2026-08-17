@@ -62,6 +62,25 @@
 <script>
 const PHRASE = { laning: "对线期", midgame: "中期", decisive: "决胜期" };
 
+// esc escapes untrusted strings for safe interpolation into HTML. Every
+// replay/public-record value rendered by this page passes through esc() so a
+// crafted player/team/registry string cannot inject markup or script.
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// safeUrl accepts only http/https links; anything else renders as text "-".
+function safeUrl(v) {
+  const s = String(v || "");
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
 async function load() {
   const id = new URLSearchParams(location.search).get("id");
   document.getElementById("match-id").textContent = id || "?";
@@ -84,22 +103,23 @@ function render(r) {
   const status = r.status || "?";
   const cls = status === "verified" ? "ok" : (status === "quarantined" ? "warn" : "err");
   let dur = r.clock && r.clock.game_duration_seconds ? Math.round(r.clock.game_duration_seconds) : "-";
+  const unavailItems = (r.unavailable_reasons || []).map(u => `<li>${esc(u)}</li>`).join("");
   let s = `
     <div class="grid">
       <div class="panel">
         <h3 style="margin-top:0">比赛状态</h3>
         <table>
-          <tr><th>终态</th><td><span class="badge ${cls}">${status}</span> ${r.status_reason || ""}</td></tr>
-          <tr><th>发布</th><td>${r.publication || "suppressed"}</td></tr>
-          <tr><th>身份</th><td>${r.identity ? r.identity.state : "-"} · 选手闸门 ${r.identity ? r.identity.gate_participants : "-"} · 队伍闸门 ${r.identity ? r.identity.gate_teams : "-"}</td></tr>
-          <tr><th>时钟</th><td>${r.clock ? r.clock.state : "-"} · 时长 ${dur}s${r.clock && r.clock.duration_delta_seconds != null ? " (公共差 " + r.clock.duration_delta_seconds.toFixed(1) + "s)" : ""}</td></tr>
-          <tr><th>版本</th><td class="mono">parser=${r.verification ? r.verification.parser_name + " " + r.verification.parser_version : "-"} · schema=${r.schema_version}</td></tr>
-          <tr><th>标准哈希</th><td class="mono">${r.canonical ? r.canonical.tree_sha256 : "-"}</td></tr>
+          <tr><th>终态</th><td><span class="badge ${cls}">${esc(status)}</span> ${esc(r.status_reason || "")}</td></tr>
+          <tr><th>发布</th><td>${esc(r.publication || "suppressed")}</td></tr>
+          <tr><th>身份</th><td>${esc(r.identity ? r.identity.state : "-")} · 选手闸门 ${esc(r.identity ? r.identity.gate_participants : "-")} · 队伍闸门 ${esc(r.identity ? r.identity.gate_teams : "-")}</td></tr>
+          <tr><th>时钟</th><td>${esc(r.clock ? r.clock.state : "-")} · 时长 ${esc(dur)}s${r.clock && r.clock.duration_delta_seconds != null ? " (公共差 " + esc(r.clock.duration_delta_seconds.toFixed(1)) + "s)" : ""}</td></tr>
+          <tr><th>版本</th><td class="mono">parser=${esc(r.verification ? r.verification.parser_name + " " + r.verification.parser_version : "-")} · schema=${esc(r.schema_version)}</td></tr>
+          <tr><th>标准哈希</th><td class="mono">${esc(r.canonical ? r.canonical.tree_sha256 : "-")}</td></tr>
         </table>
       </div>
       <div class="panel">
         <h3 style="margin-top:0">不可用字段</h3>
-        ${r.unavailable_reasons && r.unavailable_reasons.length ? `<ul class="hint">${r.unavailable_reasons.map(u => `<li>${u}</li>`).join("")}</ul>` : `<p class="hint">无</p>`}
+        ${unavailItems ? `<ul class="hint">${unavailItems}</ul>` : `<p class="hint">无</p>`}
       </div>
     </div>`;
   c.insertAdjacentHTML("beforeend", s);
@@ -108,15 +128,16 @@ function render(r) {
   let pt = `<div class="panel"><h3 style="margin-top:0">选手与名义角色</h3><table><thead><tr>
     <th>槽位</th><th>选手</th><th>英雄</th><th>队伍</th><th>边</th><th>角色</th><th>角色来源</th><th>来源链接</th></tr></thead><tbody>`;
   for (const p of (r.participants || [])) {
+    const url = safeUrl(p.role_source_url);
     pt += `<tr>
-      <td class="num">${p.slot}</td>
-      <td>${p.player_name} <span class="hint">(${p.account_id})</span></td>
-      <td>${p.hero_name || "-"}</td>
-      <td>${p.team_name || "-"}</td>
-      <td class="${p.side === 'radiant' ? 'ok' : p.side === 'dire' ? 'err' : ''}">${p.side || "-"}</td>
-      <td><span class="role">${p.nominal_role || "?"}</span>${p.role_confidence || ""}</td>
-      <td class="hint">${p.role_source || "-"}</td>
-      <td>${p.role_source_url ? `<a href="${p.role_source_url}" target="_blank" rel="noopener">来源</a>` : "-"}</td></tr>`;
+      <td class="num">${esc(p.slot)}</td>
+      <td>${esc(p.player_name)} <span class="hint">(${esc(p.account_id)})</span></td>
+      <td>${esc(p.hero_name || "-")}</td>
+      <td>${esc(p.team_name || "-")}</td>
+      <td class="${p.side === 'radiant' ? 'ok' : p.side === 'dire' ? 'err' : ''}">${esc(p.side || "-")}</td>
+      <td><span class="role">${esc(p.nominal_role || "?")}</span>${esc(p.role_confidence || "")}</td>
+      <td class="hint">${esc(p.role_source_kind || p.role_source || "-")}</td>
+      <td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">来源</a>` : "-"}</td></tr>`;
   }
   pt += `</tbody></table></div>`;
   c.insertAdjacentHTML("beforeend", pt);
@@ -128,27 +149,29 @@ function render(r) {
       const w = Math.max(1, Math.round(100 * (iv.end_game_second - iv.start_game_second) / total));
       const cls = iv.global_phase === "laning" ? "ph-laning" : iv.global_phase === "midgame" ? "ph-midgame" : iv.global_phase === "decisive" ? "ph-decisive" : "ph-other";
       const label = PHRASE[iv.global_phase] || iv.global_phase;
-      return `<div class="tl-seg ${cls}" style="width:${w}%" title="${iv.start_game_second}s–${iv.end_game_second}s ${label}">${w > 8 ? label : ""}</div>`;
+      return `<div class="tl-seg ${cls}" style="width:${esc(w)}%" title="${esc(iv.start_game_second)}s–${esc(iv.end_game_second)}s ${esc(label)}">${w > 8 ? esc(label) : ""}</div>`;
     }).join("");
+    const phaseHint = r.phases.intervals.map(iv => `${esc(PHRASE[iv.global_phase] || iv.global_phase)}:${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s(r${esc(iv.round_index)})`).join(" · ");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">官方阶段时间线</h3>
         <div class="timeline">${segs}</div>
-        <p class="hint">每段含证据事件 ${r.phases.intervals.map(iv => `${PHRASE[iv.global_phase] || iv.global_phase}:${iv.start_game_second}–${iv.end_game_second}s(r${iv.round_index})`).join(" · ")}</p>
-        <p class="hint">重置回合: ${(r.phases.resets || []).length} 个（重置是事件，不是阶段）</p>
+        <p class="hint">每段含证据事件 ${phaseHint}</p>
+        <p class="hint">重置回合: ${esc((r.phases.resets || []).length)} 个（重置是事件，不是阶段）</p>
       </div>`);
   }
 
   // 核心事件（行为片段）
   if (r.episodes && r.episodes.episodes) {
     let rows = r.episodes.episodes.map(ep => `<tr>
-      <td>${ep.kind}</td><td class="num">${ep.start_game_second}s</td><td class="num">${ep.end_game_second}s</td>
-      <td>${(ep.participants || []).join(", ") || ep.account_id || "-"}</td><td class="hint">${ep.detail || ""}</td></tr>`).join("");
+      <td>${esc(ep.kind)}</td><td class="num">${esc(ep.start_game_second)}s</td><td class="num">${esc(ep.end_game_second)}s</td>
+      <td>${esc((ep.participants || []).join(", ") || ep.account_id || "-")}</td><td class="hint">${esc(ep.detail || "")}</td></tr>`).join("");
+    const unavailEp = (r.episodes.unavailable || []).map(u => `<li>${esc(u.kind)}: ${esc(u.reason)}</li>`).join("");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">行为片段</h3>
         <table><thead><tr><th>类型</th><th>开始</th><th>结束</th><th>参与者</th><th>细节</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="hint">无</td></tr>`}</tbody></table>
-        <details><summary>不可用片段族</summary><ul class="hint">${(r.episodes.unavailable || []).map(u => `<li>${u.kind}: ${u.reason}</li>`).join("") || "<li>无</li>"}</ul></details>
+        <details><summary>不可用片段族</summary><ul class="hint">${unavailEp || "<li>无</li>"}</ul></details>
       </div>`);
   }
 
@@ -161,21 +184,23 @@ function render(r) {
     let mrows = "";
     for (const [acct, vals] of Object.entries(byAcct)) {
       const name = (r.participants || []).find(p => p.account_id === acct);
-      mrows += `<tr><td>${name ? name.player_name : acct} <span class="hint">${name ? "角色" + (name.nominal_role || "?") : ""}</span></td>` +
-        vals.map(v => `<td class="num">${v.int_value != null ? v.int_value : v.value}</td>`).join("") + `</tr>`;
+      mrows += `<tr><td>${esc(name ? name.player_name : acct)} <span class="hint">${name ? "角色" + esc(name.nominal_role || "?") : ""}</span></td>` +
+        vals.map(v => `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}</td>`).join("") + `</tr>`;
     }
     const headers = [...new Set(r.metrics.values.map(v => v.metric_id))];
+    const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li>${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">V1 直接事实（原始值）</h3>
-        <table><thead><tr><th>选手</th>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${mrows}</tbody></table>
-        <details><summary>不可用指标</summary><ul class="hint">${(r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li>${v.account_id}/${v.metric_id}: ${v.unavailable_reason}</li>`).join("") || "<li>无</li>"}</ul></details>
+        <table><thead><tr><th>选手</th>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${mrows}</tbody></table>
+        <details><summary>不可用指标</summary><ul class="hint">${unavailMet || "<li>无</li>"}</ul></details>
       </div>`);
   }
 
   // 队伍
   if (r.teams && r.teams.length) {
-    c.insertAdjacentHTML("beforeend", `<div class="panel"><h3 style="margin-top:0">队伍</h3><table>${r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${t.side}</td><td>${t.team_name}</td><td class="hint">${t.team_id}</td><td>${t.tag || ""}</td></tr>`).join("")}</table></div>`);
+    const teamRows = r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${esc(t.side)}</td><td>${esc(t.team_name)}</td><td class="hint">${esc(t.team_id)}</td><td>${esc(t.tag || "")}</td></tr>`).join("");
+    c.insertAdjacentHTML("beforeend", `<div class="panel"><h3 style="margin-top:0">队伍</h3><table>${teamRows}</table></div>`);
   }
 }
 load();

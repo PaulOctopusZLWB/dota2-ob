@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -64,18 +65,59 @@ func replayFlags(fs *flag.FlagSet) (*string, *string, *string, *string) {
 	return manifest, replayRoot, dataRoot, matchID
 }
 
-func loadRegistry(manifestPath, dataRoot string) (*roles.Registry, string) {
-	// The role registry path is derived from the manifest convention or the
-	// data root override file.
+// roleInputs bundles the effective role-provenance inputs for the runner.
+type roleInputs struct {
+	Registry  *roles.Registry
+	Overrides *roles.OverrideFile
+	RegistrySHA string
+	OverridesSHA string
+	RegistryPath string
+	OverridesPath string
+}
+
+// fileSHA256 returns the hex sha256 of a file, or "" when absent.
+func fileSHA256(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("%x", sum), nil
+}
+
+// loadRoleInputs loads the frozen role registry and optional explicit override
+// file from the manifest directory. A missing or unreadable registry is a hard
+// error: role provenance is a publication gate, never silently discarded.
+func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 	roleFile := filepath.Join(filepath.Dir(manifestPath), "ti2026-five-replay-role-registry-v1.json")
 	if _, err := os.Stat(roleFile); err != nil {
-		roleFile = filepath.Join(dataRoot, "role-registry.json")
+		return nil, fmt.Errorf("role_registry_missing (expected %s): %w", roleFile, err)
 	}
 	reg, err := roles.LoadRegistry(roleFile)
 	if err != nil {
-		return nil, roleFile
+		return nil, fmt.Errorf("role_registry_load_failed (%s): %w", roleFile, err)
 	}
-	return reg, roleFile
+	regSHA, err := fileSHA256(roleFile)
+	if err != nil {
+		return nil, fmt.Errorf("role_registry_hash_failed: %w", err)
+	}
+	overrideFile := filepath.Join(filepath.Dir(manifestPath), "ti2026-five-replay-role-overrides-v1.json")
+	overrides, err := roles.LoadOverrides(overrideFile)
+	if err != nil {
+		return nil, fmt.Errorf("role_overrides_load_failed (%s): %w", overrideFile, err)
+	}
+	ovrSHA, err := fileSHA256(overrideFile)
+	if err != nil {
+		return nil, fmt.Errorf("role_overrides_hash_failed: %w", err)
+	}
+	return &roleInputs{
+		Registry: reg, Overrides: overrides,
+		RegistrySHA: regSHA, OverridesSHA: ovrSHA,
+		RegistryPath: roleFile, OverridesPath: overrideFile,
+	}, nil
 }
 
 // cmdVerify verifies archive+demo integrity for every manifest entry without
@@ -156,8 +198,16 @@ func cmdParse(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "store_init_failed: %v\n", err)
 		return 1
 	}
-	reg, _ := loadRegistry(*manifest, *dataRoot)
-	res, err := runner.RunMatch(st, mt, *replayRoot, reg, nil, func(line string) {
+	ri, err := loadRoleInputs(*manifest, *dataRoot)
+	if err != nil {
+		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
+		return 1
+	}
+	opts := runner.Options{
+		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
+		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
+	}
+	res, err := runner.RunMatch(st, mt, *replayRoot, opts, nil, func(line string) {
 		fmt.Fprintln(output, line)
 	})
 	if err != nil {
@@ -198,13 +248,21 @@ func cmdProbe(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "store_init_failed: %v\n", err)
 		return 1
 	}
-	reg, _ := loadRegistry(*manifest, *dataRoot)
+	ri, err := loadRoleInputs(*manifest, *dataRoot)
+	if err != nil {
+		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
+		return 1
+	}
+	opts := runner.Options{
+		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
+		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
+	}
 	matches := make([]*archive.Match, 0, len(m.Matches))
 	for i := range m.Matches {
 		matches = append(matches, &m.Matches[i])
 	}
 	start := time.Now()
-	results := runner.RunBatch(st, matches, *replayRoot, reg, nil, *workers, func(line string) {
+	results := runner.RunBatch(st, matches, *replayRoot, opts, nil, *workers, func(line string) {
 		fmt.Fprintln(output, line)
 	})
 	wall := time.Since(start)
@@ -225,17 +283,15 @@ func cmdProbe(args []string, output io.Writer) int {
 			verified++
 		}
 	}
-	fmt.Fprintf(output, "probe_result: %d/5 verified, wall=%.1fs, %s\n", verified, wall.Seconds(), runner.SummarizeResults(results))
-	// The five probes must all reach an explicit terminal state; verified or
-	// quarantined are both explicit. Only a hard runner error is fatal.
-	fatal := 0
+	fmt.Fprintf(output, "probe_result: %d/%d verified, wall=%.1fs, %s\n", verified, len(results), wall.Seconds(), runner.SummarizeResults(results))
+	// Gate failures must fail the command: any match not verified (missing,
+	// corrupt, parse_failed, quarantined identity/clock/role) is a non-zero
+	// exit. All matches are still processed and their terminal states
+	// recorded; batch isolation is preserved.
 	for _, r := range results {
-		if r.Status == store.StatusParseFailed && strings.HasPrefix(r.Reason, "runner_error") {
-			fatal++
+		if r.Status != store.StatusVerified {
+			return 1
 		}
-	}
-	if fatal > 0 {
-		return 1
 	}
 	return 0
 }
@@ -274,18 +330,33 @@ func cmdBatch(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "store_init_failed: %v\n", err)
 		return 1
 	}
-	reg, _ := loadRegistry(*manifest, *dataRoot)
+	ri, err := loadRoleInputs(*manifest, *dataRoot)
+	if err != nil {
+		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
+		return 1
+	}
+	opts := runner.Options{
+		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
+		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
+	}
 	matches := make([]*archive.Match, 0, len(m.Matches))
 	for i := range m.Matches {
 		matches = append(matches, &m.Matches[i])
 	}
 	start := time.Now()
-	results := runner.RunBatch(st, matches, *replayRoot, reg, nil, *workers, func(line string) {
+	results := runner.RunBatch(st, matches, *replayRoot, opts, nil, *workers, func(line string) {
 		fmt.Fprintln(output, line)
 	})
 	wall := time.Since(start)
 	fmt.Fprintf(output, "batch_result: %s wall=%.1fs workers=%d\n", runner.SummarizeResults(results), wall.Seconds(), *workers)
 	_ = *resume
+	// Batch gate failures fail the command while preserving per-match
+	// terminal-state recording (batch isolation is unchanged).
+	for _, r := range results {
+		if r.Status != store.StatusVerified {
+			return 1
+		}
+	}
 	return 0
 }
 
@@ -346,7 +417,9 @@ func cmdRebuildCatalog(args []string, output io.Writer) int {
 	return 0
 }
 
-// runServe starts the local loopback replay web server.
+// runServe starts the local loopback replay web server. The manifest is
+// required: the role registry it points to is a publication gate, and the API
+// must never rebuild published reports with a nil registry.
 func runServe(args []string, output io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dataRoot := fs.String("data-root", "./data/replay", "persisted artifact data root")
@@ -356,19 +429,21 @@ func runServe(args []string, output io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *manifest == "" {
+		fmt.Fprintln(output, "serve requires --manifest (role registry is a publication gate)")
+		return 2
+	}
 	st, err := store.New(*dataRoot)
 	if err != nil {
 		fmt.Fprintf(output, "store_init_failed: %v\n", err)
 		return 1
 	}
-	reg, roleFile := (*roles.Registry)(nil), ""
-	if *manifest != "" {
-		reg, roleFile = loadRegistry(*manifest, *dataRoot)
-		if reg == nil {
-			fmt.Fprintf(output, "role_registry_missing (expected %s)\n", roleFile)
-		}
+	ri, err := loadRoleInputs(*manifest, *dataRoot)
+	if err != nil {
+		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
+		return 1
 	}
-	srv := api.New(st, reg, roleFile)
+	srv := api.New(st, ri.Registry, ri.Overrides, ri.RegistryPath)
 	handler := serveHandler(srv)
 	return listenAndServe(*listen, handler, output)
 }

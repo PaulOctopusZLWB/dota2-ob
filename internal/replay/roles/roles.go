@@ -45,7 +45,7 @@ type RoleRecord struct {
 	PlayerName     string `json:"player_name"`
 	ExpectedHeroID int    `json:"expected_hero_id"`
 	NominalRole    string `json:"nominal_role"`
-	RoleConfidence string `json:"role_confidence"`
+	RoleConfidence string `json:"confidence"`
 }
 
 // Override is one explicit manual role override.

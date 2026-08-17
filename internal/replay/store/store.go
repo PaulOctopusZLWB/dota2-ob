@@ -66,7 +66,9 @@ func (s *Store) ArtifactPath(matchID, artifact string) string {
 }
 
 // InputFingerprint is the deterministic identity of the frozen manifest entry
-// plus pipeline versions. It is part of the canonical resume key.
+// plus every output-affecting pipeline version (parser, adapter, schemas, and
+// rule algorithms). It is the canonical resume key: a change in any covered
+// version invalidates prior outputs so stale artifacts are never reused.
 type InputFingerprint struct {
 	SchemaVersion  string `json:"schema_version"`
 	MatchID        string `json:"match_id"`
@@ -75,6 +77,25 @@ type InputFingerprint struct {
 	ParserName     string `json:"parser_name"`
 	ParserVersion  string `json:"parser_version"`
 	AdapterVersion string `json:"adapter_version"`
+	// Schema versions of every persisted artifact family.
+	RawSchema     string `json:"raw_schema"`
+	FactsSchema   string `json:"facts_schema"`
+	ClockSchema   string `json:"clock_schema"`
+	IdentitySchema string `json:"identity_schema"`
+	EpisodeSchema string `json:"episode_schema"`
+	PhaseSchema   string `json:"phase_schema"`
+	MetricsSchema string `json:"metrics_schema"`
+	ReportSchema  string `json:"report_schema"`
+	RoleSchema    string `json:"role_schema"`
+	// Rule/algorithm versions of every derived artifact.
+	PhaseRuleVersion   string `json:"phase_rule_version"`
+	EpisodeRuleVersion string `json:"episode_rule_version"`
+	LaneRuleVersion    string `json:"lane_rule_version"`
+	MetricsRuleVersion string `json:"metrics_rule_version"`
+	// Effective role-registry identity: registry content hash plus override
+	// content hash when overrides exist (both affect published results).
+	RoleRegistrySHA256 string `json:"role_registry_sha256"`
+	RoleOverridesSHA256 string `json:"role_overrides_sha256,omitempty"`
 }
 
 // Canonical is the canonical artifact-tree record.
@@ -145,6 +166,64 @@ func WriteAtomic(path string, data []byte) error {
 	return nil
 }
 
+// StreamWriter writes a large artifact atomically: bytes go to a temporary
+// file in the destination directory and are fsynced and renamed into place on
+// Close. Abort removes the temp file without touching the destination, so an
+// interrupted write never coexists with (or clobbers) a valid artifact.
+type StreamWriter struct {
+	path string
+	tmp  *os.File
+	done bool
+}
+
+// NewStreamWriter opens an atomic streaming writer for path.
+func NewStreamWriter(path string) (*StreamWriter, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("store: mkdir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-*.part")
+	if err != nil {
+		return nil, fmt.Errorf("store: temp file: %w", err)
+	}
+	return &StreamWriter{path: path, tmp: tmp}, nil
+}
+
+// Write implements io.Writer.
+func (w *StreamWriter) Write(p []byte) (int, error) { return w.tmp.Write(p) }
+
+// Abort discards the partial write and removes the temp file.
+func (w *StreamWriter) Abort() {
+	if w == nil || w.tmp == nil {
+		return
+	}
+	name := w.tmp.Name()
+	w.tmp.Close()
+	os.Remove(name)
+	w.done = true
+}
+
+// Close flushes, fsyncs, and atomically renames the temp file into place.
+func (w *StreamWriter) Close() error {
+	if w == nil || w.tmp == nil {
+		return nil
+	}
+	name := w.tmp.Name()
+	defer os.Remove(name)
+	if err := w.tmp.Sync(); err != nil {
+		w.tmp.Close()
+		return fmt.Errorf("store: sync temp: %w", err)
+	}
+	if err := w.tmp.Close(); err != nil {
+		return fmt.Errorf("store: close temp: %w", err)
+	}
+	if err := os.Rename(name, w.path); err != nil {
+		return fmt.Errorf("store: promote %s: %w", w.path, err)
+	}
+	w.done = true
+	return nil
+}
+
 // WriteJSON writes a value as deterministic JSON (marshal is stable for the
 // repo's struct types) to an artifact path atomically.
 func (s *Store) WriteJSON(matchID, artifact string, v interface{}) error {
@@ -184,21 +263,40 @@ func (s *Store) OpenArtifact(matchID, artifact string) (*os.File, error) {
 	return os.Open(s.ArtifactPath(matchID, artifact))
 }
 
-// Fingerprint builds the input fingerprint for a manifest entry.
-func Fingerprint(archiveSHA, demoSHA, matchID string) InputFingerprint {
+// Fingerprint builds the version-complete input fingerprint for a manifest
+// entry. roleRegistrySHA and roleOverridesSHA are content hashes of the
+// effective role registry and override inputs (empty when absent).
+func Fingerprint(archiveSHA, demoSHA, matchID, roleRegistrySHA, roleOverridesSHA string) InputFingerprint {
 	return InputFingerprint{
-		SchemaVersion:  version.IdentitySchema,
-		MatchID:        matchID,
-		ArchiveSHA256:  archiveSHA,
-		DemoSHA256:     demoSHA,
-		ParserName:     version.ParserName,
-		ParserVersion:  version.ParserVersion,
-		AdapterVersion: version.AdapterVersion,
+		SchemaVersion:      version.IdentitySchema,
+		MatchID:            matchID,
+		ArchiveSHA256:      archiveSHA,
+		DemoSHA256:         demoSHA,
+		ParserName:         version.ParserName,
+		ParserVersion:      version.ParserVersion,
+		AdapterVersion:     version.AdapterVersion,
+		RawSchema:          version.RawSchema,
+		FactsSchema:        version.FactsSchema,
+		ClockSchema:        version.ClockSchema,
+		IdentitySchema:     version.IdentitySchema,
+		EpisodeSchema:      version.EpisodeSchema,
+		PhaseSchema:        version.PhaseSchema,
+		MetricsSchema:      version.MetricsSchema,
+		ReportSchema:       version.ReportSchema,
+		RoleSchema:         version.RoleSchema,
+		PhaseRuleVersion:   version.PhaseRuleVersion,
+		EpisodeRuleVersion: version.EpisodeRuleVersion,
+		LaneRuleVersion:    version.LaneRuleVersion,
+		MetricsRuleVersion: version.MetricsRuleVersion,
+		RoleRegistrySHA256: roleRegistrySHA,
+		RoleOverridesSHA256: roleOverridesSHA,
 	}
 }
 
 // CanonicalExists reports whether a canonical record matching the fingerprint
 // is present for the match (i.e. the stage is already complete and resumable).
+//
+// Deprecated: use ValidateCanonical which also verifies the artifact tree.
 func (s *Store) CanonicalExists(matchID string, fp InputFingerprint) (bool, error) {
 	var c Canonical
 	err := s.ReadJSON(matchID, ArtifactCanonical, &c)
@@ -212,6 +310,99 @@ func (s *Store) CanonicalExists(matchID string, fp InputFingerprint) (bool, erro
 		return false, nil
 	}
 	return c.Fingerprint == fp, nil
+}
+
+// ValidateCanonical verifies a completed match tree end to end: the canonical
+// record must exist, match the input fingerprint, declare the expected
+// artifact set, and every recorded file must exist with a matching SHA-256
+// and be covered by the recomputed tree hash. It returns the canonical record
+// on success. Any mismatch (missing/corrupt file, tampered record, wrong
+// fingerprint, unexpected extra files) returns a typed IntegrityError so the
+// caller can fail closed or rebuild safely; a valid unchanged tree resumes.
+func (s *Store) ValidateCanonical(matchID string, fp InputFingerprint, expected []string) (*Canonical, error) {
+	var c Canonical
+	if err := s.ReadJSON(matchID, ArtifactCanonical, &c); err != nil {
+		if os.IsNotExist(err) {
+			return nil, &IntegrityError{MatchID: matchID, Reason: "canonical_marker_missing"}
+		}
+		// Unreadable or malformed marker is invalid state; the caller must
+		// invalidate it and rebuild (fail closed) rather than resume.
+		return nil, &IntegrityError{MatchID: matchID, Reason: "canonical_marker_malformed"}
+	}
+	if c.SchemaVersion != version.ReportSchema {
+		return nil, &IntegrityError{MatchID: matchID, Reason: "canonical_schema_mismatch"}
+	}
+	if c.MatchID != matchID {
+		return nil, &IntegrityError{MatchID: matchID, Reason: "canonical_match_id_mismatch"}
+	}
+	if c.Fingerprint != fp {
+		return nil, &IntegrityError{MatchID: matchID, Reason: "canonical_fingerprint_mismatch"}
+	}
+
+	// Expected artifact set must be exactly the recorded file set.
+	expectedSet := map[string]bool{}
+	for _, name := range expected {
+		expectedSet[name] = true
+	}
+	for name := range c.Files {
+		if !expectedSet[name] {
+			return nil, &IntegrityError{MatchID: matchID, Reason: fmt.Sprintf("unexpected_artifact_%s", name)}
+		}
+	}
+	for name := range expectedSet {
+		if _, ok := c.Files[name]; !ok {
+			return nil, &IntegrityError{MatchID: matchID, Reason: fmt.Sprintf("artifact_missing_from_canonical_%s", name)}
+		}
+	}
+
+	// Re-hash every recorded file and recompute the tree hash.
+	entries := map[string]string{}
+	h := sha256.New()
+	names := make([]string, 0, len(c.Files))
+	for name := range c.Files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := filepath.Join(s.MatchDir(matchID), name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, &IntegrityError{MatchID: matchID, Reason: fmt.Sprintf("artifact_missing_%s", name)}
+		}
+		fh := sha256.Sum256(b)
+		got := hex.EncodeToString(fh[:])
+		if got != c.Files[name] {
+			return nil, &IntegrityError{MatchID: matchID, Reason: fmt.Sprintf("artifact_hash_mismatch_%s", name)}
+		}
+		entries[name] = got
+		fmt.Fprintf(h, "%s\x00%s\x00", name, got)
+	}
+	tree := hex.EncodeToString(h.Sum(nil))
+	if tree != c.TreeSHA256 {
+		return nil, &IntegrityError{MatchID: matchID, Reason: "canonical_tree_hash_mismatch"}
+	}
+	return &c, nil
+}
+
+// IntegrityError is a typed validation failure for a completed match tree.
+type IntegrityError struct {
+	MatchID string
+	Reason  string
+}
+
+// Error implements the error interface.
+func (e *IntegrityError) Error() string {
+	return fmt.Sprintf("store: canonical integrity %s: %s", e.MatchID, e.Reason)
+}
+
+// InvalidateCanonical removes the completion marker so a failed/corrupt tree
+// cannot be resumed. It is safe to call when the marker is already absent.
+func (s *Store) InvalidateCanonical(matchID string) error {
+	path := s.ArtifactPath(matchID, ArtifactCanonical)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("store: invalidate canonical %s: %w", matchID, err)
+	}
+	return nil
 }
 
 // WriteCanonical computes the artifact-tree hash over the persisted artifact

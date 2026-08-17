@@ -7,12 +7,14 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/archive"
@@ -55,13 +57,28 @@ type MatchResult struct {
 	OutputBytes int64
 }
 
+// Options carries the role provenance inputs and their content hashes. The
+// role registry and overrides are publication-gate inputs: a match may only
+// publish with exactly ten sourced participants.
+type Options struct {
+	// RoleRegistry is the auditable nominal-role registry (required).
+	RoleRegistry *roles.Registry
+	// Overrides are explicit manual role overrides (may be nil/empty).
+	Overrides *roles.OverrideFile
+	// RoleRegistrySHA256 / RoleOverridesSHA256 are content hashes of the
+	// effective inputs, part of the version-complete resume fingerprint.
+	RoleRegistrySHA256  string
+	RoleOverridesSHA256 string
+}
+
 // RunMatch executes the full pipeline for one manifest entry. replayRoot is
-// the corpus root; st is the store; roleReg supplies nominal-role provenance
-// for the report (may be nil). parseStage is the parse adapter (nil uses the
-// manta-backed default). If the match already has a canonical artifact
-// matching the input fingerprint, it is skipped (resumed) and the result
-// records StatusVerified with the existing hash.
-func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, roleReg *roles.Registry, parseStage ParseStage, progress ProgressFn) (*MatchResult, error) {
+// the corpus root; st is the store; opts carries role provenance inputs.
+// parseStage is the parse adapter (nil uses the manta-backed default). A
+// completed match resumes only after the complete canonical tree validates:
+// every recorded artifact must exist and match its SHA-256 and the tree hash
+// must recompute identically. Any integrity mismatch invalidates the marker
+// and rebuilds the match (fail closed on rebuild failure).
+func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Options, parseStage ParseStage, progress ProgressFn) (*MatchResult, error) {
 	if parseStage == nil {
 		parseStage = DefaultParseStage
 	}
@@ -71,18 +88,25 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, roleReg *ro
 		progress = func(string) {}
 	}
 
-	fp := store.Fingerprint(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID)
-	if ok, err := st.CanonicalExists(mt.MatchID, fp); err != nil {
-		return nil, fmt.Errorf("runner: resume check: %w", err)
-	} else if ok {
-		var can store.Canonical
-		_ = st.ReadJSON(mt.MatchID, store.ArtifactCanonical, &can)
+	fp := store.Fingerprint(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID, opts.RoleRegistrySHA256, opts.RoleOverridesSHA256)
+	expected := sourceArtifacts()
+	if can, err := st.ValidateCanonical(mt.MatchID, fp, expected); err == nil {
 		res.Status = store.StatusVerified
 		res.Reason = "resumed_completed_match"
 		res.TreeSHA256 = can.TreeSHA256
 		res.Elapsed = time.Since(t0)
 		progress(fmt.Sprintf("match %s: resumed (canonical %s)", mt.MatchID, can.TreeSHA256))
 		return res, nil
+	} else {
+		var ie *store.IntegrityError
+		if errors.As(err, &ie) {
+			progress(fmt.Sprintf("match %s: canonical tree invalid (%s); rebuilding", mt.MatchID, ie.Reason))
+			if invErr := st.InvalidateCanonical(mt.MatchID); invErr != nil {
+				return nil, fmt.Errorf("runner: invalidate canonical: %w", invErr)
+			}
+		} else {
+			return nil, fmt.Errorf("runner: resume check: %w", err)
+		}
 	}
 
 	// Persist the frozen input entry so the resume key is auditable.
@@ -237,23 +261,29 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, roleReg *ro
 	// Stage 6: canonical tree over the recomputable source artifacts, then the
 	// report (a derived view that reads the canonical from disk).
 	progress(fmt.Sprintf("match %s: writing canonical artifact tree", mt.MatchID))
-	sourceArtifacts := []string{
-		store.ArtifactInput, store.ArtifactVerification, store.ArtifactRaw,
-		store.ArtifactRawMeta, store.ArtifactIdentity, store.ArtifactClock,
-		store.ArtifactFacts, store.ArtifactFactsSummary, store.ArtifactEpisodes,
-		store.ArtifactPhases, store.ArtifactMetrics,
-	}
+	sourceArtifacts := sourceArtifacts()
 	can, err := st.WriteCanonical(mt.MatchID, fp, sourceArtifacts)
 	if err != nil {
 		return nil, err
 	}
-	rep, err := report.Build(st, mt.MatchID, roleReg)
+	rep, err := report.Build(st, mt.MatchID, opts.RoleRegistry, opts.Overrides)
 	if err != nil {
 		return nil, fmt.Errorf("runner: report: %w", err)
 	}
 	rep.SortParticipants()
 	if err := st.WriteJSON(mt.MatchID, store.ArtifactReport, rep); err != nil {
 		return nil, err
+	}
+	// Role provenance gate: a publishable match must expose exactly ten
+	// identity-bound participants, each with a valid nominal role and source
+	// provenance. Missing/invalid role data quarantines and suppresses
+	// publication with an explicit auditable reason (never a silent skip).
+	if gate := rep.PublicationGate(); !gate.OK {
+		res.Status = store.StatusQuarantined
+		res.Reason = "role_provenance_gate: " + strings.Join(gate.Reasons, "; ")
+		res.Elapsed = time.Since(t0)
+		progress(fmt.Sprintf("match %s: quarantined role provenance (%s)", mt.MatchID, res.Reason))
+		return res, nil
 	}
 	res.Status = store.StatusVerified
 	res.Reason = "all_stages_complete"
@@ -263,6 +293,17 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, roleReg *ro
 	progress(fmt.Sprintf("match %s: verified (canonical %s, %s, %.1f MiB output, %.1fs)",
 		mt.MatchID, can.TreeSHA256, metOut.Summary(), float64(res.OutputBytes)/(1<<20), res.Elapsed.Seconds()))
 	return res, nil
+}
+
+// sourceArtifacts returns the recomputable source artifact set covered by the
+// canonical tree (the report is a derived view and is not part of the tree).
+func sourceArtifacts() []string {
+	return []string{
+		store.ArtifactInput, store.ArtifactVerification, store.ArtifactRaw,
+		store.ArtifactRawMeta, store.ArtifactIdentity, store.ArtifactClock,
+		store.ArtifactFacts, store.ArtifactFactsSummary, store.ArtifactEpisodes,
+		store.ArtifactPhases, store.ArtifactMetrics,
+	}
 }
 
 type rawMetaPayload struct {
@@ -275,24 +316,25 @@ type rawMetaPayload struct {
 	PeakHeapMiB uint64 `json:"-"`
 }
 
-// parseToRaw streams a demo into the raw artifact. Progress is emitted at
-// least once per minute for long parses.
+// parseToRaw streams a demo into the raw artifact via a same-directory
+// temporary file, fsync, and atomic rename. Progress is emitted at least once
+// per minute for long parses. An interrupted write never leaves a truncated
+// raw.jsonl at the artifact path.
 func parseToRaw(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
-	wf, err := os.Create(rawPath)
+	sw, err := store.NewStreamWriter(rawPath)
 	if err != nil {
 		return nil, err
 	}
+	defer sw.Abort()
 	info, err := os.Stat(demoPath)
 	if err != nil {
-		wf.Close()
 		return nil, err
 	}
 	df, err := os.Open(demoPath)
 	if err != nil {
-		wf.Close()
 		return nil, err
 	}
-	rw := raw.NewWriter(wf)
+	rw := raw.NewWriter(sw)
 	start := time.Now()
 	lastProgress := start
 	// Wrap the reader to report bytes consumed periodically.
@@ -300,14 +342,15 @@ func parseToRaw(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMet
 	res, perr := parser.ParseStream(progReader, rw, info.Size())
 	if ferr := rw.Flush(); ferr != nil {
 		df.Close()
-		wf.Close()
 		return nil, ferr
 	}
 	df.Close()
-	wf.Close()
 	if perr != nil {
 		meta := &rawMetaPayload{Outcome: "parse_error", Error: perr.Error(), Events: res.Events}
 		return meta, perr
+	}
+	if err := sw.Close(); err != nil {
+		return nil, err
 	}
 	return &rawMetaPayload{
 		Outcome:     "ok",
@@ -350,15 +393,18 @@ func buildFacts(rawPath, factsPath string, clk *clock.Clock, idn *identity.Ident
 		return nil, err
 	}
 	defer rf.Close()
-	wf, err := os.Create(factsPath)
+	sw, err := store.NewStreamWriter(factsPath)
 	if err != nil {
 		return nil, err
 	}
-	defer wf.Close()
-	enc := json.NewEncoder(wf)
+	defer sw.Abort()
+	enc := json.NewEncoder(sw)
 	b := facts.NewBuilder(clk, idn)
 	sum, err := b.Build(raw.NewReader(rf), func(f *facts.Fact) error { return enc.Encode(f) })
 	if err != nil {
+		return nil, err
+	}
+	if err := sw.Close(); err != nil {
 		return nil, err
 	}
 	return sum, nil
@@ -522,7 +568,9 @@ func outputBytes(st *store.Store, matchID string, artifacts []string) int64 {
 // RunBatch runs a set of manifest entries with bounded concurrency. One bad
 // match is recorded with its terminal status and never aborts the others.
 // parseStage is passed through to RunMatch (nil uses the manta default).
-func RunBatch(st *store.Store, matches []*archive.Match, replayRoot string, roleReg *roles.Registry, parseStage ParseStage, workers int, progress ProgressFn) []*MatchResult {
+// Progress callbacks are serialized: workers may report concurrently and the
+// underlying writer must never be written by two goroutines at once.
+func RunBatch(st *store.Store, matches []*archive.Match, replayRoot string, opts Options, parseStage ParseStage, workers int, progress ProgressFn) []*MatchResult {
 	if workers <= 0 {
 		workers = 1
 	}
@@ -534,6 +582,14 @@ func RunBatch(st *store.Store, matches []*archive.Match, replayRoot string, role
 	close(index)
 	sem := make(chan struct{}, workers)
 	done := make(chan struct{}, len(matches))
+	var mu sync.Mutex
+	progressMu := func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if progress != nil {
+			progress(line)
+		}
+	}
 	for i := range matches {
 		go func(i int) {
 			defer func() { done <- struct{}{} }()
@@ -541,7 +597,7 @@ func RunBatch(st *store.Store, matches []*archive.Match, replayRoot string, role
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			mt := matches[i]
-			res, err := RunMatch(st, mt, replayRoot, roleReg, parseStage, progress)
+			res, err := RunMatch(st, mt, replayRoot, opts, parseStage, progressMu)
 			if err != nil {
 				res = &MatchResult{MatchID: mt.MatchID, Status: store.StatusParseFailed, Reason: "runner_error: " + err.Error()}
 			}

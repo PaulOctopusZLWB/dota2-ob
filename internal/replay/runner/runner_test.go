@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -192,15 +193,51 @@ func stubParseStage(demoPath, rawPath, matchID string, progress ProgressFn) (*ra
 	return &rawMetaPayload{Outcome: "ok", Events: 200, CombatTotal: 4, GameBuild: 6902, LastTick: 1200}, nil
 }
 
-func testRoleReg() *roles.Registry {
+// fullRoleReg builds a complete role registry for the synthetic fixture:
+// accounts 1000-1004 radiant roles 1-5, accounts 1005-1009 dire roles 1-5.
+func fullRoleReg() *roles.Registry {
 	reg := &roles.Registry{SchemaVersion: "ti2026.roles.v1", TournamentID: "ti2026", Matches: []roles.RoleMatch{{
-		MatchID: "1000000001", Teams: []roles.RoleTeam{{
-			TeamID: "9823272", TeamName: "Team Yandex", Side: "radiant",
-			SourceKind: "reliable_public_database", SourceURL: "https://example.com",
-			RetrievedAt: "2026-08-17T00:00:00Z",
-			Participants: []roles.RoleRecord{{AccountID: "1000", NominalRole: "1", RoleConfidence: "high"}},
-		}},
+		MatchID: "1000000001", Teams: []roles.RoleTeam{
+			{
+				TeamID: "9823272", TeamName: "Team Yandex", Side: "radiant",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com/radiant",
+				RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+			{
+				TeamID: "5017210", TeamName: "Team Resilience", Side: "dire",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com/dire",
+				RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+		},
 	}}}
+	radiantRoles := []string{"1", "2", "3", "4", "5"}
+	direRoles := []string{"1", "2", "3", "4", "5"}
+	for i, role := range radiantRoles {
+		reg.Matches[0].Teams[0].Participants = append(reg.Matches[0].Teams[0].Participants, roles.RoleRecord{
+			RoleRecordID: fmt.Sprintf("1000000001:%d", 1000+i), AccountID: fmt.Sprintf("%d", 1000+i),
+			PlayerName: fmt.Sprintf("p%d", i), NominalRole: role, RoleConfidence: "high",
+		})
+	}
+	for i, role := range direRoles {
+		reg.Matches[0].Teams[1].Participants = append(reg.Matches[0].Teams[1].Participants, roles.RoleRecord{
+			RoleRecordID: fmt.Sprintf("1000000001:%d", 1005+i), AccountID: fmt.Sprintf("%d", 1005+i),
+			PlayerName: fmt.Sprintf("p%d", 5+i), NominalRole: role, RoleConfidence: "high",
+		})
+	}
+	return reg
+}
+
+// testOptions builds the runner options with the full registry.
+func testOptions() Options {
+	return Options{RoleRegistry: fullRoleReg(), RoleRegistrySHA256: "reg-hash"}
+}
+
+// partialRoleReg builds a registry covering only one participant (used to
+// prove the role gate quarantines an incomplete registry).
+func partialRoleReg() *roles.Registry {
+	reg := fullRoleReg()
+	reg.Matches[0].Teams[0].Participants = reg.Matches[0].Teams[0].Participants[:1]
+	reg.Matches[0].Teams[1].Participants = nil
 	return reg
 }
 
@@ -210,14 +247,15 @@ func TestRunMatchVerifiedAndRestartDeterministic(t *testing.T) {
 	rootB := t.TempDir()
 	stA, _ := store.New(rootA)
 	stB, _ := store.New(rootB)
-	resA, err := RunMatch(stA, mt, root, testRoleReg(), stubParseStage, func(string) {})
+	opts := testOptions()
+	resA, err := RunMatch(stA, mt, root, opts, stubParseStage, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resA.Status != store.StatusVerified {
 		t.Fatalf("status=%s reason=%s", resA.Status, resA.Reason)
 	}
-	resB, err := RunMatch(stB, mt, root, testRoleReg(), stubParseStage, func(string) {})
+	resB, err := RunMatch(stB, mt, root, opts, stubParseStage, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +274,7 @@ func TestRunMatchVerifiedAndRestartDeterministic(t *testing.T) {
 		}
 	}
 	// Resume: rerun on rootA must skip and preserve the same hash.
-	resC, err := RunMatch(stA, mt, root, testRoleReg(), stubParseStage, func(string) {})
+	resC, err := RunMatch(stA, mt, root, opts, stubParseStage, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +283,159 @@ func TestRunMatchVerifiedAndRestartDeterministic(t *testing.T) {
 	}
 	if resC.TreeSHA256 != resA.TreeSHA256 {
 		t.Fatalf("resume changed canonical hash")
+	}
+}
+
+// TestResumeRebuildsAfterDeletedArtifact: deleting a canonical artifact must
+// not resume; the match rebuilds and reaches verified (deterministically the
+// rebuilt tree is identical, but the run must not claim "resumed" and the
+// deleted artifact must exist again).
+func TestResumeRebuildsAfterDeletedArtifact(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("initial status=%s", res.Status)
+	}
+	// Delete a canonical artifact, then rerun: must rebuild, not resume.
+	if err := os.Remove(st.ArtifactPath("1000000001", store.ArtifactPhases)); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Status != store.StatusVerified {
+		t.Fatalf("status after rebuild=%s reason=%s", res2.Status, res2.Reason)
+	}
+	if res2.Reason == "resumed_completed_match" {
+		t.Fatal("resumed over a deleted artifact")
+	}
+	// The deleted artifact must exist again.
+	if _, err := os.Stat(st.ArtifactPath("1000000001", store.ArtifactPhases)); err != nil {
+		t.Fatalf("phases.json not rebuilt: %v", err)
+	}
+}
+
+// TestResumeRebuildsAfterCorruptedFacts: a corrupted facts.jsonl must not
+// resume; the runner rebuilds the match instead of trusting the marker.
+func TestResumeRebuildsAfterCorruptedFacts(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	if _, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	factsPath := st.ArtifactPath("1000000001", store.ArtifactFacts)
+	if err := os.WriteFile(factsPath, []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed over corrupted facts.jsonl")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+}
+
+// TestResumeFailsClosedOnMalformedCanonical: a malformed canonical marker must
+// not resume; it must be invalidated and the match rebuilt.
+func TestResumeFailsClosedOnMalformedCanonical(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	if _, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite canonical.json with garbage.
+	canPath := st.ArtifactPath("1000000001", store.ArtifactCanonical)
+	if err := os.WriteFile(canPath, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reason == "resumed_completed_match" {
+		t.Fatal("resumed over malformed canonical")
+	}
+	if res.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", res.Status)
+	}
+}
+
+// TestRoleGateQuarantinesMissingRegistry: a match whose role registry lacks
+// participant records must quarantine with an explicit role reason.
+func TestRoleGateQuarantinesMissingRegistry(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	// Registry with only one participant: the gate must fail.
+	opts := Options{RoleRegistry: partialRoleReg(), RoleRegistrySHA256: "partial"}
+	res, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined", res.Status)
+	}
+	if !strings.Contains(res.Reason, "role_provenance_gate") {
+		t.Fatalf("reason=%s want role_provenance_gate", res.Reason)
+	}
+}
+
+// TestRoleGateQuarantinesNilRegistry: a nil registry must quarantine.
+func TestRoleGateQuarantinesNilRegistry(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	res, err := RunMatch(st, mt, root, Options{}, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != store.StatusQuarantined {
+		t.Fatalf("status=%s want quarantined", res.Status)
+	}
+}
+
+// TestFingerprintVersionChangeRebuilds: changing a rule version must change
+// the resume fingerprint so stale outputs are never reused.
+func TestFingerprintVersionChangeRebuilds(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	opts := testOptions()
+	resA, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resA.Status != store.StatusVerified {
+		t.Fatalf("initial status=%s", resA.Status)
+	}
+	// Same options => resume.
+	resB, err := RunMatch(st, mt, root, opts, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resB.Reason != "resumed_completed_match" {
+		t.Fatalf("expected resume, got %s", resB.Reason)
+	}
+	// Different override hash => fingerprint changes => rebuild.
+	opts2 := Options{RoleRegistry: fullRoleReg(), RoleRegistrySHA256: "reg-hash", RoleOverridesSHA256: "override-changed"}
+	resC, err := RunMatch(st, mt, root, opts2, stubParseStage, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resC.Reason == "resumed_completed_match" {
+		t.Fatal("reused stale output despite version change")
+	}
+	if resC.Status != store.StatusVerified {
+		t.Fatalf("status=%s want verified after rebuild", resC.Status)
 	}
 }
 
@@ -259,7 +450,7 @@ func TestRunMatchCorruptIsolated(t *testing.T) {
 	f.WriteString("corrupt")
 	f.Close()
 	st, _ := store.New(t.TempDir())
-	res, err := RunMatch(st, mt, root, testRoleReg(), stubParseStage, func(string) {})
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +462,7 @@ func TestRunMatchCorruptIsolated(t *testing.T) {
 func TestRunMatchMissingParticipantQuarantined(t *testing.T) {
 	mt, root, _ := writeSyntheticArchive(t, "1000000003", false, 300)
 	st, _ := store.New(t.TempDir())
-	res, err := RunMatch(st, mt, root, testRoleReg(), stubParseStage, func(string) {})
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +483,7 @@ func TestRunBatchOneBadDoesNotAbort(t *testing.T) {
 	f.WriteString("corrupt")
 	f.Close()
 	st, _ := store.New(t.TempDir())
-	results := RunBatch(st, []*archive.Match{mtGood, mtBad}, root, testRoleReg(), stubParseStage, 2, func(string) {})
+	results := RunBatch(st, []*archive.Match{mtGood, mtBad}, root, testOptions(), stubParseStage, 2, func(string) {})
 	if results[0].Status != store.StatusVerified {
 		t.Fatalf("good match failed: %s %s", results[0].Status, results[0].Reason)
 	}

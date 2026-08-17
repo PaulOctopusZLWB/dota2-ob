@@ -29,14 +29,17 @@ const Version = "/api/replay/v1"
 
 // Server serves the replay read API from a store.
 type Server struct {
-	Store    *store.Store
-	RoleReg  *roles.Registry
-	RoleFile string
+	Store     *store.Store
+	RoleReg   *roles.Registry
+	Overrides *roles.OverrideFile
+	RoleFile  string
 }
 
-// New creates an API server.
-func New(st *store.Store, roleReg *roles.Registry, roleFile string) *Server {
-	return &Server{Store: st, RoleReg: roleReg, RoleFile: roleFile}
+// New creates an API server. The role registry is a publication gate: when it
+// is nil, reports still list participants (unassigned with reasons) but never
+// claim published roles.
+func New(st *store.Store, roleReg *roles.Registry, overrides *roles.OverrideFile, roleFile string) *Server {
+	return &Server{Store: st, RoleReg: roleReg, Overrides: overrides, RoleFile: roleFile}
 }
 
 // Handler returns the root http.Handler for the replay API.
@@ -112,7 +115,7 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 	matchID := parts[0]
 	switch {
 	case len(parts) == 1:
-		rep, err := report.Build(s.Store, matchID, s.RoleReg)
+		rep, err := report.Build(s.Store, matchID, s.RoleReg, s.Overrides)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "report_build_failed")
 			return
@@ -230,7 +233,7 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 		"matches":    []map[string]interface{}{},
 	}
 	for _, row := range cat.Matches {
-		rep, err := report.Build(s.Store, row.MatchID, s.RoleReg)
+		rep, err := report.Build(s.Store, row.MatchID, s.RoleReg, s.Overrides)
 		if err != nil {
 			continue
 		}
@@ -275,7 +278,7 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 		"matches": []map[string]interface{}{},
 	}
 	for _, row := range cat.Matches {
-		rep, err := report.Build(s.Store, row.MatchID, s.RoleReg)
+		rep, err := report.Build(s.Store, row.MatchID, s.RoleReg, s.Overrides)
 		if err != nil {
 			continue
 		}

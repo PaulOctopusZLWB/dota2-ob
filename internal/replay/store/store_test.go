@@ -52,7 +52,7 @@ func TestStoreLayoutAndArtifacts(t *testing.T) {
 func TestCanonicalAndResume(t *testing.T) {
 	root := t.TempDir()
 	st, _ := New(root)
-	fp := Fingerprint("a", "b", "m1")
+	fp := Fingerprint("a", "b", "m1", "", "")
 	if ok, err := st.CanonicalExists("m1", fp); err != nil || ok {
 		t.Fatalf("canonical exists before write: %v %v", ok, err)
 	}
@@ -76,7 +76,7 @@ func TestCanonicalAndResume(t *testing.T) {
 		t.Fatalf("canonical should exist: %v %v", ok, err)
 	}
 	// Different fingerprint must not match.
-	fp2 := Fingerprint("x", "y", "m1")
+	fp2 := Fingerprint("x", "y", "m1", "", "")
 	ok, _ = st.CanonicalExists("m1", fp2)
 	if ok {
 		t.Fatal("canonical matched different fingerprint")
@@ -102,7 +102,7 @@ func TestRebuildCatalog(t *testing.T) {
 		t.Fatalf("row=%+v want quarantined without canonical", cat.Matches[0])
 	}
 	// Write the canonical and rebuild.
-	can, err := st.WriteCanonical("m1", Fingerprint("a", "b", "m1"), []string{ArtifactVerification, ArtifactIdentity, ArtifactClock})
+	can, err := st.WriteCanonical("m1", Fingerprint("a", "b", "m1", "", ""), []string{ArtifactVerification, ArtifactIdentity, ArtifactClock})
 	if err != nil {
 		t.Fatal(err)
 	}
