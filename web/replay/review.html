@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TI 2026 回放分析 · Gold 审核</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8ece7; --muted: #a4aaa0; --line: #30352f;
+      --panel: #171a16; --panel-2: #20241d;
+      --accent: #9bcf53; --gold: #d4a845; --danger: #cf5f53;
+      --radiant: #5bcf83; --dire: #cf6f53; --void: #0d0f0c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--ink);
+      background: linear-gradient(90deg, rgba(155,207,83,.08) 1px, transparent 1px),
+                  linear-gradient(rgba(155,207,83,.06) 1px, transparent 1px), var(--void);
+      background-size: 42px 42px;
+      font-family: "Cascadia Code", "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .shell { width: min(1500px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 40px; }
+    header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: clamp(20px, 3.6vw, 38px); line-height: .95; font-weight: 800; }
+    .meta { color: var(--muted); font-size: 13px; text-align: right; }
+    .panel { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01)), var(--panel); border-radius: 8px; padding: 14px 16px; margin-top: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .num { font-variant-numeric: tabular-nums; }
+    .hint { color: var(--muted); font-size: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
+    .ok { color: var(--accent); border-color: var(--accent); }
+    .warn { color: var(--gold); border-color: var(--gold); }
+    .err { color: var(--danger); border-color: var(--danger); }
+    input, textarea, select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: inherit; width: 100%; }
+    button { background: var(--accent); color: #0d0f0c; border: 0; border-radius: 4px; padding: 8px 14px; font: inherit; font-weight: 700; cursor: pointer; }
+    button.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
+    #status { color: var(--muted); }
+    .mono { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Gold 审核 · 阶段标注与争议事件</h1>
+    <div class="meta"><a href="index.html">← 语料库</a> &nbsp; <span id="status">载入中…</span></div>
+  </header>
+  <div id="content"><p class="hint">载入中…</p></div>
+</div>
+<script>
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const token = localStorage.getItem("dota2ob_session_token") || "";
+const PHASE = { laning: "对线期", midgame: "中期", decisive: "决胜期" };
+
+// postCorrection sends a review mutation with the session token.
+async function postCorrection(path, payload) {
+  const resp = await fetch(`/api/replay/v1${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Dota2-OB-Token": token,
+    },
+    body: JSON.stringify(payload),
+  });
+  return resp;
+}
+
+async function load() {
+  try {
+    const resp = await fetch("/api/replay/v1/reviews/queue");
+    const env = await resp.json();
+    const data = env.data || {};
+    const c = document.getElementById("content");
+    c.innerHTML = "";
+
+    // Token banner.
+    c.insertAdjacentHTML("beforeend", `
+      <div class="panel">
+        <h3 style="margin-top:0">本地审核会话</h3>
+        <label class="hint">会话令牌（本地反 CSRF；只读页面无需）</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="tok" type="password" value="${esc(token)}" placeholder="serve --session-token ...">
+          <button class="ghost" onclick="localStorage.setItem('dota2ob_session_token', document.getElementById('tok').value); location.reload();">保存</button>
+        </div>
+        <p class="hint">机器输出永不被修改；每次校正保留机器值、有效值、作者、原因、时间、算法版本与证据。</p>
+      </div>`);
+
+    // Per-match review state.
+    const reviews = data.reviews || [];
+    for (const rv of reviews) {
+      const corrections = (rv.corrections || []).map(corr => `
+        <tr>
+          <td class="mono">${esc(corr.id)}</td>
+          <td>${esc(corr.kind)}</td>
+          <td>${esc(corr.author)}</td>
+          <td class="hint">${esc(corr.reason || "")}</td>
+          <td class="mono">${esc(corr.event_ref || "")}</td>
+          <td class="mono">${esc(JSON.stringify(corr.previous_value))}</td>
+          <td class="mono">${esc(JSON.stringify(corr.effective_value))}</td>
+          <td class="hint">${esc(corr.applied_at || "")}</td>
+        </tr>`).join("");
+      c.insertAdjacentHTML("beforeend", `
+        <div class="panel">
+          <h3 style="margin-top:0">比赛 <a href="match.html?id=${esc(rv.match_id)}">${esc(rv.match_id)}</a>
+            <span class="badge ${rv.review_status === 'reviewed' ? 'ok' : rv.review_status === 'in_progress' ? 'warn' : ''}">${esc(rv.review_status || "pending")}</span></h3>
+          <h4 style="margin-top:8px">阶段边界校正</h4>
+          <div style="display:grid;gap:8px">
+            <input id="phase-ref-${esc(rv.match_id)}" placeholder="事件引用（如 interval@300-600）">
+            <input id="phase-prev-${esc(rv.match_id)}" placeholder='机器值 JSON（如 {"global_phase":"laning","start":300,"end":600}）'>
+            <input id="phase-eff-${esc(rv.match_id)}" placeholder='有效值 JSON（如 {"global_phase":"midgame","start":300,"end":600}）'>
+            <textarea id="phase-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因（必填）"></textarea>
+            <button onclick="submitPhase('${esc(rv.match_id)}')">提交阶段校正</button>
+          </div>
+          <h4 style="margin-top:12px">争议事件校正</h4>
+          <div style="display:grid;gap:8px">
+            <input id="evt-ref-${esc(rv.match_id)}" placeholder="事件引用（如 roam_attempt@210）">
+            <input id="evt-prev-${esc(rv.match_id)}" placeholder='机器值 JSON'>
+            <input id="evt-eff-${esc(rv.match_id)}" placeholder='有效值 JSON'>
+            <textarea id="evt-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因（必填）"></textarea>
+            <button onclick="submitEvent('${esc(rv.match_id)}')">提交事件校正</button>
+          </div>
+          <details style="margin-top:10px"><summary>校正历史</summary>
+            <table><thead><tr><th>ID</th><th>类型</th><th>作者</th><th>原因</th><th>引用</th><th>机器值</th><th>有效值</th><th>时间</th></tr></thead><tbody>${corrections || `<tr><td colspan="8" class="hint">无</td></tr>`}</tbody></table>
+          </details>
+        </div>`);
+    }
+    if (reviews.length === 0) {
+      c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">尚无已发布比赛可审核。</p></div>`);
+    }
+  } catch (e) {
+    document.getElementById("status").textContent = "加载失败: " + e;
+  }
+}
+
+async function submitPhase(matchId) {
+  const ref = document.getElementById("phase-ref-" + matchId).value;
+  const prev = document.getElementById("phase-prev-" + matchId).value;
+  const eff = document.getElementById("phase-eff-" + matchId).value;
+  const reason = document.getElementById("phase-reason-" + matchId).value;
+  await submit("phase-corrections", matchId, ref, prev, eff, reason);
+}
+
+async function submitEvent(matchId) {
+  const ref = document.getElementById("evt-ref-" + matchId).value;
+  const prev = document.getElementById("evt-prev-" + matchId).value;
+  const eff = document.getElementById("evt-eff-" + matchId).value;
+  const reason = document.getElementById("evt-reason-" + matchId).value;
+  await submit("event-corrections", matchId, ref, prev, eff, reason);
+}
+
+async function submit(path, matchId, ref, prev, eff, reason) {
+  let pv, ev;
+  try { pv = JSON.parse(prev || "{}"); } catch (e) { alert("机器值 JSON 无效"); return; }
+  try { ev = JSON.parse(eff || "{}"); } catch (e) { alert("有效值 JSON 无效"); return; }
+  if (!reason) { alert("原因必填"); return; }
+  const resp = await postCorrection("/reviews/" + path, {
+    match_id: matchId, author: "paul", reason, event_ref: ref,
+    previous_value: pv, effective_value: ev,
+  });
+  const out = await resp.json();
+  if (resp.status === 200) { location.reload(); }
+  else { alert("提交失败: " + JSON.stringify(out)); }
+}
+
+// makeSubmitPhase available for inline onclick.
+window.submitPhase = submitPhase;
+window.submitEvent = submitEvent;
+load();
+</script>
+</body>
+</html>

@@ -19,7 +19,9 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/phase"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/report"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/review"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
@@ -33,6 +35,16 @@ type Server struct {
 	RoleReg   *roles.Registry
 	Overrides *roles.OverrideFile
 	RoleFile  string
+	// MetricReg is the frozen metric registry (full V1/V2/V3 contract).
+	MetricReg *metrics.Registry
+	// ScoringContract is the frozen radar/score contract.
+	ScoringContract *scoring.Contract
+	// Reviews is the gold-review correction store (may be nil for read-only
+	// mode, in which case mutation endpoints are rejected).
+	Reviews *review.Store
+	// SessionToken is the local anti-CSRF/session token required by all
+	// mutation endpoints. Empty means mutations are rejected.
+	SessionToken string
 }
 
 // New creates an API server. The role registry is a publication gate: when it
@@ -40,6 +52,25 @@ type Server struct {
 // claim published roles.
 func New(st *store.Store, roleReg *roles.Registry, overrides *roles.OverrideFile, roleFile string) *Server {
 	return &Server{Store: st, RoleReg: roleReg, Overrides: overrides, RoleFile: roleFile}
+}
+
+// WithContracts binds the frozen metric registry and scoring contract.
+func (s *Server) WithContracts(mreg *metrics.Registry, sc *scoring.Contract) *Server {
+	s.MetricReg = mreg
+	s.ScoringContract = sc
+	return s
+}
+
+// WithReviews binds the gold-review correction store.
+func (s *Server) WithReviews(rv *review.Store) *Server {
+	s.Reviews = rv
+	return s
+}
+
+// WithSessionToken sets the loopback mutation session token.
+func (s *Server) WithSessionToken(token string) *Server {
+	s.SessionToken = token
+	return s
 }
 
 // Handler returns the root http.Handler for the replay API.
@@ -53,6 +84,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(Version+"/metrics/registry", s.handleMetricsRegistry)
 	mux.HandleFunc(Version+"/roles", s.handleRoles)
 	mux.HandleFunc(Version+"/reviews/queue", s.handleReviewsQueue)
+	mux.HandleFunc(Version+"/reviews/audit", s.handleReviewsAudit)
+	mux.HandleFunc(Version+"/reviews/phase-corrections", s.handlePhaseCorrections)
+	mux.HandleFunc(Version+"/reviews/event-corrections", s.handleEventCorrections)
+	mux.HandleFunc(Version+"/reviews/status", s.handleReviewStatus)
+	mux.HandleFunc(Version+"/roles/overrides", s.handleRoleOverrides)
+	mux.HandleFunc(Version+"/scores/corpus", s.handleScoreCorpus)
 	return mux
 }
 
@@ -126,6 +163,14 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.PhaseSchema, Data: s.timeline(matchID)})
 	case len(parts) == 2 && parts[1] == "tracks":
 		writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.FactsSchema, Data: s.tracks(matchID)})
+	case len(parts) == 2 && parts[1] == "scores":
+		ms := s.matchScoresFor(matchID)
+		if ms == nil {
+			writeErr(w, http.StatusNotFound, "scores_unavailable")
+			return
+		}
+		SortScores(ms)
+		writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: ms})
 	default:
 		writeErr(w, http.StatusNotFound, "not_found")
 	}
@@ -269,6 +314,15 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 			if rep.Phases != nil {
 				entry["phase_intervals"] = len(rep.Phases.Intervals)
 			}
+			if ms := s.matchScoresFor(row.MatchID); ms != nil {
+				for _, ps := range ms.Players {
+					if ps.AccountID != accountID {
+						continue
+					}
+					entry["score"] = ps
+					break
+				}
+			}
 			out["matches"] = append(out["matches"].([]map[string]interface{}), entry)
 		}
 	}
@@ -296,6 +350,12 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 		"team_id": teamID,
 		"matches": []map[string]interface{}{},
 	}
+	teamScore := map[string]interface{}{
+		"team_id":   teamID,
+		"axes":      []interface{}{},
+		"published": false,
+		"reasons":   []string{"team_scoring_registry_not_defined"},
+	}
 	for _, row := range cat.Matches {
 		rep, err := s.loadReport(row.MatchID)
 		if err != nil {
@@ -309,25 +369,41 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 				"match_id": row.MatchID, "status": rep.Status, "publication": rep.Publication,
 				"team_name": t.TeamName, "side": t.Side,
 			}
+			if ms := s.matchScoresFor(row.MatchID); ms != nil {
+				players := []interface{}{}
+				for _, ps := range ms.Players {
+					if ps.TeamID != "" && ps.TeamID == teamID {
+						players = append(players, ps)
+					}
+				}
+				entry["players"] = players
+			}
 			out["matches"] = append(out["matches"].([]map[string]interface{}), entry)
 			break
 		}
 	}
+	out["team_score"] = teamScore
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ReportSchema, Data: out})
 }
 
-// handleMetricsRegistry serves the frozen V1 metric definitions.
+// handleMetricsRegistry serves the full frozen metric registry definitions.
 func (s *Server) handleMetricsRegistry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	defs := metrics.Definitions()
+	defs := metrics.RegistryOutput(s.MetricReg)
+	if s.MetricReg == nil {
+		writeErr(w, http.StatusNotFound, "metric_registry_unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, envelope{
 		SchemaVersion: version.MetricsSchema,
 		Data: map[string]interface{}{
-			"rule_version": version.MetricsRuleVersion,
-			"definitions":  defs,
+			"rule_version":     version.MetricsRuleVersion,
+			"registry_version": s.MetricReg.SchemaVersion,
+			"metric_count":     len(defs),
+			"definitions":      defs,
 		},
 	})
 }
@@ -343,23 +419,6 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.RoleSchema, Data: s.RoleReg})
-}
-
-// handleReviewsQueue serves the stage-2 review queue (empty; stage 4 adds
-// corrections).
-func (s *Server) handleReviewsQueue(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	writeJSON(w, http.StatusOK, envelope{
-		SchemaVersion: version.PhaseSchema,
-		Data: map[string]interface{}{
-			"queue":       []interface{}{},
-			"unavailable": "review_workflow_stage4",
-			"stage":       "2",
-		},
-	})
 }
 
 // ParseMatchID validates a numeric match id path segment.

@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TI 2026 回放分析 · 选手档案</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8ece7; --muted: #a4aaa0; --line: #30352f;
+      --panel: #171a16; --panel-2: #20241d;
+      --accent: #9bcf53; --gold: #d4a845; --danger: #cf5f53;
+      --radiant: #5bcf83; --dire: #cf6f53; --void: #0d0f0c;
+      --v3: #7fb3d9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--ink);
+      background: linear-gradient(90deg, rgba(155,207,83,.08) 1px, transparent 1px),
+                  linear-gradient(rgba(155,207,83,.06) 1px, transparent 1px), var(--void);
+      background-size: 42px 42px;
+      font-family: "Cascadia Code", "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .shell { width: min(1500px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 40px; }
+    header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: clamp(20px, 3.6vw, 38px); line-height: .95; font-weight: 800; }
+    .meta { color: var(--muted); font-size: 13px; text-align: right; }
+    .panel { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01)), var(--panel); border-radius: 8px; padding: 14px 16px; margin-top: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .num { font-variant-numeric: tabular-nums; }
+    .hint { color: var(--muted); font-size: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
+    .ok { color: var(--accent); border-color: var(--accent); }
+    .warn { color: var(--gold); border-color: var(--gold); }
+    .err { color: var(--danger); border-color: var(--danger); }
+    .role { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); margin-right: 4px; }
+    .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .solid-dot { display:inline-block; width:14px; height:14px; border-radius:50%; background: var(--accent); vertical-align: middle; margin-right:4px; }
+    .dash-dot { display:inline-block; width:14px; height:14px; border-radius:50%; border: 2px dashed var(--v3); vertical-align: middle; margin-right:4px; }
+    #status { color: var(--muted); }
+    svg.radar { display:block; margin:0 auto; }
+    .total-big { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .suppressed { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>选手 <span id="acct">…</span></h1>
+    <div class="meta"><a href="index.html">← 语料库</a> &nbsp; <span id="status">载入中…</span></div>
+  </header>
+  <div id="content"><p class="hint">载入中…</p></div>
+</div>
+<script>
+// esc escapes untrusted strings for safe HTML interpolation.
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// safeUrl accepts only http/https links; anything else renders as text "-".
+function safeUrl(v) {
+  const s = String(v || "");
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
+const AXES = ["laning","resources","tempo","map","vision","fight","objectives","endgame"];
+const AXIS_ZH = { laning:"对线", resources:"资源", tempo:"节奏", map:"地图", vision:"视野", fight:"团战", objectives:"目标转化", endgame:"终局决策" };
+
+function fmt(v) {
+  if (v == null) return "-";
+  return Math.round(v * 100) / 100;
+}
+
+// radarPoints builds the polygon path for an axes->value map.
+function radarPoints(axes, values, cx, cy, r) {
+  const n = axes.length;
+  let pts = [];
+  for (let i = 0; i < n; i++) {
+    const ang = -Math.PI / 2 + (2 * Math.PI * i) / n;
+    const v = Math.max(0, Math.min(100, values[axes[i]] == null ? 0 : values[axes[i]]));
+    const x = cx + r * (v / 100) * Math.cos(ang);
+    const y = cy + r * (v / 100) * Math.sin(ang);
+    pts.push(x + "," + y);
+  }
+  return pts.join(" ");
+}
+
+// renderRadar draws solid (official) and dashed (experimental) layers.
+function renderRadar(official, experimental, axisLabels) {
+  const cx = 160, cy = 160, r = 110;
+  const n = AXES.length;
+  let grid = "";
+  for (let ring = 1; ring <= 4; ring++) {
+    const ringR = r * ring / 4;
+    let g = [];
+    for (let i = 0; i < n; i++) {
+      const ang = -Math.PI / 2 + (2 * Math.PI * i) / n;
+      g.push((cx + ringR * Math.cos(ang)).toFixed(1) + "," + (cy + ringR * Math.sin(ang)).toFixed(1));
+    }
+    grid += `<polygon points="${g.join(" ")}" fill="none" stroke="#2a2f28" stroke-width="1"/>`;
+  }
+  let spokes = "";
+  for (let i = 0; i < n; i++) {
+    const ang = -Math.PI / 2 + (2 * Math.PI * i) / n;
+    spokes += `<line x1="${cx}" y1="${cy}" x2="${(cx + r * Math.cos(ang)).toFixed(1)}" y2="${(cy + r * Math.sin(ang)).toFixed(1)}" stroke="#2a2f28" stroke-width="1"/>`;
+    const lx = (cx + (r + 18) * Math.cos(ang)).toFixed(1);
+    const ly = (cy + (r + 18) * Math.sin(ang)).toFixed(1);
+    const anchor = Math.cos(ang) > 0 ? "start" : Math.cos(ang) < 0 ? "end" : "middle";
+    grid += `<text x="${lx}" y="${ly}" fill="#a4aaa0" font-size="10" text-anchor="${anchor}" dominant-baseline="middle">${esc(axisLabels[i] || AXIS_ZH[AXES[i]] || AXES[i])}</text>`;
+  }
+  // Experimental dashed layer first (behind), then official solid.
+  let exp = "";
+  if (experimental) {
+    exp = `<polygon points="${radarPoints(AXES, experimental, cx, cy, r)}" fill="rgba(127,179,217,0.12)" stroke="${"#7fb3d9"}" stroke-width="1.6" stroke-dasharray="5 4"/>`;
+  }
+  let off = "";
+  if (official) {
+    off = `<polygon points="${radarPoints(AXES, official, cx, cy, r)}" fill="rgba(155,207,83,0.16)" stroke="#9bcf53" stroke-width="2"/>`;
+  }
+  return `<svg class="radar" width="360" height="340" viewBox="0 0 360 340">
+    <g transform="translate(20,10)">${grid}${spokes}${exp}${off}</g>
+  </svg>`;
+}
+
+// scoreValues extracts published axis values from a PlayerScore object.
+function scoreValues(ps, layer) {
+  const src = layer === "experimental" ? ps.experimental_axes : ps.official_axes;
+  const out = {};
+  for (const a of AXES) {
+    const ax = src && src[a];
+    if (ax && ax.published && ax.value != null) out[a] = ax.value;
+  }
+  return out;
+}
+
+// axisCoverageRow renders the per-axis decomposition table.
+function axisRows(ps, layer) {
+  const src = layer === "experimental" ? ps.experimental_axes : ps.official_axes;
+  let rows = "";
+  for (const a of AXES) {
+    const ax = src && src[a];
+    if (!ax) { rows += `<tr><td>${esc(AXIS_ZH[a] || a)}</td><td colspan="3" class="hint">无记录</td></tr>`; continue; }
+    if (ax.published) {
+      rows += `<tr><td>${esc(ax.display_name_zh || AXIS_ZH[a])}</td><td class="num">${fmt(ax.value)}</td><td colspan="2" class="hint">覆盖 ${ax.coverage.published_count}/${ax.coverage.metric_count} 指标</td></tr>`;
+    } else {
+      rows += `<tr><td>${esc(ax.display_name_zh || AXIS_ZH[a])}</td><td class="hint" colspan="3">已抑制：${esc(ax.reason || "")}</td></tr>`;
+    }
+  }
+  return rows;
+}
+
+// metricDrilldown renders the score decomposition: raw values, percentiles,
+// weights, and coverage for every component.
+function metricDrilldown(ps) {
+  const seen = {};
+  let rows = "";
+  for (const a of AXES) {
+    const ax = ps.official_axes && ps.official_axes[a];
+    if (!ax || !ax.components) continue;
+    for (const mid of Object.keys(ax.components)) {
+      if (seen[mid]) continue;
+      seen[mid] = true;
+      const c = ax.components[mid];
+      if (!c) continue;
+      const raw = c.raw_value == null ? "-" : fmt(c.raw_value);
+      const pct = c.percentile == null ? "-" : fmt(c.percentile);
+      const st = c.published ? `<span class="badge ok">已发布</span>` : `<span class="badge warn">不可用</span>`;
+      const reason = c.unavailable_reason ? ` · ${esc(c.unavailable_reason)}` : "";
+      rows += `<tr><td>${esc(mid)}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td>${st}${reason}</td></tr>`;
+    }
+  }
+  return rows;
+}
+
+// totalCard renders the official/experimental total with gates.
+function totalCard(total) {
+  if (!total) return `<p class="hint">无总分记录</p>`;
+  if (!total.published) {
+    const reasons = (total.reasons || []).map(r => `<li>${esc(r)}</li>`).join("");
+    return `<div class="suppressed">总分已抑制（未达到发布闸门）<ul class="hint">${reasons || "<li>无发布轴</li>"}</ul></div>`;
+  }
+  const axes = (total.axes_included || []).map(a => `<span class="badge">${esc(AXIS_ZH[a] || a)}</span>`).join(" ");
+  return `<div>
+    <div class="total-big">${fmt(total.value)}</div>
+    <div class="hint">轴权重 ${axes}</div>
+  </div>`;
+}
+
+async function load() {
+  const acct = new URLSearchParams(location.search).get("id");
+  document.getElementById("acct").textContent = acct || "?";
+  try {
+    const resp = await fetch(`/api/replay/v1/players/${acct}`);
+    const env = await resp.json();
+    const data = env.data || {};
+    const c = document.getElementById("content");
+    c.innerHTML = "";
+    const matches = data.matches || [];
+    document.getElementById("status").textContent = `${matches.length} 场比赛`;
+
+    // Profile header with role provenance from the first match.
+    let header = `<div class="panel"><h3 style="margin-top:0">选手概览</h3><table>`;
+    if (matches[0]) {
+      const m0 = matches[0];
+      header += `<tr><th>账户</th><td>${esc(m0.account_id || acct)}</td></tr>
+        <tr><th>名义角色</th><td><span class="role">${esc(m0.nominal_role || "-")}</span>${esc(m0.role_source || "")}</td></tr>
+        <tr><th>角色来源</th><td>${esc(m0.role_source || "-")} ${m0.role_source_url ? `<a href="${esc(safeUrl(m0.role_source_url))}" target="_blank" rel="noopener">来源</a>` : ""}</td></tr>`;
+    }
+    header += `</table></div>`;
+    c.insertAdjacentHTML("beforeend", header);
+
+    // Match-by-match score cards.
+    for (const m of matches) {
+      const ps = m.score;
+      c.insertAdjacentHTML("beforeend", `
+        <div class="panel">
+          <h3 style="margin-top:0">比赛 <a href="match.html?id=${esc(m.match_id)}">${esc(m.match_id)}</a>
+            <span class="hint">${esc(m.hero || "-")} · 角色 ${esc(m.nominal_role || "-")}</span></h3>
+          <div class="grid">
+            <div class="panel">
+              <h4 style="margin-top:0">八轴雷达</h4>
+              ${ps ? renderRadar(scoreValues(ps, "official"), scoreValues(ps, "experimental"), null) : `<p class="hint">该比赛暂无评分快照</p>`}
+              <div class="legend">
+                <span><span class="solid-dot"></span>官方实线（V1/V2）</span>
+                <span><span class="dash-dot"></span>实验虚线（V3）</span>
+              </div>
+            </div>
+            <div class="panel">
+              <h4 style="margin-top:0">官方总分</h4>
+              ${ps ? totalCard(ps.official_total) : `<p class="hint">无</p>`}
+              <h4 style="margin-top:12px">实验总分（V3）</h4>
+              ${ps ? totalCard(ps.experimental_total) : `<p class="hint">无</p>`}
+              ${ps ? `<p class="hint">同角色语料 ${esc(ps.corpus_matches)} 场 · ${esc(ps.comparison_population || "")}</p>` : ""}
+            </div>
+          </div>
+          ${ps ? `
+          <h4 style="margin-top:12px">官方轴分解</h4>
+          <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "official")}</tbody></table>
+          <h4 style="margin-top:12px">实验轴分解（虚线 V3）</h4>
+          <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "experimental")}</tbody></table>
+          <h4 style="margin-top:12px">指标分解（原始值 · 同角色百分位 · 权重 · 覆盖）</h4>
+          <table><thead><tr><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
+          ` : ""}
+        </div>`);
+    }
+    if (matches.length === 0) {
+      c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">该账户没有已发布比赛记录。</p></div>`);
+    }
+  } catch (e) {
+    document.getElementById("status").textContent = "加载失败: " + e;
+  }
+}
+load();
+</script>
+</body>
+</html>

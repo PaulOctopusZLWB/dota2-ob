@@ -12,7 +12,7 @@ const (
 	// AdapterName identifies this repository's replay adapter.
 	AdapterName = "internal/replay"
 	// AdapterVersion is the immutable adapter contract version.
-	AdapterVersion = "stage2.v1"
+	AdapterVersion = "stage3.v1"
 
 	// RawSchema is the raw observation stream schema version.
 	RawSchema = "replay.raw.v1"
@@ -26,12 +26,16 @@ const (
 	PhaseSchema = "replay.phase.v1"
 	// EpisodeSchema is the behavior episode schema version.
 	EpisodeSchema = "replay.episodes.v1"
-	// MetricsSchema is the V1 metric publication schema version.
-	MetricsSchema = "replay.metrics.v1"
+	// MetricsSchema is the V1/V2/V3 metric publication schema version.
+	MetricsSchema = "replay.metrics.v2"
+	// ScoreSchema is the radar/score snapshot schema version.
+	ScoreSchema = "replay.score.v1"
+	// CorrectionSchema is the review/correction overlay schema version.
+	CorrectionSchema = "replay.corrections.v1"
 	// RoleSchema is the nominal role registry schema version.
 	RoleSchema = "ti2026.roles.v1"
 	// ReportSchema is the match report schema version.
-	ReportSchema = "replay.report.v1"
+	ReportSchema = "replay.report.v2"
 
 	// PhaseRuleVersion identifies the phase-engine rule set.
 	PhaseRuleVersion = "ti2026.phase.v1"
@@ -39,6 +43,10 @@ const (
 	EpisodeRuleVersion = "ti2026.episodes.v1"
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
-	// MetricsRuleVersion identifies the V1 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v1"
+	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
+	MetricsRuleVersion = "ti2026.metrics.v3"
+	// ScoreRuleVersion identifies the radar/score computation rule set.
+	ScoreRuleVersion = "ti2026.scoring.v1"
+	// CorrectionRuleVersion identifies the review/correction overlay rule set.
+	CorrectionRuleVersion = "ti2026.corrections.v1"
 )

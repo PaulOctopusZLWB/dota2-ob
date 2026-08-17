@@ -9,9 +9,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/review"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
 )
+
+// testContracts loads the frozen metric registry and scoring contract.
+func testContracts(t *testing.T) (*metrics.Registry, *scoring.Contract) {
+	t.Helper()
+	reg, err := metrics.LoadRegistry("../../../docs/specs/ti2026-role-phase-metrics-v1.json")
+	if err != nil {
+		t.Fatalf("load metric registry: %v", err)
+	}
+	sc, err := scoring.LoadContract("../../../docs/specs/ti2026-radar-scoring-v1.json")
+	if err != nil {
+		t.Fatalf("load scoring contract: %v", err)
+	}
+	return reg, sc
+}
 
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -99,6 +116,8 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 		})
 	}
 	srv := New(st, reg, nil, "")
+	reg2, sc := testContracts(t)
+	srv.WithContracts(reg2, sc)
 	ts := httptest.NewServer(srv.Handler())
 	return srv, ts
 }
@@ -299,3 +318,141 @@ func TestQuarantinedMatchConsumesAuthoritativeState(t *testing.T) {
 }
 
 var _ = filepath.Join
+
+// TestFullMetricRegistry serves all 52 frozen definitions with the contract.
+func TestFullMetricRegistry(t *testing.T) {
+	_, ts := testServer(t)
+	defer ts.Close()
+	var resp struct {
+		Data struct {
+			RegistryVersion string `json:"registry_version"`
+			MetricCount     int    `json:"metric_count"`
+			Definitions     []struct {
+				ID              string `json:"id"`
+				CapabilityLevel string `json:"capability_level"`
+				EpistemicClass  string `json:"epistemic_class"`
+			} `json:"definitions"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/metrics/registry", &resp); code != 200 {
+		t.Fatalf("metrics registry status %d", code)
+	}
+	if resp.Data.MetricCount != 52 || len(resp.Data.Definitions) != 52 {
+		t.Fatalf("metric count=%d defs=%d want 52", resp.Data.MetricCount, len(resp.Data.Definitions))
+	}
+	if resp.Data.RegistryVersion != metrics.RegistrySchemaVersion {
+		t.Fatalf("registry version=%s", resp.Data.RegistryVersion)
+	}
+}
+
+// TestMutationEndpointsRequireSessionToken proves review mutations fail closed
+// without the local session token.
+func TestMutationEndpointsRequireSessionToken(t *testing.T) {
+	_, ts := testServer(t)
+	defer ts.Close()
+	body := `{"match_id":"m1","author":"paul","reason":"r","previous_value":{},"effective_value":{}}`
+	for _, path := range []string{
+		Version + "/reviews/phase-corrections",
+		Version + "/reviews/event-corrections",
+		Version + "/roles/overrides",
+	} {
+		resp, err := http.Post(ts.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s without token status=%d want 403", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
+// TestScoresEndpoint404WhenAbsent proves scores are only served from persisted
+// snapshots (no silent empty score).
+func TestScoresEndpoint404WhenAbsent(t *testing.T) {
+	_, ts := testServer(t)
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + Version + "/matches/m1/scores")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("scores status=%d want 404 when absent", resp.StatusCode)
+	}
+}
+
+// TestReviewMutationWithTokenPersistsCorrection binds a review store + token
+// and verifies a phase correction is persisted with full provenance.
+func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
+	st := testStore(t)
+	reg := testRoleRegistry(t)
+	reg2, sc := testContracts(t)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, reg, nil, "").WithContracts(reg2, sc).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"match_id":"m1","author":"paul","reason":"moved boundary","previous_value":{"global_phase":"laning","start":0,"end":100},"effective_value":{"global_phase":"midgame","start":50,"end":100}}`
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
+	req.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("correction status=%d", resp.StatusCode)
+	}
+	var out struct {
+		Data struct {
+			Corrections []struct {
+				ID               string `json:"id"`
+				Author           string `json:"author"`
+				AlgorithmVersion string `json:"algorithm_version"`
+				Reason           string `json:"reason"`
+			} `json:"corrections"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data.Corrections) != 1 {
+		t.Fatalf("corrections=%d", len(out.Data.Corrections))
+	}
+	c := out.Data.Corrections[0]
+	if c.Author != "paul" || c.Reason == "" || c.AlgorithmVersion == "" || c.ID == "" {
+		t.Fatalf("correction provenance incomplete: %+v", c)
+	}
+}
+
+func testRoleRegistry(t *testing.T) *roles.Registry {
+	t.Helper()
+	reg := &roles.Registry{SchemaVersion: "ti2026.roles.v1", TournamentID: "ti2026", Matches: []roles.RoleMatch{{
+		MatchID: "m1", Teams: []roles.RoleTeam{
+			{
+				TeamID: "T1", TeamName: "Team One", Side: "radiant",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com", RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+			{
+				TeamID: "T2", TeamName: "Team Two", Side: "dire",
+				SourceKind: "reliable_public_database", SourceURL: "https://example.com", RetrievedAt: "2026-08-17T00:00:00Z",
+			},
+		},
+	}}}
+	rolesList := []string{"1", "2", "3", "4", "5"}
+	for i := 0; i < 5; i++ {
+		reg.Matches[0].Teams[0].Participants = append(reg.Matches[0].Teams[0].Participants, roles.RoleRecord{
+			AccountID: fmt.Sprintf("%d", 1000+i), NominalRole: rolesList[i], RoleConfidence: "high",
+		})
+	}
+	for i := 0; i < 5; i++ {
+		reg.Matches[0].Teams[1].Participants = append(reg.Matches[0].Teams[1].Participants, roles.RoleRecord{
+			AccountID: fmt.Sprintf("%d", 1005+i), NominalRole: rolesList[i], RoleConfidence: "high",
+		})
+	}
+	return reg
+}

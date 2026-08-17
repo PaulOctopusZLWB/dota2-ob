@@ -15,8 +15,11 @@ import (
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/api"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/archive"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/review"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/runner"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
 )
 
@@ -35,6 +38,8 @@ func runReplay(args []string, output io.Writer) int {
 		return cmdProbe(args[1:], output)
 	case "batch":
 		return cmdBatch(args[1:], output)
+	case "score":
+		return cmdScore(args[1:], output)
 	case "evaluate":
 		return cmdEvaluate(args[1:], output)
 	case "rebuild-catalog":
@@ -52,6 +57,7 @@ SUBCOMMANDS:
   parse            run the full per-match pipeline for one match id
   probe            run the full pipeline for all five frozen probe matches
   batch            run the pipeline for a manifest with bounded workers
+  score            compute the corpus radar/score snapshots from persisted metrics
   evaluate         evaluate machine phases against an adjudicated gold file
   rebuild-catalog  rebuild the local catalog from persisted artifacts
 
@@ -73,6 +79,15 @@ type roleInputs struct {
 	OverridesSHA  string
 	RegistryPath  string
 	OverridesPath string
+
+	// MetricRegistry is the frozen V1/V2/V3 metric contract.
+	MetricRegistry     *metrics.Registry
+	MetricRegistrySHA  string
+	MetricRegistryPath string
+	// ScoringContract is the frozen radar/score contract.
+	ScoringContract     *scoring.Contract
+	ScoringContractSHA  string
+	ScoringContractPath string
 }
 
 // fileSHA256 returns the hex sha256 of a file, or "" when absent.
@@ -89,10 +104,12 @@ func fileSHA256(path string) (string, error) {
 }
 
 // loadRoleInputs loads the frozen role registry and optional explicit override
-// file from the manifest directory. A missing or unreadable registry is a hard
-// error: role provenance is a publication gate, never silently discarded.
+// file from the manifest directory, plus the metric registry and scoring
+// contract. A missing or unreadable registry is a hard error: role provenance
+// is a publication gate, never silently discarded.
 func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
-	roleFile := filepath.Join(filepath.Dir(manifestPath), "ti2026-five-replay-role-registry-v1.json")
+	dir := filepath.Dir(manifestPath)
+	roleFile := filepath.Join(dir, "ti2026-five-replay-role-registry-v1.json")
 	if _, err := os.Stat(roleFile); err != nil {
 		return nil, fmt.Errorf("role_registry_missing (expected %s): %w", roleFile, err)
 	}
@@ -104,7 +121,7 @@ func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("role_registry_hash_failed: %w", err)
 	}
-	overrideFile := filepath.Join(filepath.Dir(manifestPath), "ti2026-five-replay-role-overrides-v1.json")
+	overrideFile := filepath.Join(dir, "ti2026-five-replay-role-overrides-v1.json")
 	overrides, err := roles.LoadOverrides(overrideFile)
 	if err != nil {
 		return nil, fmt.Errorf("role_overrides_load_failed (%s): %w", overrideFile, err)
@@ -113,10 +130,39 @@ func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("role_overrides_hash_failed: %w", err)
 	}
+
+	metricFile := filepath.Join(dir, "ti2026-role-phase-metrics-v1.json")
+	if _, err := os.Stat(metricFile); err != nil {
+		return nil, fmt.Errorf("metric_registry_missing (expected %s): %w", metricFile, err)
+	}
+	mreg, err := metrics.LoadRegistry(metricFile)
+	if err != nil {
+		return nil, fmt.Errorf("metric_registry_load_failed (%s): %w", metricFile, err)
+	}
+	mregSHA, err := fileSHA256(metricFile)
+	if err != nil {
+		return nil, fmt.Errorf("metric_registry_hash_failed: %w", err)
+	}
+
+	scoringFile := filepath.Join(dir, "ti2026-radar-scoring-v1.json")
+	if _, err := os.Stat(scoringFile); err != nil {
+		return nil, fmt.Errorf("scoring_contract_missing (expected %s): %w", scoringFile, err)
+	}
+	sc, err := scoring.LoadContract(scoringFile)
+	if err != nil {
+		return nil, fmt.Errorf("scoring_contract_load_failed (%s): %w", scoringFile, err)
+	}
+	scSHA, err := fileSHA256(scoringFile)
+	if err != nil {
+		return nil, fmt.Errorf("scoring_contract_hash_failed: %w", err)
+	}
+
 	return &roleInputs{
 		Registry: reg, Overrides: overrides,
 		RegistrySHA: regSHA, OverridesSHA: ovrSHA,
 		RegistryPath: roleFile, OverridesPath: overrideFile,
+		MetricRegistry: mreg, MetricRegistrySHA: mregSHA, MetricRegistryPath: metricFile,
+		ScoringContract: sc, ScoringContractSHA: scSHA, ScoringContractPath: scoringFile,
 	}, nil
 }
 
@@ -171,6 +217,16 @@ func cmdVerify(args []string, output io.Writer) int {
 	return 0
 }
 
+// runnerOptions builds the version-complete runner options from the loaded
+// role + metric contract inputs.
+func runnerOptions(ri *roleInputs) runner.Options {
+	return runner.Options{
+		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
+		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
+		MetricRegistry: ri.MetricRegistry, MetricRegistrySHA256: ri.MetricRegistrySHA,
+	}
+}
+
 // cmdParse runs the full pipeline for a single match id.
 func cmdParse(args []string, output io.Writer) int {
 	fs := flag.NewFlagSet("replay parse", flag.ContinueOnError)
@@ -203,10 +259,7 @@ func cmdParse(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
 		return 1
 	}
-	opts := runner.Options{
-		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
-		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
-	}
+	opts := runnerOptions(ri)
 	res, err := runner.RunMatch(st, mt, *replayRoot, opts, nil, func(line string) {
 		fmt.Fprintln(output, line)
 	})
@@ -253,10 +306,7 @@ func cmdProbe(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
 		return 1
 	}
-	opts := runner.Options{
-		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
-		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
-	}
+	opts := runnerOptions(ri)
 	matches := make([]*archive.Match, 0, len(m.Matches))
 	for i := range m.Matches {
 		matches = append(matches, &m.Matches[i])
@@ -335,10 +385,7 @@ func cmdBatch(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
 		return 1
 	}
-	opts := runner.Options{
-		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
-		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
-	}
+	opts := runnerOptions(ri)
 	matches := make([]*archive.Match, 0, len(m.Matches))
 	for i := range m.Matches {
 		matches = append(matches, &m.Matches[i])
@@ -356,6 +403,49 @@ func cmdBatch(args []string, output io.Writer) int {
 		if r.Status != store.StatusVerified {
 			return 1
 		}
+	}
+	return 0
+}
+
+// cmdScore computes the corpus radar/score snapshots from persisted metrics.
+// It is deterministic and rebuildable; scores are not part of any match's
+// canonical tree (metrics + contracts are the recomputable source).
+func cmdScore(args []string, output io.Writer) int {
+	fs := flag.NewFlagSet("replay score", flag.ContinueOnError)
+	manifest := fs.String("manifest", "", "probe manifest path (for contract lookup)")
+	dataRoot := fs.String("data-root", "./data/replay-probe", "persisted artifact data root")
+	fs.SetOutput(output)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *manifest == "" {
+		fmt.Fprintln(output, "score requires --manifest")
+		return 2
+	}
+	st, err := store.New(*dataRoot)
+	if err != nil {
+		fmt.Fprintf(output, "store_init_failed: %v\n", err)
+		return 1
+	}
+	ri, err := loadRoleInputs(*manifest, *dataRoot)
+	if err != nil {
+		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
+		return 1
+	}
+	if _, err := st.RebuildCatalog(time.Now().UTC().Format(time.RFC3339)); err != nil {
+		fmt.Fprintf(output, "rebuild_catalog_failed: %v\n", err)
+		return 1
+	}
+	cs, err := scoring.ComputeAndPersist(st, ri.ScoringContract, ri.Registry, ri.Overrides)
+	if err != nil {
+		fmt.Fprintf(output, "score_compute_failed: %v\n", err)
+		return 1
+	}
+	enc := json.NewEncoder(output)
+	_ = enc.Encode(cs)
+	fmt.Fprintf(output, "score_result: %d corpus matches, %d score snapshots\n", cs.CorpusMatches, len(cs.Matches))
+	if cs.CorpusMatches < ri.ScoringContract.MinimumMatches {
+		fmt.Fprintf(output, "score_gate: corpus_matches=%d_less_than_minimum_%d (totals suppressed)\n", cs.CorpusMatches, ri.ScoringContract.MinimumMatches)
 	}
 	return 0
 }
@@ -425,6 +515,7 @@ func runServe(args []string, output io.Writer) int {
 	dataRoot := fs.String("data-root", "./data/replay", "persisted artifact data root")
 	listen := fs.String("listen", "127.0.0.1:43211", "loopback listen address")
 	manifest := fs.String("manifest", "", "probe manifest path (for role registry lookup)")
+	sessionToken := fs.String("session-token", "", "local review mutation session token (required for review mutations)")
 	fs.SetOutput(output)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -443,7 +534,15 @@ func runServe(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
 		return 1
 	}
-	srv := api.New(st, ri.Registry, ri.Overrides, ri.RegistryPath)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		fmt.Fprintf(output, "review_store_init_failed: %v\n", err)
+		return 1
+	}
+	srv := api.New(st, ri.Registry, ri.Overrides, ri.RegistryPath).
+		WithContracts(ri.MetricRegistry, ri.ScoringContract).
+		WithReviews(rv).
+		WithSessionToken(*sessionToken)
 	handler := serveHandler(srv)
 	return listenAndServe(*listen, handler, output)
 }

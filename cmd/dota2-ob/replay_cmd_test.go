@@ -27,6 +27,7 @@ func writeTestManifest(t *testing.T, matches []archive.Match) string {
 	return path
 }
 
+// writeTestRoleRegistry writes a role registry into dir and returns its path.
 func writeTestRoleRegistry(t *testing.T, dir string) string {
 	t.Helper()
 	reg := roles.Registry{SchemaVersion: "ti2026.roles.v1", TournamentID: "ti2026", Matches: []roles.RoleMatch{{
@@ -42,6 +43,22 @@ func writeTestRoleRegistry(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// copyContractFiles copies the frozen metric registry and scoring contract
+// into dir (loadRoleInputs requires them as publication/contract inputs).
+func copyContractFiles(t *testing.T, dir string) {
+	t.Helper()
+	specsDir := "../../docs/specs"
+	for _, name := range []string{"ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json"} {
+		b, err := os.ReadFile(filepath.Join(specsDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestReplaySubcommandDispatch(t *testing.T) {
@@ -107,9 +124,12 @@ func TestReplayEvaluateMissingGold(t *testing.T) {
 func TestLoadRoleInputs(t *testing.T) {
 	dir := t.TempDir()
 	writeTestRoleRegistry(t, dir)
+	copyContractFiles(t, dir)
 	manDir := filepath.Join(dir, "man")
 	os.MkdirAll(manDir, 0o755)
-	os.Rename(filepath.Join(dir, "ti2026-five-replay-role-registry-v1.json"), filepath.Join(manDir, "ti2026-five-replay-role-registry-v1.json"))
+	for _, name := range []string{"ti2026-five-replay-role-registry-v1.json", "ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json"} {
+		os.Rename(filepath.Join(dir, name), filepath.Join(manDir, name))
+	}
 	manifest := filepath.Join(manDir, "manifest.json")
 	os.WriteFile(manifest, []byte(`{"schema_version":"x","matches":[]}`), 0o644)
 	ri, err := loadRoleInputs(manifest, dir)
@@ -121,6 +141,12 @@ func TestLoadRoleInputs(t *testing.T) {
 	}
 	if ri.RegistryPath == "" {
 		t.Fatal("empty registry path")
+	}
+	if ri.MetricRegistry == nil || ri.MetricRegistrySHA == "" {
+		t.Fatal("metric registry or hash not loaded")
+	}
+	if ri.ScoringContract == nil || ri.ScoringContractSHA == "" {
+		t.Fatal("scoring contract or hash not loaded")
 	}
 	// Missing overrides file is fine (empty set), but a missing registry is a
 	// hard error (publication gate).
@@ -181,6 +207,7 @@ func fullProbeManifestDir(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "ti2026-five-replay-role-registry-v1.json"), rb, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	copyContractFiles(t, dir)
 	return manifest
 }
 
@@ -252,5 +279,34 @@ func TestProbeMissingRoleRegistryFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "role_inputs_failed") {
 		t.Fatalf("expected role_inputs_failed, got: %s", out.String())
+	}
+}
+
+// TestScoreRequiresManifest proves the score subcommand fails closed without
+// the contract inputs.
+func TestScoreRequiresManifest(t *testing.T) {
+	var out bytes.Buffer
+	if code := run([]string{"replay", "score"}, &out); code != 2 {
+		t.Fatalf("exit=%d output=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "requires --manifest") {
+		t.Fatalf("output=%s", out.String())
+	}
+}
+
+// TestScoreEmptyCorpusSucceeds proves scoring an empty (or unverified) data
+// root completes deterministically and reports the suppression gate.
+func TestScoreEmptyCorpusSucceeds(t *testing.T) {
+	manifest := fullProbeManifestDir(t)
+	dataRoot := t.TempDir()
+	var out bytes.Buffer
+	if code := run([]string{"replay", "score", "--manifest", manifest, "--data-root", dataRoot}, &out); code != 0 {
+		t.Fatalf("exit=%d output=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "score_result: 0 corpus matches") {
+		t.Fatalf("output=%s", out.String())
+	}
+	if !strings.Contains(out.String(), "score_gate: corpus_matches=0_less_than_minimum_3") {
+		t.Fatalf("expected suppression gate message, output=%s", out.String())
 	}
 }

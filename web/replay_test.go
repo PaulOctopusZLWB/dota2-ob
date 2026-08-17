@@ -171,3 +171,91 @@ func TestReplayCorpusPageEscapesRows(t *testing.T) {
 		}
 	}
 }
+
+// TestReplayPlayerPage verifies the player profile page renders the official
+// solid radar and the V3 dashed experimental layer separately, plus the score
+// decomposition and suppression states.
+func TestReplayPlayerPage(t *testing.T) {
+	data, err := os.ReadFile("replay/player.html")
+	if err != nil {
+		t.Fatalf("read replay/player.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/players/",
+		"官方实线（V1/V2）",
+		"实验虚线（V3）",
+		"官方总分",
+		"实验总分",
+		"指标分解（原始值",
+		"function esc(",
+		"function safeUrl(",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay player page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay player page references external resource via %q", scheme)
+		}
+	}
+}
+
+// TestReplayTeamPage verifies the team profile page renders per-match player
+// totals and suppression reasons.
+func TestReplayTeamPage(t *testing.T) {
+	data, err := os.ReadFile("replay/team.html")
+	if err != nil {
+		t.Fatalf("read replay/team.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/teams/",
+		"队伍总分",
+		"官方总分",
+		"player.html?id=",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay team page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay team page references external resource via %q", scheme)
+		}
+	}
+}
+
+// TestReplayReviewPage verifies the gold-review UI renders the correction
+// workflow: reason required, machine value preserved, session token, and
+// Chinese-first labels.
+func TestReplayReviewPage(t *testing.T) {
+	data, err := os.ReadFile("replay/review.html")
+	if err != nil {
+		t.Fatalf("read replay/review.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/reviews/queue",
+		"X-Dota2-OB-Token",
+		"机器值",
+		"有效值",
+		"校正原因（必填）",
+		"阶段边界校正",
+		"争议事件校正",
+		"机器输出永不被修改",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay review page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay review page references external resource via %q", scheme)
+		}
+	}
+}

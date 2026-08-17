@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TI 2026 回放分析 · 队伍档案</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8ece7; --muted: #a4aaa0; --line: #30352f;
+      --panel: #171a16; --panel-2: #20241d;
+      --accent: #9bcf53; --gold: #d4a845; --danger: #cf5f53;
+      --radiant: #5bcf83; --dire: #cf6f53; --void: #0d0f0c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--ink);
+      background: linear-gradient(90deg, rgba(155,207,83,.08) 1px, transparent 1px),
+                  linear-gradient(rgba(155,207,83,.06) 1px, transparent 1px), var(--void);
+      background-size: 42px 42px;
+      font-family: "Cascadia Code", "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .shell { width: min(1500px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 40px; }
+    header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: clamp(20px, 3.6vw, 38px); line-height: .95; font-weight: 800; }
+    .meta { color: var(--muted); font-size: 13px; text-align: right; }
+    .panel { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01)), var(--panel); border-radius: 8px; padding: 14px 16px; margin-top: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .num { font-variant-numeric: tabular-nums; }
+    .hint { color: var(--muted); font-size: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
+    .ok { color: var(--accent); border-color: var(--accent); }
+    .warn { color: var(--gold); border-color: var(--gold); }
+    .role { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); margin-right: 4px; }
+    #status { color: var(--muted); }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>队伍 <span id="team">…</span></h1>
+    <div class="meta"><a href="index.html">← 语料库</a> &nbsp; <span id="status">载入中…</span></div>
+  </header>
+  <div id="content"><p class="hint">载入中…</p></div>
+</div>
+<script>
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+function safeUrl(v) {
+  const s = String(v || "");
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
+async function load() {
+  const teamId = new URLSearchParams(location.search).get("id");
+  document.getElementById("team").textContent = teamId || "?";
+  try {
+    const resp = await fetch(`/api/replay/v1/teams/${teamId}`);
+    const env = await resp.json();
+    const data = env.data || {};
+    const c = document.getElementById("content");
+    c.innerHTML = "";
+    const matches = data.matches || [];
+    document.getElementById("status").textContent = `${matches.length} 场队伍比赛`;
+
+    let s = `<div class="panel"><h3 style="margin-top:0">队伍评分</h3>`;
+    const ts = data.team_score;
+    if (ts && ts.published) {
+      s += `<p class="num" style="font-size:32px;font-weight:800">${Math.round(ts.value * 100) / 100}</p>`;
+    } else {
+      const reasons = (ts && ts.reasons || []).map(r => `<li>${esc(r)}</li>`).join("");
+      s += `<div class="hint">队伍总分已抑制：独立队伍评分注册表尚未定义。<ul>${reasons}</ul></div>`;
+    }
+    s += `</div>`;
+    c.insertAdjacentHTML("beforeend", s);
+
+    for (const m of matches) {
+      let players = "";
+      for (const p of (m.players || [])) {
+        const official = p.official_total;
+        const totalVal = official && official.published ? Math.round(official.value * 100) / 100 : "抑制";
+        players += `<tr>
+          <td><a href="player.html?id=${esc(p.account_id)}">${esc(p.account_id)}</a></td>
+          <td><span class="role">${esc(p.nominal_role || "-")}</span></td>
+          <td class="num">${esc(totalVal)}</td>
+          <td class="hint">${esc(official && official.published ? "" : (official && official.reasons || []).join("; "))}</td>
+        </tr>`;
+      }
+      c.insertAdjacentHTML("beforeend", `
+        <div class="panel">
+          <h3 style="margin-top:0"><a href="match.html?id=${esc(m.match_id)}">比赛 ${esc(m.match_id)}</a>
+            <span class="hint">${esc(m.side || "")} · ${esc(m.status || "")}</span></h3>
+          <table><thead><tr><th>选手</th><th>角色</th><th>官方总分</th><th>抑制原因</th></tr></thead><tbody>${players || `<tr><td colspan="4" class="hint">无评分快照</td></tr>`}</tbody></table>
+        </div>`);
+    }
+    if (matches.length === 0) {
+      c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">该队伍没有已发布比赛记录。</p></div>`);
+    }
+  } catch (e) {
+    document.getElementById("status").textContent = "加载失败: " + e;
+  }
+}
+load();
+</script>
+</body>
+</html>

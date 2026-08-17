@@ -134,9 +134,9 @@ function render(r) {
       : "-";
     pt += `<tr>
       <td class="num">${esc(p.slot)}</td>
-      <td>${esc(p.player_name)} <span class="hint">(${esc(p.account_id)})</span></td>
+      <td><a href="player.html?id=${esc(p.account_id)}">${esc(p.player_name)}</a> <span class="hint">(${esc(p.account_id)})</span></td>
       <td>${esc(p.hero_name || "-")}</td>
-      <td>${esc(p.team_name || "-")}</td>
+      <td>${p.team_id ? `<a href="team.html?id=${esc(p.team_id)}">${esc(p.team_name || p.team_id)}</a>` : esc(p.team_name || "-")}</td>
       <td class="${p.side === 'radiant' ? 'ok' : p.side === 'dire' ? 'err' : ''}">${esc(p.side || "-")}</td>
       <td><span class="role">${esc(p.nominal_role || "?")}</span>${esc(p.role_confidence || "")}</td>
       <td class="hint">${esc(p.role_source_kind || p.role_source || "-")}</td>
@@ -203,8 +203,55 @@ function render(r) {
 
   // 队伍
   if (r.teams && r.teams.length) {
-    const teamRows = r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${esc(t.side)}</td><td>${esc(t.team_name)}</td><td class="hint">${esc(t.team_id)}</td><td>${esc(t.tag || "")}</td></tr>`).join("");
+    const teamRows = r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${esc(t.side)}</td><td>${t.team_id ? `<a href="team.html?id=${esc(t.team_id)}">${esc(t.team_name)}</a>` : esc(t.team_name)}</td><td class="hint">${esc(t.team_id)}</td><td>${esc(t.tag || "")}</td></tr>`).join("");
     c.insertAdjacentHTML("beforeend", `<div class="panel"><h3 style="margin-top:0">队伍</h3><table>${teamRows}</table></div>`);
+  }
+
+  // 评分与雷达（官方实线 + V3 虚线）
+  loadScores(r);
+}
+
+async function loadScores(r) {
+  const c = document.getElementById("content");
+  try {
+    const resp = await fetch(`/api/replay/v1/matches/${r.match_id}/scores`);
+    if (resp.status === 404) return;
+    const env = await resp.json();
+    const ms = env.data;
+    if (!ms || !ms.players || !ms.players.length) return;
+    const PHRASE_ZH = { laning: "对线", resources: "资源", tempo: "节奏", map: "地图", vision: "视野", fight: "团战", objectives: "目标转化", endgame: "终局决策" };
+    let rows = "";
+    for (const p of ms.players) {
+      const name = (r.participants || []).find(x => x.account_id === p.account_id);
+      const ot = p.official_total;
+      const et = p.experimental_total;
+      const off = ot && ot.published ? Math.round(ot.value * 100) / 100 : "抑制";
+      const exp = et && et.published ? Math.round(et.value * 100) / 100 : "抑制";
+      const pubAxes = Object.values(p.official_axes || {}).filter(a => a.published).length;
+      const rows2 = Object.keys(p.official_axes || {}).map(a => {
+        const ax = p.official_axes[a];
+        if (!ax) return "";
+        if (ax.published) return `<td class="num" title="${esc(ax.reason || "")}">${Math.round(ax.value * 100) / 100}</td>`;
+        return `<td class="hint" title="${esc(ax.reason || "")}">—</td>`;
+      }).join("");
+      rows += `<tr>
+        <td><a href="player.html?id=${esc(p.account_id)}">${esc(name ? name.player_name : p.account_id)}</a></td>
+        <td><span class="role">${esc(p.nominal_role || "-")}</span></td>
+        <td class="num">${esc(off)}</td>
+        <td class="num">${esc(exp)}</td>
+        <td class="hint">${esc(pubAxes)}/8</td>
+        ${rows2}
+      </tr>`;
+    }
+    const headers = ["对线","资源","节奏","地图","视野","团战","目标转化","终局决策"];
+    c.insertAdjacentHTML("beforeend", `
+      <div class="panel">
+        <h3 style="margin-top:0">评分快照（官方总分 / 实验总分 / 轴覆盖）</h3>
+        <p class="hint">官方实线雷达使用通过发布闸门的 V1/V2 指标；V3 仅作虚线实验层，绝不进入官方值。抑制的轴/总分显示原因。</p>
+        <table><thead><tr><th>选手</th><th>角色</th><th>官方总分</th><th>实验总分(V3)</th><th>轴覆盖</th>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>
+      </div>`);
+  } catch (e) {
+    // scores are optional; ignore load errors
   }
 }
 load();

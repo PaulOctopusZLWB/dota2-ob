@@ -61,7 +61,9 @@ type MatchResult struct {
 
 // Options carries the role provenance inputs and their content hashes. The
 // role registry and overrides are publication-gate inputs: a match may only
-// publish with exactly ten sourced participants.
+// publish with exactly ten sourced participants. The metric registry is a
+// contract input: its content hash participates in the resume fingerprint so a
+// registry change deterministically invalidates stale metric artifacts.
 type Options struct {
 	// RoleRegistry is the auditable nominal-role registry (required).
 	RoleRegistry *roles.Registry
@@ -71,6 +73,11 @@ type Options struct {
 	// effective inputs, part of the version-complete resume fingerprint.
 	RoleRegistrySHA256  string
 	RoleOverridesSHA256 string
+	// MetricRegistry is the frozen metric contract (required for metric
+	// publication; a nil registry fails all metrics closed).
+	MetricRegistry *metrics.Registry
+	// MetricRegistrySHA256 is the content hash of the metric registry file.
+	MetricRegistrySHA256 string
 }
 
 // RunMatch executes the full pipeline for one manifest entry. replayRoot is
@@ -95,7 +102,7 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		progress = func(string) {}
 	}
 
-	fp := store.Fingerprint(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID, opts.RoleRegistrySHA256, opts.RoleOverridesSHA256)
+	fp := store.FingerprintWithContracts(mt.ArchiveSHA256, mt.DemoSHA256, mt.MatchID, opts.RoleRegistrySHA256, opts.RoleOverridesSHA256, opts.MetricRegistrySHA256, "")
 	expected := completionArtifacts()
 	if can, err := st.ValidateCanonical(mt.MatchID, fp, expected); err == nil {
 		// Consume the authoritative persisted gated state.
@@ -287,11 +294,19 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 	progress(fmt.Sprintf("match %s: episodes/phases/metrics", mt.MatchID))
 	accountName := map[string]string{}
 	teamByAcct := map[string]string{}
+	roleByAcct := map[string]string{}
+	teamOfSide := map[string]string{}
 	accounts := []string{}
 	for _, p := range idn.Participants {
 		accounts = append(accounts, p.AccountID)
 		accountName[p.AccountID] = p.PlayerName
 		teamByAcct[p.AccountID] = teamIDFor(mt, p.Side)
+		teamOfSide[p.Side] = teamIDFor(mt, p.Side)
+		if opts.RoleRegistry != nil {
+			if eff, ok := opts.RoleRegistry.Effective(mt.MatchID, p.AccountID, opts.Overrides); ok {
+				roleByAcct[p.AccountID] = eff.NominalRole
+			}
+		}
 	}
 
 	epOut, err := buildEpisodes(factsPath, mt.MatchID, accountName)
@@ -310,7 +325,7 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		return nil, err
 	}
 
-	metOut, err := buildMetrics(factsPath, mt.MatchID, accounts, accountName, teamByAcct)
+	metOut, err := buildMetrics(factsPath, mt.MatchID, accounts, accountName, teamByAcct, roleByAcct, teamOfSide, opts.MetricRegistry, epOut, phaseOut)
 	if err != nil {
 		return nil, fmt.Errorf("runner: metrics: %w", err)
 	}
@@ -654,13 +669,16 @@ func floatValue(p *int64) float64 {
 	return float64(*p)
 }
 
-func buildMetrics(factsPath, matchID string, accounts []string, accountName, teamByAcct map[string]string) (*metrics.Output, error) {
+func buildMetrics(factsPath, matchID string, accounts []string, accountName, teamByAcct map[string]string, roleByAcct, teamOfSide map[string]string, reg *metrics.Registry, epOut *episodes.Output, phaseOut *phase.Output) (*metrics.Output, error) {
 	rf, err := os.Open(factsPath)
 	if err != nil {
 		return nil, err
 	}
 	defer rf.Close()
 	calc := metrics.NewCalculator(matchID, accounts, accountName, teamByAcct)
+	calc.SetRegistry(reg)
+	calc.SetRoles(roleByAcct)
+	calc.SetTeamOfSide(teamOfSide)
 	r := facts.NewReader(rf)
 	for {
 		f, err := r.Next()
@@ -672,7 +690,7 @@ func buildMetrics(factsPath, matchID string, accounts []string, accountName, tea
 		}
 		calc.Feed(f)
 	}
-	out := calc.Result()
+	out := calc.Result(epOut, phaseOut)
 	if err := out.Validate(); err != nil {
 		return nil, err
 	}
