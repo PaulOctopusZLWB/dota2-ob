@@ -48,11 +48,11 @@ The implementation adds a five-match probe manifest containing:
 - public selection source URL and retrieval time;
 - expected nominal teams and ten participants;
 - role-registry version;
-- terminal identity and parse state.
+- explicit initial archive/identity/parse/publication state plus the required runtime terminal-state field.
 
 Raw replays and generated datasets stay outside git. A sanitized manifest, schemas, small fixtures, and reproducible commands may be committed.
 
-The initial frozen manifest is [ti2026-five-replay-probe-v1.json](ti2026-five-replay-probe-v1.json).
+The initial frozen manifest is [ti2026-five-replay-probe-v1.json](ti2026-five-replay-probe-v1.json). Its initial states are deliberately non-terminal: byte/container checks passed, while replay-content identity and the successor parser have not run. The 50 source-backed match-participant roles are frozen in [ti2026-five-replay-role-registry-v1.json](ti2026-five-replay-role-registry-v1.json) and referenced from every expected participant.
 
 ## Probe execution
 

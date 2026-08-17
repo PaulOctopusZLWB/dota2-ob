@@ -100,6 +100,7 @@ The response also contains 14 future main-event series. They are outside this sp
 - [Eight-axis radar and total-score contract](ti2026-radar-scoring-v1.json)
 - [Current parser field feasibility matrix](2026-08-17-ti2026-replay-field-feasibility.md)
 - [Five-replay vertical-slice and gold-label plan](2026-08-17-ti2026-five-replay-probe-plan.md)
+- [Five-replay source-backed nominal-role registry](ti2026-five-replay-role-registry-v1.json)
 - [Complete implementation specification](2026-08-17-ti2026-replay-analytics-implementation.md)
 - [Historical-to-realtime translation matrix](2026-08-17-ti2026-realtime-translation.md)
 
@@ -189,9 +190,15 @@ Run from the repository root:
 ```sh
 jq empty docs/specs/ti2026-replay-manifest-v1.schema.json
 jq empty docs/specs/ti2026-role-phase-metrics-v1.json
+jq empty docs/specs/ti2026-five-replay-probe-v1.json
+jq empty docs/specs/ti2026-five-replay-role-registry-v1.json
+jq empty docs/specs/ti2026-radar-scoring-v1.json
 jq empty docs/specs/ti2026-group-stage-schedule-freeze-v1.json
-jq -e '.metrics | length >= 25' docs/specs/ti2026-role-phase-metrics-v1.json
-jq -e 'all(.metrics[]; has("numerator") and has("denominator") and has("raw_inputs") and has("known_biases") and has("test_case"))' docs/specs/ti2026-role-phase-metrics-v1.json
+jq -e '(.metrics | length) == 52 and all(.metrics[]; has("numerator") and has("denominator") and has("required_fact_families") and has("field_quality_gates") and has("evidence_record_shape") and has("abstention_rule") and has("tests") and has("score_publication_gate"))' docs/specs/ti2026-role-phase-metrics-v1.json
+jq -e '(.matches | length) == 5 and all(.matches[]; (.expected_teams | length) == 2 and (.expected_participants | length) == 10 and ([.expected_participants[].nominal_role] | sort | group_by(.) | all(.[]; length == 2)))' docs/specs/ti2026-five-replay-probe-v1.json
+jq -e '([.matches[].teams[].participants[]] | length) == 50 and ([.matches[].teams[].participants[].role_record_id] | unique | length) == 50' docs/specs/ti2026-five-replay-role-registry-v1.json
+jq -e 'all(.axis_weights_by_role[]; (([.[]] | add) - 1 | fabs) < 0.000001) and all(.official_axis_components_by_role[]; all(.[]; (([.[]] | add) - 1 | fabs) < 0.000001))' docs/specs/ti2026-radar-scoring-v1.json
+jq -n -e --slurpfile s docs/specs/ti2026-radar-scoring-v1.json --slurpfile m docs/specs/ti2026-role-phase-metrics-v1.json '([$s[0].official_axis_components_by_role[] | .[] | keys[]] | unique) as $o | ([$s[0].experimental_components_by_axis | to_entries[].value[]] | unique) as $e | all($o[]; . as $id | any($m[0].metrics[]; .id == $id and .official_score_eligible == true)) and all($e[]; . as $id | any($m[0].metrics[]; .id == $id and .experimental_score_eligible == true))'
 jq -e '.series_count == 44 and .expected_game_count == 109 and .frozen_dota_match_id_count == 0 and ([.series[].game_slot_ids[]] | length) == 109 and ([.series[].game_slot_ids[]] | unique | length) == 109' docs/specs/ti2026-group-stage-schedule-freeze-v1.json
 git diff --check
 ```

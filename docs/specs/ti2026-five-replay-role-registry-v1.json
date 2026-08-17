@@ -1,0 +1,210 @@
+{
+  "schema_version": "ti2026.roles.v1",
+  "issue": "DOT-72",
+  "created_at": "2026-08-17T04:15:00Z",
+  "tournament_id": "ti2026",
+  "effective_window": {
+    "from": "2026-08-13T00:00:00Z",
+    "to": "2026-08-17T00:00:00Z"
+  },
+  "binding_source": {
+    "source_kind": "community_api_valve_derived_match_metadata",
+    "url_template": "https://api.opendota.com/api/matches/{match_id}",
+    "retrieved_at": "2026-08-17T04:14:00Z",
+    "restriction": "Used only to freeze expected match account/team/hero bindings. Replay content must independently pass identity gates. OpenDota lane_role/roam fields are not role sources."
+  },
+  "rules": [
+    "Nominal role is copied from the cited tournament/team roster source, never inferred from replay behavior.",
+    "Account ID joins the cited roster name to the expected participant returned by the public match endpoint.",
+    "An unresolved name/account join suppresses role-relative radar and score and creates a review item.",
+    "A match-specific manual override creates a successor record and retains this value and its reason."
+  ],
+  "matches": [
+    {
+      "match_id": "8944521919",
+      "teams": [
+        {
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "source_kind": "reliable_public_database",
+          "source_url": "https://www.e-rankings.com/dota-2/teams/7843-vici-gaming/",
+          "source_locator": "Recent lineup table with explicit Role 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8944521919:320252024", "account_id": "320252024", "player_name": "shiro", "expected_hero_id": 11, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8944521919:137129583", "account_id": "137129583", "player_name": "Xm", "expected_hero_id": 120, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8944521919:118134220", "account_id": "118134220", "player_name": "Bach", "expected_hero_id": 69, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8944521919:157475523", "account_id": "157475523", "player_name": "XinQ", "expected_hero_id": 86, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8944521919:111114687", "account_id": "111114687", "player_name": "y`", "expected_hero_id": 100, "nominal_role": "5", "confidence": "high"}
+          ]
+        },
+        {
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "source_kind": "reliable_public_tournament_roster",
+          "source_url": "https://liquipedia.net/dota2/The_International/2026",
+          "source_locator": "HULIGANI player roster table with explicit Position 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8944521919:320017600", "account_id": "320017600", "player_name": "ssnovv1", "expected_hero_id": 109, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8944521919:140251702", "account_id": "140251702", "player_name": "Mirage`雨", "expected_hero_id": 39, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8944521919:92487440", "account_id": "92487440", "player_name": "Corrupted", "expected_hero_id": 108, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8944521919:145065875", "account_id": "145065875", "player_name": "sayuw", "expected_hero_id": 90, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8944521919:123787715", "account_id": "123787715", "player_name": "RESPECT", "expected_hero_id": 131, "nominal_role": "5", "confidence": "high"}
+          ]
+        }
+      ]
+    },
+    {
+      "match_id": "8944525313",
+      "teams": [
+        {
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "source_kind": "reliable_public_tournament_roster",
+          "source_url": "https://www.e-rankings.com/dota-2/events/5925-the-international-2026/",
+          "source_locator": "TI 2026 Team Liquid lineup ordered by roster position 1-5",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8944525313:152962063", "account_id": "152962063", "player_name": "m1CKe", "expected_hero_id": 114, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8944525313:201358612", "account_id": "201358612", "player_name": "Nisha", "expected_hero_id": 25, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8944525313:97590558", "account_id": "97590558", "player_name": "Ace", "expected_hero_id": 77, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8944525313:77490514", "account_id": "77490514", "player_name": "Boxi", "expected_hero_id": 123, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8944525313:16497807", "account_id": "16497807", "player_name": "tOfu", "expected_hero_id": 79, "nominal_role": "5", "confidence": "high"}
+          ]
+        },
+        {
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "source_kind": "reliable_public_database",
+          "source_url": "https://www.e-rankings.com/dota-2/teams/42109-team-yandex/",
+          "source_locator": "Recent lineup table with explicit Role 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8944525313:171262902", "account_id": "171262902", "player_name": "watson", "expected_hero_id": 89, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8944525313:312436974", "account_id": "312436974", "player_name": "CHIRA_JUNIOR", "expected_hero_id": 74, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8944525313:56351509", "account_id": "56351509", "player_name": "DM", "expected_hero_id": 2, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8944525313:103735745", "account_id": "103735745", "player_name": "Saksa", "expected_hero_id": 9, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8944525313:93817671", "account_id": "93817671", "player_name": "Malady", "expected_hero_id": 3, "nominal_role": "5", "confidence": "high"}
+          ]
+        }
+      ]
+    },
+    {
+      "match_id": "8946228107",
+      "teams": [
+        {
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "source_kind": "reliable_public_database",
+          "source_url": "https://www.e-rankings.com/dota-2/teams/42109-team-yandex/",
+          "source_locator": "Recent lineup table with explicit Role 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8946228107:171262902", "account_id": "171262902", "player_name": "watson", "expected_hero_id": 145, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8946228107:312436974", "account_id": "312436974", "player_name": "CHIRA_JUNIOR", "expected_hero_id": 13, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8946228107:56351509", "account_id": "56351509", "player_name": "DM", "expected_hero_id": 98, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8946228107:103735745", "account_id": "103735745", "player_name": "Saksa", "expected_hero_id": 9, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8946228107:93817671", "account_id": "93817671", "player_name": "Malady", "expected_hero_id": 30, "nominal_role": "5", "confidence": "high"}
+          ]
+        },
+        {
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "source_kind": "reliable_public_database",
+          "source_url": "https://www.e-rankings.com/dota-2/teams/45206-team-resilience/",
+          "source_locator": "Recent lineup table with explicit Role 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8946228107:170896543", "account_id": "170896543", "player_name": "YSR-04E", "expected_hero_id": 19, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8946228107:315272623", "account_id": "315272623", "player_name": "Echozz", "expected_hero_id": 74, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8946228107:145957968", "account_id": "145957968", "player_name": "niu", "expected_hero_id": 96, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8946228107:150961567", "account_id": "150961567", "player_name": "planet", "expected_hero_id": 27, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8946228107:249835593", "account_id": "249835593", "player_name": "zzq", "expected_hero_id": 105, "nominal_role": "5", "confidence": "high"}
+          ]
+        }
+      ]
+    },
+    {
+      "match_id": "8944475884",
+      "teams": [
+        {
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "source_kind": "reliable_public_tournament_roster",
+          "source_url": "https://liquipedia.net/dota2/Team_Spirit",
+          "source_locator": "Active roster table with explicit Position 1-5 rows and May 2026 support change",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8944475884:321580662", "account_id": "321580662", "player_name": "Yatoro", "expected_hero_id": 53, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8944475884:106305042", "account_id": "106305042", "player_name": "Larl", "expected_hero_id": 49, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8944475884:302214028", "account_id": "302214028", "player_name": "Collapse", "expected_hero_id": 96, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8944475884:218231587", "account_id": "218231587", "player_name": "not me", "expected_hero_id": 131, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8944475884:847565596", "account_id": "847565596", "player_name": "rue", "expected_hero_id": 85, "nominal_role": "5", "confidence": "high"}
+          ]
+        },
+        {
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "source_kind": "reliable_public_database",
+          "source_url": "https://www.e-rankings.com/dota-2/teams/36656-aurora-gaming/",
+          "source_locator": "Recent lineup table with explicit Role 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8944475884:124801257", "account_id": "124801257", "player_name": "Nightfall", "expected_hero_id": 11, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8944475884:301750126", "account_id": "301750126", "player_name": "Mikoto", "expected_hero_id": 106, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8944475884:126842529", "account_id": "126842529", "player_name": "Ws`", "expected_hero_id": 2, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8944475884:256156323", "account_id": "256156323", "player_name": "Mira", "expected_hero_id": 123, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8944475884:320219866", "account_id": "320219866", "player_name": "kaori", "expected_hero_id": 3, "nominal_role": "5", "confidence": "high"}
+          ]
+        }
+      ]
+    },
+    {
+      "match_id": "8943477775",
+      "teams": [
+        {
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "team_alias": "PARIVISION",
+          "side": "radiant",
+          "source_kind": "reliable_public_tournament_roster",
+          "source_url": "https://www.e-rankings.com/dota-2/events/5925-the-international-2026/",
+          "source_locator": "TI 2026 TEAM VISION/PARIVISION lineup ordered by roster position 1-5",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8943477775:1044002267", "account_id": "1044002267", "player_name": "Satanic", "expected_hero_id": 11, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8943477775:106573901", "account_id": "106573901", "player_name": "No[o]ne-", "expected_hero_id": 106, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8943477775:195108598", "account_id": "195108598", "player_name": "Noticed", "expected_hero_id": 96, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8943477775:164199202", "account_id": "164199202", "player_name": "9Class", "expected_hero_id": 21, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8943477775:73401082", "account_id": "73401082", "player_name": "Dukalis", "expected_hero_id": 103, "nominal_role": "5", "confidence": "high"}
+          ]
+        },
+        {
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "source_kind": "reliable_public_database",
+          "source_url": "https://www.e-rankings.com/dota-2/teams/30156-team-falcons/",
+          "source_locator": "Recent lineup table with explicit Role 1-5 rows",
+          "retrieved_at": "2026-08-17T04:15:00Z",
+          "participants": [
+            {"role_record_id": "8943477775:100058342", "account_id": "100058342", "player_name": "skiter", "expected_hero_id": 56, "nominal_role": "1", "confidence": "high"},
+            {"role_record_id": "8943477775:898455820", "account_id": "898455820", "player_name": "Malr1ne", "expected_hero_id": 107, "nominal_role": "2", "confidence": "high"},
+            {"role_record_id": "8943477775:183719386", "account_id": "183719386", "player_name": "ATF", "match_name": "AMMAR_THE_F", "expected_hero_id": 36, "nominal_role": "3", "confidence": "high"},
+            {"role_record_id": "8943477775:25907144", "account_id": "25907144", "player_name": "Cr1t-", "expected_hero_id": 26, "nominal_role": "4", "confidence": "high"},
+            {"role_record_id": "8943477775:10366616", "account_id": "10366616", "player_name": "Sneyking", "expected_hero_id": 83, "nominal_role": "5", "confidence": "high"}
+          ]
+        }
+      ]
+    }
+  ]
+}

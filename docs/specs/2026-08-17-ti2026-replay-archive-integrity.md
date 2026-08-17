@@ -8,17 +8,19 @@ Issue: DOT-72
 
 Freeze archive completeness against 109 expected game slots, not against discovered URLs or downloaded file count. A game slot is stable before its Dota match ID is known: `ti2026:<official-series-id>:game-<n>`. The provider's series ID never substitutes for the Dota match ID.
 
-Current research baseline:
+Current local-corpus baseline:
 
 - expected game slots: 109;
 - completed official series: 44 (39 Swiss + 5 elimination);
-- frozen Dota match IDs: 0 in DOT-72;
+- candidate Dota match ID/salt rows in local `matches.json`: 109;
+- downloaded archive/demo pairs passing container integrity: 109;
 - identity-verified replay files: 0 in DOT-72;
-- initial archive coverage: `0 / 109 = 0%`.
+- byte-presence coverage: `109 / 109 = 100%`;
+- identity-verified analytical coverage: `0 / 109 = 0%` until content gates run.
 
-This zero baseline is intentional. DOT-72 did not start acquisition, and prior unrelated replay availability cannot be inherited as TI coverage.
+Paul supplied this fresh local TI corpus after the original research baseline was written. Candidate IDs and valid containers establish availability, not authenticity or schedule-slot identity. No file becomes analytically publishable until replay match/build/time, teams, all ten participants/heroes, parser completion, and deterministic facts pass.
 
-The frozen denominator is materialized in `ti2026-group-stage-schedule-freeze-v1.json`. It contains 44 sanitized series records and 109 unique `game_slot_id` values, with a shared initial `missing/dota_match_id_not_frozen` state. It intentionally contains no replay URL, credential, logo asset, or fabricated Dota match ID.
+The immutable official-schedule denominator is materialized in `ti2026-group-stage-schedule-freeze-v1.json`. It contains 44 sanitized series records and 109 unique `game_slot_id` values, with the original source-time `missing/dota_match_id_not_frozen` state. It intentionally contains no replay URL, credential, logo asset, or fabricated Dota match ID. The runtime replay manifest joins current candidate IDs to those slots with separate evidence and never rewrites the frozen source snapshot.
 
 ## Source hierarchy
 
@@ -116,14 +118,14 @@ Free-form notes supplement a reason code; they never replace it.
 
 ## Recovery and tournament-time SLA
 
-Because the group stage ended before this specification was written, use recovery mode immediately:
+Because the group stage ended before this specification was written, validate the supplied corpus first and use recovery only for proven gaps:
 
 1. Load the 109 slot identities from `ti2026-group-stage-schedule-freeze-v1.json` and create one manifest record per slot.
-2. Corroborate each slot with a Dota match ID from approved public metadata.
-3. Attempt the accepted bounded public replay path once per ID and record the terminal transport result.
-4. Emit a human-readable missing list immediately after the first pass.
-5. Paul manually downloads/imports every client-available replay; the system observes files only after manual placement.
-6. Reconcile at 6-hour intervals for 72 hours, then seal manifest version 1. Later arrivals create successor versions.
+2. Treat the 109 local `matches.json` rows as candidate Dota match IDs; map each to exactly one official slot using approved public metadata.
+3. Verify each existing archive/demo pair and run the full replay identity/parser gate before assigning a terminal state.
+4. Emit a human-readable quarantine/gap list after the first pass.
+5. Reacquire only corrupt, mismatched, or missing bytes through an approved public/client path, retaining old/new hashes and source history.
+6. Seal manifest version 1 only when all 109 slots have an allowed terminal state. Later corrections create successor versions.
 
 For future tournament days:
 

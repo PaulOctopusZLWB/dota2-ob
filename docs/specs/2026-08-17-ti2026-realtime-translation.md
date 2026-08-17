@@ -42,8 +42,8 @@ This is a nullable observation contract, not a promise that every field exists i
 | Historical family | GSI direct | GSI-derived approximation | CV-visible fallback | Realtime disposition |
 |---|---|---|---|---|
 | Match/player/team/hero identity | match/player/hero/team fields when present | stable slot binding with reconnect checks | scoreboard labels | `gsi_direct`; suppress on incomplete ten-player binding |
-| Game clock and fixed baseline | clock/game time, pause, state | fixed phase cuts | visible clock | `gsi_direct` with receive/source time |
-| Event-driven global phase | positions, alive/respawn, buyback fields, buildings, Roshan, items when present | causal/no-look-ahead state-machine variant | visible siege/fight/Roshan cues | `gsi_derived`, separately versioned from offline smoothed phase |
+| Game clock and causal phase timing | clock/game time, pause, state | calibrated causal windows and debounce | visible clock | `gsi_direct` with receive/source time; no fixed phase label |
+| Event-driven global phase | positions, alive/respawn, buyback fields, buildings, Roshan, items when present | causal/no-look-ahead state machine | visible siege/fight/Roshan cues | `gsi_derived`; separately versioned for source/cadence, with the same three official states |
 | Lane assignment/presence | `xpos`,`ypos` | versioned lane polygons and debounced segments | minimap | `gsi_derived`; confidence follows cadence/gaps |
 | Roam movement | positions | lane departure + cross-lane arrival | minimap | movement is `gsi_derived`; intent/value remains modelled |
 | Pull/stack/creep block/cut | no confirmed creep/order table | none | visible lane/camp units | `cv_visible` only when observable; otherwise `replay_only` |
@@ -70,20 +70,20 @@ This is a nullable observation contract, not a promise that every field exists i
 | Smoke outcome | positions/KDA/buildings/economy | fixed post-end 30/60/120-second observed outcomes | visible contact | outcomes can be `gsi_derived`; beneficial sacrifice is counterfactual |
 | Teamfight window | positions, status, KDA/health deltas | modelled multi-player contact window | visible fight | `modelled`; exact combat ledger replay-only |
 | Initiation/counter-initiation | status/position/cooldown deltas | low-confidence causal order | visible casts/contact | `modelled`/`cv_visible`; no fact claim without source event |
-| Dynamic responsibility/role | position/economy/items/abilities | modelled responsibility segment | analyst annotation | `modelled` with confidence; roster position remains separate |
+| Nominal role and behavior episodes | source-backed role registry; observed position/economy/items/abilities | fixed nominal role plus separately named behavior episodes | analyst annotation | nominal role is registry-backed; behavior may be `derived`/`modelled` but never reclassifies it |
 | Counterfactual save/sacrifice/buyback value | none | none | none | `unsafe_or_unavailable` for live factual output |
 
-## Live phase variant
+## Causal phase variants
 
-The offline replay phase model may use up to 30 seconds of look-ahead for smoothing if labelled. The live/GSI variant must:
+The official offline replay phase and live/GSI phase are both causal: `global_phase(t)` may use only evidence whose game time is at or before `t`. Neither may use future smoothing or emit a fixed-time fallback. The live/GSI variant must:
 
 - use only snapshots already received;
 - retain the same state names but a separate rule version;
 - expose provisional transitions and confidence;
 - never rewrite a prior broadcast statement silently;
-- keep the fixed baseline available even when event-driven inputs are missing.
+- emit `unavailable` with missing-evidence reasons when the event-driven inputs do not meet their gate.
 
-Historical and live phase outputs are compared after the match, never mixed during it.
+Offline and live rule versions may differ only because their accepted fields, cadence, and missingness differ. Historical and live outputs are compared after the match, never mixed during it, and neither creates a second official phase stream.
 
 ## Cadence, delay, nullability, and confidence
 

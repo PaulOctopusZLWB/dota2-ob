@@ -31,7 +31,165 @@
       "demo_sha256": "30de85a22834c12cded61da8f3582afc348d52e410f58767f913701e6cefbd1d",
       "demo_magic": "PBDEMS2\\0",
       "decompressed_bytes_match_demo": true,
-      "category_confirmation": "pending_blind_replay_screen"
+      "category_confirmation": "pending_blind_replay_screen",
+      "public_selection_source_url": "https://api.opendota.com/api/matches/8944521919",
+      "public_selection_retrieved_at": "2026-08-17T04:14:00Z",
+      "participant_binding_source": {
+        "source_kind": "community_api_valve_derived_match_metadata",
+        "url": "https://api.opendota.com/api/matches/8944521919",
+        "retrieved_at": "2026-08-17T04:14:00Z",
+        "restriction": "Expected binding only; replay content must independently verify it. lane_role and roam are ignored for nominal role."
+      },
+      "role_registry_version": "ti2026.roles.v1",
+      "role_registry_file": "ti2026-five-replay-role-registry-v1.json",
+      "initial_states": {
+        "archive_state": "downloaded",
+        "identity_state": "pending_replay_content_gate",
+        "parse_state": "not_run_successor_parser",
+        "publication_state": "suppressed",
+        "terminal_state": null,
+        "reason": "Byte/container integrity is verified; match/build/time/team/ten-player/hero/parser/determinism gates have not run."
+      },
+      "expected_teams": [
+        {
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "role_source_kind": "reliable_public_database",
+          "role_source_url": "https://www.e-rankings.com/dota-2/teams/7843-vici-gaming/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        },
+        {
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "role_source_kind": "reliable_public_tournament_roster",
+          "role_source_url": "https://liquipedia.net/dota2/The_International/2026",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        }
+      ],
+      "expected_participants": [
+        {
+          "role_record_id": "8944521919:320252024",
+          "account_id": "320252024",
+          "player_name": "shiro",
+          "match_name": "shiro",
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "expected_hero_id": 11,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:137129583",
+          "account_id": "137129583",
+          "player_name": "Xm",
+          "match_name": "Xm",
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "expected_hero_id": 120,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:118134220",
+          "account_id": "118134220",
+          "player_name": "Bach",
+          "match_name": "Bach",
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "expected_hero_id": 69,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:157475523",
+          "account_id": "157475523",
+          "player_name": "XinQ",
+          "match_name": "XinQ",
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "expected_hero_id": 86,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:111114687",
+          "account_id": "111114687",
+          "player_name": "y`",
+          "match_name": "y`",
+          "team_id": "726228",
+          "team_name": "Vici Gaming",
+          "side": "radiant",
+          "expected_hero_id": 100,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:320017600",
+          "account_id": "320017600",
+          "player_name": "ssnovv1",
+          "match_name": "ssnovv1",
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "expected_hero_id": 109,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:140251702",
+          "account_id": "140251702",
+          "player_name": "Mirage`雨",
+          "match_name": "Mirage`雨",
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "expected_hero_id": 39,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:92487440",
+          "account_id": "92487440",
+          "player_name": "Corrupted",
+          "match_name": "Corrupted",
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "expected_hero_id": 108,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:145065875",
+          "account_id": "145065875",
+          "player_name": "sayuw",
+          "match_name": "sayuw",
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "expected_hero_id": 90,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944521919:123787715",
+          "account_id": "123787715",
+          "player_name": "RESPECT",
+          "match_name": "RESPECT",
+          "team_id": "10149530",
+          "team_name": "HULIGANI",
+          "side": "dire",
+          "expected_hero_id": 131,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        }
+      ]
     },
     {
       "category": "early_disruption_roam_candidate",
@@ -45,7 +203,10 @@
       "public_score": "42-21",
       "public_teamfight_count": 6,
       "public_buyback_count": 5,
-      "public_screening_notes": ["first blood at -25 public game seconds", "one public roaming flag"],
+      "public_screening_notes": [
+        "first blood at -25 public game seconds",
+        "one public roaming flag"
+      ],
       "archive_relative_path": "8944525313_1322006281.dem.bz2",
       "archive_bytes": 166811673,
       "archive_sha256": "faf0eea3bad2913158ef01f942ee1aed34566ea55ca96cbce659484b01848d5b",
@@ -55,7 +216,165 @@
       "demo_sha256": "30114ffbb206f0e32ea028131137f88e1f0589836a286e6aea100d99f1c4540e",
       "demo_magic": "PBDEMS2\\0",
       "decompressed_bytes_match_demo": true,
-      "category_confirmation": "pending_blind_replay_screen"
+      "category_confirmation": "pending_blind_replay_screen",
+      "public_selection_source_url": "https://api.opendota.com/api/matches/8944525313",
+      "public_selection_retrieved_at": "2026-08-17T04:14:00Z",
+      "participant_binding_source": {
+        "source_kind": "community_api_valve_derived_match_metadata",
+        "url": "https://api.opendota.com/api/matches/8944525313",
+        "retrieved_at": "2026-08-17T04:14:00Z",
+        "restriction": "Expected binding only; replay content must independently verify it. lane_role and roam are ignored for nominal role."
+      },
+      "role_registry_version": "ti2026.roles.v1",
+      "role_registry_file": "ti2026-five-replay-role-registry-v1.json",
+      "initial_states": {
+        "archive_state": "downloaded",
+        "identity_state": "pending_replay_content_gate",
+        "parse_state": "not_run_successor_parser",
+        "publication_state": "suppressed",
+        "terminal_state": null,
+        "reason": "Byte/container integrity is verified; match/build/time/team/ten-player/hero/parser/determinism gates have not run."
+      },
+      "expected_teams": [
+        {
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "role_source_kind": "reliable_public_tournament_roster",
+          "role_source_url": "https://www.e-rankings.com/dota-2/events/5925-the-international-2026/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        },
+        {
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "role_source_kind": "reliable_public_database",
+          "role_source_url": "https://www.e-rankings.com/dota-2/teams/42109-team-yandex/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        }
+      ],
+      "expected_participants": [
+        {
+          "role_record_id": "8944525313:152962063",
+          "account_id": "152962063",
+          "player_name": "m1CKe",
+          "match_name": "m1CKe",
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "expected_hero_id": 114,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:201358612",
+          "account_id": "201358612",
+          "player_name": "Nisha",
+          "match_name": "Nisha",
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "expected_hero_id": 25,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:97590558",
+          "account_id": "97590558",
+          "player_name": "Ace",
+          "match_name": "Ace",
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "expected_hero_id": 77,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:77490514",
+          "account_id": "77490514",
+          "player_name": "Boxi",
+          "match_name": "Boxi",
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "expected_hero_id": 123,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:16497807",
+          "account_id": "16497807",
+          "player_name": "tOfu",
+          "match_name": "tOfu",
+          "team_id": "2163",
+          "team_name": "Team Liquid",
+          "side": "radiant",
+          "expected_hero_id": 79,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:171262902",
+          "account_id": "171262902",
+          "player_name": "watson",
+          "match_name": "watson",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "expected_hero_id": 89,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:312436974",
+          "account_id": "312436974",
+          "player_name": "CHIRA_JUNIOR",
+          "match_name": "CHIRA_JUNIOR",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "expected_hero_id": 74,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:56351509",
+          "account_id": "56351509",
+          "player_name": "DM",
+          "match_name": "DM",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "expected_hero_id": 2,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:103735745",
+          "account_id": "103735745",
+          "player_name": "Saksa",
+          "match_name": "Saksa",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "expected_hero_id": 9,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944525313:93817671",
+          "account_id": "93817671",
+          "player_name": "Malady",
+          "match_name": "Malady",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "dire",
+          "expected_hero_id": 3,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        }
+      ]
     },
     {
       "category": "fast_ending_stomp_edge_case",
@@ -78,7 +397,165 @@
       "demo_sha256": "bee70343596d8a53ddbe312650fa0f778be019c25d488f255c533cec9d349005",
       "demo_magic": "PBDEMS2\\0",
       "decompressed_bytes_match_demo": true,
-      "category_confirmation": "pending_blind_replay_screen"
+      "category_confirmation": "pending_blind_replay_screen",
+      "public_selection_source_url": "https://api.opendota.com/api/matches/8946228107",
+      "public_selection_retrieved_at": "2026-08-17T04:14:00Z",
+      "participant_binding_source": {
+        "source_kind": "community_api_valve_derived_match_metadata",
+        "url": "https://api.opendota.com/api/matches/8946228107",
+        "retrieved_at": "2026-08-17T04:14:00Z",
+        "restriction": "Expected binding only; replay content must independently verify it. lane_role and roam are ignored for nominal role."
+      },
+      "role_registry_version": "ti2026.roles.v1",
+      "role_registry_file": "ti2026-five-replay-role-registry-v1.json",
+      "initial_states": {
+        "archive_state": "downloaded",
+        "identity_state": "pending_replay_content_gate",
+        "parse_state": "not_run_successor_parser",
+        "publication_state": "suppressed",
+        "terminal_state": null,
+        "reason": "Byte/container integrity is verified; match/build/time/team/ten-player/hero/parser/determinism gates have not run."
+      },
+      "expected_teams": [
+        {
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "role_source_kind": "reliable_public_database",
+          "role_source_url": "https://www.e-rankings.com/dota-2/teams/42109-team-yandex/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        },
+        {
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "role_source_kind": "reliable_public_database",
+          "role_source_url": "https://www.e-rankings.com/dota-2/teams/45206-team-resilience/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        }
+      ],
+      "expected_participants": [
+        {
+          "role_record_id": "8946228107:171262902",
+          "account_id": "171262902",
+          "player_name": "watson",
+          "match_name": "watson",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "expected_hero_id": 145,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:312436974",
+          "account_id": "312436974",
+          "player_name": "CHIRA_JUNIOR",
+          "match_name": "CHIRA_JUNIOR",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "expected_hero_id": 13,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:56351509",
+          "account_id": "56351509",
+          "player_name": "DM",
+          "match_name": "DM",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "expected_hero_id": 98,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:103735745",
+          "account_id": "103735745",
+          "player_name": "Saksa",
+          "match_name": "Saksa",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "expected_hero_id": 9,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:93817671",
+          "account_id": "93817671",
+          "player_name": "Malady",
+          "match_name": "Malady",
+          "team_id": "9823272",
+          "team_name": "Team Yandex",
+          "side": "radiant",
+          "expected_hero_id": 30,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:170896543",
+          "account_id": "170896543",
+          "player_name": "YSR-04E",
+          "match_name": "YSR-04E",
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "expected_hero_id": 19,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:315272623",
+          "account_id": "315272623",
+          "player_name": "Echozz",
+          "match_name": "Echozz",
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "expected_hero_id": 74,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:145957968",
+          "account_id": "145957968",
+          "player_name": "niu",
+          "match_name": "niu",
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "expected_hero_id": 96,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:150961567",
+          "account_id": "150961567",
+          "player_name": "planet",
+          "match_name": "planet",
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "expected_hero_id": 27,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8946228107:249835593",
+          "account_id": "249835593",
+          "player_name": "zzq",
+          "match_name": "zzq",
+          "team_id": "5017210",
+          "team_name": "Team Resilience",
+          "side": "dire",
+          "expected_hero_id": 105,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        }
+      ]
     },
     {
       "category": "balanced_fight_candidate",
@@ -101,7 +578,165 @@
       "demo_sha256": "2c4fb115a5aae49f21eb07691967f9a0d62a1eda7d7dfb765c4a83b8a81a38e4",
       "demo_magic": "PBDEMS2\\0",
       "decompressed_bytes_match_demo": true,
-      "category_confirmation": "pending_blind_replay_screen"
+      "category_confirmation": "pending_blind_replay_screen",
+      "public_selection_source_url": "https://api.opendota.com/api/matches/8944475884",
+      "public_selection_retrieved_at": "2026-08-17T04:14:00Z",
+      "participant_binding_source": {
+        "source_kind": "community_api_valve_derived_match_metadata",
+        "url": "https://api.opendota.com/api/matches/8944475884",
+        "retrieved_at": "2026-08-17T04:14:00Z",
+        "restriction": "Expected binding only; replay content must independently verify it. lane_role and roam are ignored for nominal role."
+      },
+      "role_registry_version": "ti2026.roles.v1",
+      "role_registry_file": "ti2026-five-replay-role-registry-v1.json",
+      "initial_states": {
+        "archive_state": "downloaded",
+        "identity_state": "pending_replay_content_gate",
+        "parse_state": "not_run_successor_parser",
+        "publication_state": "suppressed",
+        "terminal_state": null,
+        "reason": "Byte/container integrity is verified; match/build/time/team/ten-player/hero/parser/determinism gates have not run."
+      },
+      "expected_teams": [
+        {
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "role_source_kind": "reliable_public_tournament_roster",
+          "role_source_url": "https://liquipedia.net/dota2/Team_Spirit",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        },
+        {
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "role_source_kind": "reliable_public_database",
+          "role_source_url": "https://www.e-rankings.com/dota-2/teams/36656-aurora-gaming/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        }
+      ],
+      "expected_participants": [
+        {
+          "role_record_id": "8944475884:321580662",
+          "account_id": "321580662",
+          "player_name": "Yatoro",
+          "match_name": "Yatoro",
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "expected_hero_id": 53,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:106305042",
+          "account_id": "106305042",
+          "player_name": "Larl",
+          "match_name": "Larl",
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "expected_hero_id": 49,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:302214028",
+          "account_id": "302214028",
+          "player_name": "Collapse",
+          "match_name": "Collapse",
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "expected_hero_id": 96,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:218231587",
+          "account_id": "218231587",
+          "player_name": "not me",
+          "match_name": "not me",
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "expected_hero_id": 131,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:847565596",
+          "account_id": "847565596",
+          "player_name": "rue",
+          "match_name": "rue",
+          "team_id": "7119388",
+          "team_name": "Team Spirit",
+          "side": "radiant",
+          "expected_hero_id": 85,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:124801257",
+          "account_id": "124801257",
+          "player_name": "Nightfall",
+          "match_name": "Nightfall",
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "expected_hero_id": 11,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:301750126",
+          "account_id": "301750126",
+          "player_name": "Mikoto",
+          "match_name": "Mikoto",
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "expected_hero_id": 106,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:126842529",
+          "account_id": "126842529",
+          "player_name": "Ws`",
+          "match_name": "Ws`",
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "expected_hero_id": 2,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:256156323",
+          "account_id": "256156323",
+          "player_name": "Mira",
+          "match_name": "Mira",
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "expected_hero_id": 123,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8944475884:320219866",
+          "account_id": "320219866",
+          "player_name": "kaori",
+          "match_name": "kaori",
+          "team_id": "9467224",
+          "team_name": "Aurora Gaming",
+          "side": "dire",
+          "expected_hero_id": 3,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        }
+      ]
     },
     {
       "category": "long_repeated_round_candidate",
@@ -124,7 +759,168 @@
       "demo_sha256": "a552355dc74c237d3505b716b1d7fdd26aaefd4501471ee7fa08ba6cb8759cad",
       "demo_magic": "PBDEMS2\\0",
       "decompressed_bytes_match_demo": true,
-      "category_confirmation": "pending_blind_replay_screen"
+      "category_confirmation": "pending_blind_replay_screen",
+      "public_selection_source_url": "https://api.opendota.com/api/matches/8943477775",
+      "public_selection_retrieved_at": "2026-08-17T04:14:00Z",
+      "participant_binding_source": {
+        "source_kind": "community_api_valve_derived_match_metadata",
+        "url": "https://api.opendota.com/api/matches/8943477775",
+        "retrieved_at": "2026-08-17T04:14:00Z",
+        "restriction": "Expected binding only; replay content must independently verify it. lane_role and roam are ignored for nominal role."
+      },
+      "role_registry_version": "ti2026.roles.v1",
+      "role_registry_file": "ti2026-five-replay-role-registry-v1.json",
+      "initial_states": {
+        "archive_state": "downloaded",
+        "identity_state": "pending_replay_content_gate",
+        "parse_state": "not_run_successor_parser",
+        "publication_state": "suppressed",
+        "terminal_state": null,
+        "reason": "Byte/container integrity is verified; match/build/time/team/ten-player/hero/parser/determinism gates have not run."
+      },
+      "expected_teams": [
+        {
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "side": "radiant",
+          "role_source_kind": "reliable_public_tournament_roster",
+          "role_source_url": "https://www.e-rankings.com/dota-2/events/5925-the-international-2026/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        },
+        {
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "role_source_kind": "reliable_public_database",
+          "role_source_url": "https://www.e-rankings.com/dota-2/teams/30156-team-falcons/",
+          "role_source_retrieved_at": "2026-08-17T04:15:00Z"
+        }
+      ],
+      "expected_participants": [
+        {
+          "role_record_id": "8943477775:1044002267",
+          "account_id": "1044002267",
+          "player_name": "Satanic",
+          "match_name": "Satanic",
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "side": "radiant",
+          "expected_hero_id": 11,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:106573901",
+          "account_id": "106573901",
+          "player_name": "No[o]ne-",
+          "match_name": "No[o]ne-",
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "side": "radiant",
+          "expected_hero_id": 106,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:195108598",
+          "account_id": "195108598",
+          "player_name": "Noticed",
+          "match_name": "Noticed",
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "side": "radiant",
+          "expected_hero_id": 96,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:164199202",
+          "account_id": "164199202",
+          "player_name": "9Class",
+          "match_name": "9Class",
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "side": "radiant",
+          "expected_hero_id": 21,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:73401082",
+          "account_id": "73401082",
+          "player_name": "Dukalis",
+          "match_name": "Dukalis",
+          "team_id": "9572001",
+          "team_name": "TEAM VISION",
+          "side": "radiant",
+          "expected_hero_id": 103,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:100058342",
+          "account_id": "100058342",
+          "player_name": "skiter",
+          "match_name": "skiter",
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "expected_hero_id": 56,
+          "nominal_role": "1",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:898455820",
+          "account_id": "898455820",
+          "player_name": "Malr1ne",
+          "match_name": "Malr1ne",
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "expected_hero_id": 107,
+          "nominal_role": "2",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:183719386",
+          "account_id": "183719386",
+          "player_name": "ATF",
+          "match_name": "AMMAR_THE_F",
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "expected_hero_id": 36,
+          "nominal_role": "3",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:25907144",
+          "account_id": "25907144",
+          "player_name": "Cr1t-",
+          "match_name": "Cr1t-",
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "expected_hero_id": 26,
+          "nominal_role": "4",
+          "role_confidence": "high"
+        },
+        {
+          "role_record_id": "8943477775:10366616",
+          "account_id": "10366616",
+          "player_name": "Sneyking",
+          "match_name": "Sneyking",
+          "team_id": "9247354",
+          "team_name": "Team Falcons",
+          "side": "dire",
+          "expected_hero_id": 83,
+          "nominal_role": "5",
+          "role_confidence": "high"
+        }
+      ]
     }
-  ]
+  ],
+  "revised_at": "2026-08-17T04:15:00Z",
+  "role_registry_version": "ti2026.roles.v1",
+  "role_registry_file": "ti2026-five-replay-role-registry-v1.json"
 }

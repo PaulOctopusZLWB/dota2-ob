@@ -110,7 +110,7 @@ The following files are present under both the archive root and `dem/`. Public m
 
 Before algorithm tuning, the match explorer must screen and either confirm each category or record a replacement from the 109-match corpus. Replacements require match ID, immutable replay hash, reason, and approval history. Selection may not be changed merely to improve evaluation scores.
 
-The immutable initial selection and verified local file identities are recorded in [ti2026-five-replay-probe-v1.json](ti2026-five-replay-probe-v1.json).
+The immutable initial selection and verified local file identities are recorded in [ti2026-five-replay-probe-v1.json](ti2026-five-replay-probe-v1.json). It also freezes expected teams, account/hero bindings, explicit pending identity/parse/publication states, and references the [five-match nominal-role registry](ti2026-five-replay-role-registry-v1.json). That registry contains 50 match-participant role records with public provenance. Public `lane_role`, farm, hero, lane, item, and behavior fields are never role sources.
 
 ## Core vocabulary
 
@@ -304,7 +304,7 @@ Hard requirements:
 2. `midgame <-> decisive` may repeat.
 3. A reset episode provides evidence for `decisive -> midgame`; it is not emitted as `global_phase`.
 4. Exactly one machine phase covers each eligible second. There are no overlaps or uncovered gaps except explicit unavailable clock spans.
-5. Transitions use evidence available at or before the boundary in the live-translatable variant.
+5. All official offline and live transitions use only evidence available at or before the boundary. Future smoothing and fixed-time fallback phases are prohibited.
 6. Debounce/hysteresis prevents one kill, one rune trip, one teleport, or one high-ground poke from changing phase.
 7. Fast endings may remain `laning` if the lane-break rule never passes; the engine does not fabricate midgame to fill a conventional timeline.
 8. Manual review can accept, move, relabel, add, delete, split, or merge phase intervals.
@@ -329,7 +329,7 @@ Each metric definition contains:
 - unit, fixture, gold, and invariant tests;
 - radar axis membership, weight eligibility, and score publication gate.
 
-The existing 34-metric registry is the minimum seed. It must be expanded with atomic baseline facts required to interpret rates, including deaths, kills/assists, last hits/denies, XP/net-worth deltas, resource share, item timings, objective damage, participation, and phase/opportunity duration.
+The original 34-metric seed is retained and expanded to 52 explicit contracts. The added atomic baseline covers kills, assists, deaths, last hits, denies, XP/net-worth deltas, resource share, item timing, objective and hero damage, healing, control, fight participation, buyback use, phase duration, and opportunity duration. Every one of the 52 objects carries the complete machine-readable contract above; a prose default does not substitute for a per-metric field.
 
 The machine-readable initial axis/component and total-weight contract is [ti2026-radar-scoring-v1.json](ti2026-radar-scoring-v1.json). Any weight change requires a new scoring version and recomputation; it may not silently rewrite historical scores.
 
@@ -570,6 +570,7 @@ These are acceptance barriers inside one final delivery. They do not authorize s
 
 - revise PR #20 and all supporting registries for confirmed decisions;
 - freeze five-match probe manifest and role-source contract;
+- validate five unique matches, two expected teams and ten expected account/hero/role bindings per match, with exactly two participants at each nominal role in every match;
 - independently review the complete spec;
 - accept exact spec commit before production implementation.
 
@@ -649,6 +650,13 @@ These are acceptance barriers inside one final delivery. They do not authorize s
 The implementation issue must preserve exact commands. Minimum final verification:
 
 ```sh
+find docs/specs -maxdepth 1 -type f -name '*.json' -print0 | xargs -0 -n1 jq empty
+jq -e '(.metrics | length) == 52 and all(.metrics[]; has("epistemic_class") and has("metric_version") and has("report_level") and has("unit") and has("aggregation_rule") and has("required_fact_families") and has("field_quality_gates") and has("evidence_record_shape") and has("abstention_rule") and has("tests") and has("score_publication_gate"))' docs/specs/ti2026-role-phase-metrics-v1.json
+jq -e '(.matches | length) == 5 and all(.matches[]; (.expected_teams | length) == 2 and (.expected_participants | length) == 10 and ([.expected_participants[].nominal_role] | sort | group_by(.) | all(.[]; length == 2)))' docs/specs/ti2026-five-replay-probe-v1.json
+jq -e '([.matches[].teams[].participants[]] | length) == 50 and ([.matches[].teams[].participants[].role_record_id] | unique | length) == 50' docs/specs/ti2026-five-replay-role-registry-v1.json
+jq -e 'all(.axis_weights_by_role[]; (([.[]] | add) - 1 | fabs) < 0.000001) and all(.official_axis_components_by_role[]; all(.[]; (([.[]] | add) - 1 | fabs) < 0.000001))' docs/specs/ti2026-radar-scoring-v1.json
+jq -n -e --slurpfile s docs/specs/ti2026-radar-scoring-v1.json --slurpfile m docs/specs/ti2026-role-phase-metrics-v1.json '([$s[0].official_axis_components_by_role[] | .[] | keys[]] | unique) as $o | ([$s[0].experimental_components_by_axis | to_entries[].value[]] | unique) as $e | all($o[]; . as $id | any($m[0].metrics[]; .id == $id and .official_score_eligible == true)) and all($e[]; . as $id | any($m[0].metrics[]; .id == $id and .experimental_score_eligible == true))'
+
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...

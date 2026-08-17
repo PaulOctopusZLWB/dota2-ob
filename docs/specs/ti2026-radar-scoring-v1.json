@@ -16,6 +16,25 @@
     "v3_component_weight": 0.25,
     "rule": "When at least one calibrated applicable V3 component exists, combine the official axis with the equal-weight V3 component mean. Otherwise suppress the dashed experimental axis rather than copying the official value."
   },
+  "official_total_score": {
+    "id": "official_total_score_v1",
+    "input_axes": "Published official axes only, computed from official_score_eligible metrics that passed V1/V2 gates.",
+    "gate": "At least six axes, every mandatory role axis, at least three eligible matches, and every role-specific coverage gate must pass.",
+    "formula": "For published role r axes A, official_total = sum(axis_weights_by_role[r][a] * official_axis[a] for a in A) / sum(axis_weights_by_role[r][a] for a in A).",
+    "missing_axis_rule": "A missing mandatory axis suppresses the total. A missing declared optional axis is excluded, remaining weights are renormalized, and the omission is disclosed.",
+    "comparison_scope": "Same nominal role, frozen TI 2026 corpus, and identical scoring version only."
+  },
+  "experimental_total_score": {
+    "id": "experimental_total_score_v1",
+    "official_total_prerequisite": "official_total_score_v1 must be published for the same player, role, match set, and scoring version.",
+    "eligible_axis_set": "Axes whose official value exists and whose dashed value contains at least one experimental_score_eligible V3 component that passed every V3 publication/calibration gate.",
+    "minimum_experimental_axes": 3,
+    "minimum_original_axis_weight_coverage": 0.35,
+    "formula": "Let E be the eligible experimental axis set. experimental_total = sum(axis_weights_by_role[r][a] * experimental_axis[a] for a in E) / sum(axis_weights_by_role[r][a] for a in E).",
+    "missing_axis_rule": "Never copy an official axis into the dashed layer. Exclude a missing experimental axis, disclose it, and renormalize only across E. Suppress the experimental total unless |E| >= 3 and the sum of original role weights over E is >= 0.35.",
+    "v3_gate": "Every included V3 component must satisfy the V3 evidence, minimum-20-reviewed-match, precision, recall, calibration, and abstention gates. Counterfactual components remain explicitly experimental.",
+    "display_rule": "Show the included/suppressed axes, original and renormalized weights, V3 component percentiles, confidence, and exact recomputation. Never label this value as the official total."
+  },
   "axes": [
     {
       "id": "laning",
@@ -135,7 +154,7 @@
     "laning": ["core_partner_protection_uptime", "forced_regen_or_retreat_rate"],
     "resources": ["core_safe_cs_opportunity_conversion"],
     "tempo": ["failed_roam_resource_cost", "smoke_break_outcome"],
-    "map": ["side_lane_pressure_uptime"],
+    "map": [],
     "vision": ["ward_enemy_track_intersection", "deward_opportunity_conversion", "beneficial_smoke_break_sacrifice"],
     "fight": ["initiation_and_counterinitiation_participation", "death_prevented_by_save"],
     "objectives": [],

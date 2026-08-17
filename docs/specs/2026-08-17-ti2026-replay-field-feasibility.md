@@ -66,7 +66,7 @@ All 100 DOT-54 real demos parsed twice, but all 100 were quarantined. Therefore 
 
 | Family | Current conclusion | Target class if gate passes | Evidence needed |
 |---|---|---|---|
-| Phase state machine | `unavailable` | `modelled` | Clock, bindings, positions, buildings, Roshan/Aegis, death/buyback state; three-game gold timeline. |
+| Phase state machine | `unavailable` | `modelled` | Clock, bindings, positions, buildings, Roshan/Aegis, death/buyback state; five-probe gold timeline. |
 | Lane reinforcement/pressure | `unavailable` | `modelled` | Lane segments, damage/heal, creep economy, retreat/regen evidence, opportunity denominator. |
 | Roaming | `unavailable` | `derived` for movement; `modelled` for intent/value | Positions, initial lane, cross-lane arrival, fight/objective windows, missed lane resources. |
 | Pull/stack/creep block/cut | `unavailable` | `derived` | Creep ownership/class/position/order and camp/lane geometry. |
@@ -89,7 +89,7 @@ All 100 DOT-54 real demos parsed twice, but all 100 were quarantined. Therefore 
 | Buyback decision quality | `unavailable` | `modelled` | Opportunity set and round outcome; no causal claim. |
 | Tower/rax conversion | `direct` target/time at low attribution confidence | `derived` after entity gate | Exclude temporary structures and resolve team/attacker/preceding fight. |
 | Roshan/Aegis cycle | `unavailable` | `direct`/`derived` | Objective and item ownership lifecycle. |
-| Dynamic 1-5 responsibility | `unavailable` | `modelled` | Positions, farm allocation, item/ability task, lineup context, confidence. |
+| Nominal 1-5 role and behavior episodes | role is unavailable from replay facts | role is source-backed; behavior may be `derived`/`modelled` | Public role registry controls the nominal role. Positions, farm, items, and abilities may describe behavior but never reclassify it. |
 
 ## Observed anomaly examples
 
@@ -100,9 +100,9 @@ These are reasons to keep raw evidence and exclusions explicit:
 - Item-use aggregates include hundreds of `item_power_treads` activations for a hero. Raw activation count is not a meaningful item-effectiveness metric.
 - Hero aggregate kills and deaths do not always balance because actor/target resolution is incomplete and the combat-log death family includes non-hero deaths.
 
-## Required parser spike before metric implementation
+## Required field gate at the start of the vertical slice
 
-The next replay implementation must be a field spike, not a full metric engine. For each of the three fixed probe demos it must emit:
+The complete implementation begins with a fail-closed field gate before any dependent metric is published. For each of the five fixed probe demos (`8944521919`, `8944525313`, `8946228107`, `8944475884`, `8943477775`) it must emit:
 
 1. clock calibration evidence;
 2. complete ten-player binding;

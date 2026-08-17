@@ -168,7 +168,7 @@ Enter on verified game-end/ancient event. If game-end is missing, the phase stre
 ## Conflict resolution
 
 1. Direct game-end/objective/entity facts outrank modelled spatial labels.
-2. A phase transition can use only evidence at or before that game second. No look-ahead is allowed in live-translatable variants.
+2. A phase transition can use only evidence at or before that game second. No look-ahead is allowed in any official offline or live phase output.
 3. Concurrent decisive evidence from both teams produces one global `decisive` interval with team-specific `attack`, `defend`, or `contested` posture.
 4. A player event at the exact transition second belongs to the new phase; intervals are left-closed/right-open.
 5. Missing position coverage >10 consecutive seconds makes spatial features unknown for that gap. It does not preserve the prior value.
