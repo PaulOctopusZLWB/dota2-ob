@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dota2-OB 直播侧栏</title>
+  <link rel="stylesheet" href="/overlay/app.css">
+</head>
+<body data-render-state="booting" data-hide-reason="booting">
+  <main id="overlay-root" aria-live="polite">
+    <article id="overlay-card" aria-hidden="true">
+      <div class="signal-rail" aria-hidden="true"><span></span><span></span><span></span></div>
+      <header class="card-header"><p class="kicker">LIVE ANALYSIS</p><p id="age" class="age"></p></header>
+      <section id="claim" class="claim">
+        <div class="asset-frame" aria-hidden="true"><img id="asset-image" alt=""><span id="asset-fallback">析</span></div>
+        <div class="copy"><h1 id="title"></h1><p id="body-copy"></p></div>
+      </section>
+      <footer><p id="evidence"></p><div class="provenance"><span id="source"></span><strong id="confidence"></strong></div></footer>
+    </article>
+  </main>
+  <script src="/overlay/app.js" defer></script>
+</body>
+</html>

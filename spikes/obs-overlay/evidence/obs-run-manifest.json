@@ -1,0 +1,45 @@
+{
+  "runId": "DOT34-rerun-20260812T191444+0800",
+  "sourcePrHead": "289e7cafb591097195fc45fa62e2a363e9a288fe",
+  "flatpak": {
+    "installation": "user",
+    "ref": "app/com.obsproject.Studio/x86_64/stable",
+    "commit": "a3a5cbd575a1ab74c239cd3fd6903377377a43ef65e936271f655d458dc520b4",
+    "obsVersion": "32.2.1"
+  },
+  "artifacts": [
+    {
+      "path": "evidence/obs-measurement.json",
+      "sha256": "ca2498cd38b2e6c50fbbe1e904f33ad5df4bc21df9440e47affc8b1b8b998c70"
+    },
+    {
+      "path": "evidence/obs-run-transcript.log",
+      "sha256": "89fb37b837fe9b6318526d4645592951c922d5f01df29315e06205b16ac6693c"
+    },
+    {
+      "path": "OBS_RUNBOOK.md",
+      "sha256": "e4275c0671bc66b40cfd7578d446a3b5fd5bf27af7c45350424c361a99327bd8"
+    },
+    {
+      "path": "prepare_obs_profile.py",
+      "sha256": "345606bf0cc5dcff68449388f4081a6335588c47d80768b2fc7c4a69dbcc3b51"
+    }
+  ],
+  "externalScreenshots": [
+    {
+      "location": "DOT-34 successor reply attachment",
+      "filename": "obs-1080p-rerun.png",
+      "sha256": "6d47a5d988266adb75774fa4e200e9983eb4bf8dfd0bb5ee850fa57640126f2a"
+    },
+    {
+      "location": "DOT-34 successor reply attachment",
+      "filename": "obs-1440p-rerun.png",
+      "sha256": "bb946e725d5ae6661d8431fd99962ab454d3c3d5ee8d1cac86078b7554650e88"
+    },
+    {
+      "location": "DOT-34 successor reply attachment",
+      "filename": "obs-1440p-hidden-rerun.png",
+      "sha256": "4c7d1d65340e3afa1f0a6b06f8adb620e5534edf1a352ca91987acd57fb60806"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "measuredAt": "2026-08-12T10:05:28.906Z",
+  "browser": {
+    "product": "Google Chrome",
+    "version": "150.0.7871.181",
+    "headless": true,
+    "canvas": {
+      "width": 1920,
+      "height": 1080
+    },
+    "warmupDurationMs": 5000,
+    "fixtureResponsesDuringSample": 61,
+    "sampleDurationMs": 15000,
+    "processTreeBefore": {
+      "processCount": 15,
+      "totalRssKiB": 1581912,
+      "totalPssKiB": 502999,
+      "byCommand": {
+        "cat": {
+          "count": 2,
+          "rssKiB": 4036
+        },
+        "chrome": {
+          "count": 13,
+          "rssKiB": 1577876
+        }
+      }
+    },
+    "processTreeAfter": {
+      "processCount": 13,
+      "totalRssKiB": 1381668,
+      "totalPssKiB": 488043,
+      "byCommand": {
+        "cat": {
+          "count": 2,
+          "rssKiB": 4036
+        },
+        "chrome": {
+          "count": 11,
+          "rssKiB": 1377632
+        }
+      }
+    },
+    "processTreeRssDeltaKiB": -200244,
+    "processTreePssDeltaKiB": -14956,
+    "jsHeapUsedBeforeBytes": 1260492,
+    "jsHeapUsedAfterBytes": 1261644,
+    "jsHeapUsedDeltaBytes": 1152,
+    "documentCountBefore": 1,
+    "documentCountAfter": 1,
+    "documentCountDelta": 0,
+    "nodeCountBefore": 76,
+    "nodeCountAfter": 76,
+    "nodeCountDelta": 0,
+    "taskDurationDeltaSeconds": 0.077921
+  },
+  "reconnect": {
+    "configuredMaximumSilenceMs": 1250,
+    "analyticalClaimsHiddenAfterMs": 1075,
+    "analyticalClaimsVisibleAfterReconnectMs": 216
+  },
+  "rendering": {
+    "htmlBackground": "rgba(0, 0, 0, 0)",
+    "bodyBackground": "rgba(0, 0, 0, 0)",
+    "fontFamily": "\"Noto Sans CJK SC\", \"Source Han Sans SC\", \"Microsoft YaHei\", sans-serif",
+    "chineseFontReady": true,
+    "card": {
+      "x": 1228.8125,
+      "y": 97.1875,
+      "width": 595.1875,
+      "height": 325.28125
+    }
+  }
+}

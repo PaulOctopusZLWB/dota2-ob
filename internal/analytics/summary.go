@@ -3,6 +3,7 @@ package analytics
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,7 +106,7 @@ func WriteSummaryFiles(sessionDir, sessionID string, engine *Engine) error {
 	if engine == nil {
 		return nil
 	}
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	if err := ensurePrivateDirectory(sessionDir); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
 	}
 	snap := engine.Snapshot(sessionID)
@@ -113,7 +114,7 @@ func WriteSummaryFiles(sessionDir, sessionID string, engine *Engine) error {
 	if err := writeJSON(filepath.Join(sessionDir, "analytics_summary.json"), summaryJSON); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(sessionDir, "analytics_summary.md"), []byte(RenderSummary(summaryJSON)), 0o644); err != nil {
+	if err := writePrivateFile(filepath.Join(sessionDir, "analytics_summary.md"), []byte(RenderSummary(summaryJSON))); err != nil {
 		return fmt.Errorf("write analytics summary md: %w", err)
 	}
 	return nil
@@ -127,7 +128,7 @@ const WardCoordinateConclusion = "not available from GSI (ward counters and purc
 // normalized_ticks.jsonl, derived_events.jsonl, analytics_summary.json, and
 // analytics_summary.md.
 func WriteArtifacts(sessionDir, sessionID string, ticks []NormalizedTick, events []Event, snap Snapshot) error {
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	if err := ensurePrivateDirectory(sessionDir); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
 	}
 	if err := writeJSONL(filepath.Join(sessionDir, "normalized_ticks.jsonl"), ticks); err != nil {
@@ -141,7 +142,7 @@ func WriteArtifacts(sessionDir, sessionID string, ticks []NormalizedTick, events
 		return err
 	}
 	summaryMD := RenderSummary(summaryJSON)
-	if err := os.WriteFile(filepath.Join(sessionDir, "analytics_summary.md"), []byte(summaryMD), 0o644); err != nil {
+	if err := writePrivateFile(filepath.Join(sessionDir, "analytics_summary.md"), []byte(summaryMD)); err != nil {
 		return fmt.Errorf("write analytics summary md: %w", err)
 	}
 	fmt.Println(summaryMD)
@@ -461,28 +462,33 @@ func fmtIntPtr(p *int64) string {
 // ---- file writers -------------------------------------------------------------
 
 func writeJSONL(path string, rows any) error {
-	f, err := os.Create(path)
+	f, err := openPrivateFile(path)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Base(path), err)
 	}
-	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
 	switch v := rows.(type) {
 	case []NormalizedTick:
 		for _, t := range v {
 			if err := enc.Encode(t); err != nil {
+				_ = f.Close()
 				return fmt.Errorf("encode normalized tick: %w", err)
 			}
 		}
 	case []Event:
 		for _, e := range v {
 			if err := enc.Encode(e); err != nil {
+				_ = f.Close()
 				return fmt.Errorf("encode event: %w", err)
 			}
 		}
 	default:
+		_ = f.Close()
 		return fmt.Errorf("unsupported jsonl row type %T", rows)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", filepath.Base(path), err)
 	}
 	return nil
 }
@@ -492,8 +498,43 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	if err := writePrivateFile(path, append(data, '\n')); err != nil {
 		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
 	}
 	return nil
+}
+
+func ensurePrivateDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
+}
+
+func openPrivateFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func writePrivateFile(path string, data []byte) error {
+	file, err := openPrivateFile(path)
+	if err != nil {
+		return err
+	}
+	written, err := file.Write(data)
+	if err == nil && written != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
