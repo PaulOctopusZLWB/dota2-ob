@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "lane-checkpoint",
+    "kicker": "直播洞察 · 对线节点",
+    "title": "十五分钟经济进入近期前 10%",
+    "body": "当前观察值显著高于同英雄、同位置的版本内个人分布，领先不是由缺失字段推断。",
+    "evidence": "当前 10,420 · 基线中位数 8,760 · 样本 24 场",
+    "confidenceLabel": "高置信度",
+    "sourceLabel": "实时观察 · 赛前历史基线",
+    "ageLabel": "更新于 1 秒前",
+    "asset": null
+  }
+}

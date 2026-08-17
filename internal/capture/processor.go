@@ -16,11 +16,10 @@ type Projection interface{ Apply(*session.Record) error }
 type Option func(*Processor)
 
 type Processor struct {
-	mu                         sync.Mutex
-	appender                   Appender
-	tracker                    *operator.Tracker
-	latest, profile, analytics Projection
-	logFailure                 func(code, subsystem string)
+	mu         sync.Mutex
+	appender   Appender
+	tracker    *operator.Tracker
+	logFailure func(code, subsystem string)
 }
 
 func NewProcessor(appender Appender, tracker *operator.Tracker, opts ...Option) *Processor {
@@ -32,9 +31,7 @@ func NewProcessor(appender Appender, tracker *operator.Tracker, opts ...Option) 
 	}
 	return p
 }
-func WithLatest(v Projection) Option    { return func(p *Processor) { p.latest = v } }
-func WithProfile(v Projection) Option   { return func(p *Processor) { p.profile = v } }
-func WithAnalytics(v Projection) Option { return func(p *Processor) { p.analytics = v } }
+
 func WithFailureLogger(logger func(code, subsystem string)) Option {
 	return func(p *Processor) {
 		if logger != nil {
@@ -61,30 +58,7 @@ func (p *Processor) Process(raw []byte) (*session.Record, error) {
 	if p.tracker != nil {
 		p.tracker.Accepted(record.ReceivedAt)
 	}
-	p.apply(operator.SubsystemLatest, "latest_failed", p.latest, record)
-	p.apply(operator.SubsystemProfile, "profile_failed", p.profile, record)
-	p.apply(operator.SubsystemAnalytics, "analytics_failed", p.analytics, record)
 	return record, nil
-}
-
-func (p *Processor) apply(subsystem, code string, projection Projection, record *session.Record) {
-	if projection == nil {
-		return
-	}
-	if err := projection.Apply(record); err != nil {
-		if p.tracker != nil {
-			p.tracker.Failure(subsystem, code, safeMessage(code))
-		}
-		p.logFailure(code, subsystem)
-		return
-	}
-	if p.tracker != nil {
-		if subsystem == operator.SubsystemAnalytics {
-			p.tracker.AnalyticsSuccess(record.ReceivedAt)
-		} else {
-			p.tracker.Success(subsystem)
-		}
-	}
 }
 
 func safeMessage(code string) string {

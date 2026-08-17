@@ -1,6 +1,8 @@
 package gsi_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/liveprojection"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/profile"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
@@ -24,17 +27,56 @@ import (
 
 type failingProjection struct{}
 
-func (failingProjection) Apply(*session.Record) error {
+func (failingProjection) Apply(context.Context, *session.Record) error {
 	return errors.New("do not expose this path /home/private")
 }
 
 type barrierProjection struct{ entered, release chan struct{} }
 
-func (p barrierProjection) Apply(*session.Record) error { close(p.entered); <-p.release; return nil }
+func (p barrierProjection) Apply(ctx context.Context, _ *session.Record) error {
+	close(p.entered)
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type stubbornProjection struct{ entered, release chan struct{} }
+
+func (p stubbornProjection) Apply(context.Context, *session.Record) error {
+	close(p.entered)
+	<-p.release
+	return nil
+}
 
 type countingProjection struct{ calls int }
 
-func (p *countingProjection) Apply(*session.Record) error { p.calls++; return nil }
+func (p *countingProjection) Apply(context.Context, *session.Record) error { p.calls++; return nil }
+
+const diagnosticToken = "test-only-diagnostic-token"
+
+func diagnosticOption() gsi.Option {
+	return gsi.WithDiagnostics(gsi.DiagnosticConfig{
+		BearerToken:   diagnosticToken,
+		AllowedOrigin: "http://127.0.0.1:43210",
+	})
+}
+
+func diagnosticGet(t *testing.T, target string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
 
 type sealingRawFile struct {
 	writes int
@@ -80,6 +122,23 @@ func TestHealthzReturnsOK(t *testing.T) {
 	}
 }
 
+func TestRuntimeCapacityStatusDefaultsPolicyUnhealthyWithoutOwner(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("capacity-unhealthy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	request := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	response := httptest.NewRecorder()
+	gsi.NewServer(store).ServeHTTP(response, request)
+	var payload struct {
+		Runtime gsi.RuntimeCapacityStatus `json:"runtime_capacity"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Runtime.PolicyHealthy || payload.Runtime.CandidateCapacity != 0 || payload.Runtime.NotificationCapacity != 1 {
+		t.Fatalf("unexpected default: %+v", payload.Runtime)
+	}
+}
+
 func TestGSIPostStoresValidJSON(t *testing.T) {
 	root := t.TempDir()
 	store, err := session.NewStore(root, session.WithSessionID("valid-gsi"))
@@ -118,9 +177,10 @@ func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.
 		t.Fatal(err)
 	}
 	tracker := operator.NewTracker(store.SessionID(), now, 15*time.Second, func() time.Time { return now })
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(failingProjection{}))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithLiveProjections(failingProjection{}))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"map":{"game_time":1}}`))
 	if err != nil {
@@ -136,11 +196,26 @@ func TestAcceptedPostReturnsOKWhenProjectionFailsAndStatusIsDegraded(t *testing.
 		t.Fatal(err)
 	}
 	defer statusResp.Body.Close()
-	var status operator.Snapshot
+	var status struct {
+		operator.Snapshot
+		LiveProjection liveprojection.Health `json:"live_projection"`
+	}
 	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || status.ActiveFailures[operator.SubsystemLatest].Code != "latest_failed" {
+	deadline := time.Now().Add(time.Second)
+	for !status.LiveProjection.Degraded && time.Now().Before(deadline) {
+		statusResp.Body.Close()
+		time.Sleep(time.Millisecond)
+		statusResp, err = http.Get(server.URL + "/api/status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status.State != operator.StateDegraded || status.AcceptedCount != 1 || !status.LiveProjection.Degraded || status.LiveProjection.ProjectedSequence != 0 {
 		t.Fatalf("status = %#v", status)
 	}
 	encoded, _ := json.Marshal(status)
@@ -164,8 +239,7 @@ func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
 	now := time.Now().UTC()
 	tracker := operator.NewTracker("drain", now, time.Minute, time.Now)
 	entered, release := make(chan struct{}), make(chan struct{})
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(barrierProjection{entered, release}))
-	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithLiveProjections(barrierProjection{entered, release}))
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	response := make(chan string, 1)
@@ -180,18 +254,52 @@ func TestServerWaitDrainsAcceptedRequestThroughResponse(t *testing.T) {
 		response <- string(body)
 	}()
 	<-entered
+	select {
+	case body := <-response:
+		if body != "ok\n" {
+			t.Fatalf("body=%q", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted response waited for blocked projection")
+	}
 	drained := make(chan struct{})
 	go func() { handler.Wait(); close(drained) }()
 	select {
 	case <-drained:
-		t.Fatal("Wait returned before projection/response")
+		t.Fatal("Wait returned before projector drain")
 	default:
 	}
 	close(release)
-	if body := <-response; body != "ok\n" {
-		t.Fatalf("body=%q", body)
-	}
 	<-drained
+}
+
+func TestServerWaitBoundsBlockedProjectorDrain(t *testing.T) {
+	store, _ := session.NewStore(t.TempDir(), session.WithSessionID("bounded-drain"))
+	entered, release := make(chan struct{}), make(chan struct{})
+	handler := gsi.NewServer(store, gsi.WithLiveProjections(stubbornProjection{entered, release}), gsi.WithProjectionDrainTimeout(20*time.Millisecond))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	<-entered
+	started := time.Now()
+	handler.Wait()
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded drain took %s", elapsed)
+	}
+	close(release)
+	cursorPath := filepath.Join(store.SessionDir(), "live_projection_cursor.json")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(cursorPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("projector did not finish after release")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestGSIPostRejectsMalformedJSONWithoutPersisting(t *testing.T) {
@@ -230,9 +338,11 @@ func TestGSIPostRejectsOversizedBodyWithoutRawOrProjection(t *testing.T) {
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projection := &countingProjection{}
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	processor := capture.NewProcessor(store, tracker)
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(projection))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(strings.Repeat("x", (10<<20)+1)))
 	if err != nil {
 		t.Fatal(err)
@@ -262,9 +372,11 @@ func TestRepeatedPostsAfterSealedFailureReturn503WithoutWritesOrProjections(t *t
 	now := time.Now().UTC()
 	tracker := operator.NewTracker(store.SessionID(), now, time.Minute, time.Now)
 	projection := &countingProjection{}
-	processor := capture.NewProcessor(store, tracker, capture.WithLatest(projection), capture.WithFailureLogger(func(string, string) {}))
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor)))
+	processor := capture.NewProcessor(store, tracker, capture.WithFailureLogger(func(string, string) {}))
+	handler := gsi.NewServer(store, gsi.WithTracker(tracker), gsi.WithProcessor(processor), gsi.WithLiveProjections(projection))
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 	for i := 0; i < 3; i++ {
 		resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"attempt":1}`))
 		if err != nil {
@@ -339,7 +451,7 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 	}
 	latest := state.NewLatest()
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithLatest(latest)))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithLatest(latest), diagnosticOption()))
 	defer server.Close()
 
 	validBody := `{"provider":{"name":"Dota 2","appid":570},"map":{"game_time":123},"hero":{"team2":{"player0":{"name":"npc_dota_hero_axe","xpos":100,"ypos":200}}}}`
@@ -351,11 +463,12 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("valid POST status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-
-	resp, err = http.Get(server.URL + "/api/latest")
-	if err != nil {
-		t.Fatalf("GET /api/latest returned error: %v", err)
+	deadline := time.Now().Add(time.Second)
+	for latest.Snapshot("latest-gsi").SnapshotCount != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
+
+	resp = diagnosticGet(t, server.URL+"/api/latest")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -389,10 +502,7 @@ func TestLatestAPIUpdatesAfterValidGSIOnly(t *testing.T) {
 		t.Fatalf("invalid POST status = %d, want 4xx", resp.StatusCode)
 	}
 
-	resp, err = http.Get(server.URL + "/api/latest")
-	if err != nil {
-		t.Fatalf("GET /api/latest after invalid returned error: %v", err)
-	}
+	resp = diagnosticGet(t, server.URL+"/api/latest")
 	defer resp.Body.Close()
 	var afterInvalid struct {
 		SnapshotCount uint64 `json:"snapshot_count"`
@@ -414,13 +524,10 @@ func TestDashboardLoadsFromSameServer(t *testing.T) {
 		"index.html": {Data: []byte(`<html><script>fetch('/api/latest')</script></html>`)},
 	}))
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithDashboard(dashboard)))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithDashboard(dashboard), diagnosticOption()))
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/")
-	if err != nil {
-		t.Fatalf("GET / returned error: %v", err)
-	}
+	resp := diagnosticGet(t, server.URL+"/")
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -440,8 +547,10 @@ func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
 	}
 	profiler := profile.NewProfiler()
 
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithProfiler(profiler)))
+	handler := gsi.NewServer(store, gsi.WithProfiler(profiler), diagnosticOption())
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	resp, err := http.Post(server.URL+"/gsi", "application/json", strings.NewReader(`{"provider":{"name":"Dota 2"},"map":{"game_time":123},"hero":{"team2":{"player0":{"xpos":100,"ypos":200}}}}`))
 	if err != nil {
@@ -451,11 +560,12 @@ func TestProfileAPIAndSummaryUpdateAfterValidGSI(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /gsi status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-
-	resp, err = http.Get(server.URL + "/api/profile")
-	if err != nil {
-		t.Fatalf("GET /api/profile returned error: %v", err)
+	deadline := time.Now().Add(time.Second)
+	for profiler.Snapshot().SnapshotCount != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
+
+	resp = diagnosticGet(t, server.URL+"/api/profile")
 	defer resp.Body.Close()
 
 	var profileBody struct {
@@ -502,14 +612,11 @@ func TestAnalyticsAPIsEmptyValidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore returned error: %v", err)
 	}
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(analytics.NewEngine())))
+	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(analytics.NewEngine()), diagnosticOption()))
 	defer server.Close()
 
 	for _, endpoint := range []string{"/api/analytics", "/api/events"} {
-		resp, err := http.Get(server.URL + endpoint)
-		if err != nil {
-			t.Fatalf("GET %s returned error: %v", endpoint, err)
-		}
+		resp := diagnosticGet(t, server.URL+endpoint)
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -532,8 +639,10 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		t.Fatalf("NewStore returned error: %v", err)
 	}
 	engine := analytics.NewEngine()
-	server := httptest.NewServer(gsi.NewServer(store, gsi.WithAnalytics(engine)))
+	handler := gsi.NewServer(store, gsi.WithAnalytics(engine), diagnosticOption())
+	server := httptest.NewServer(handler)
 	defer server.Close()
+	defer handler.Wait()
 
 	first := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
 	second := `{"provider":{"name":"Dota 2"},"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
@@ -544,6 +653,7 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 		resp.Body.Close()
 	}
 	// First accepted snapshot must update tick count but derive no events.
+	waitForTickCount(t, engine, 1)
 	if got := engine.TickCount(); got != 1 {
 		t.Fatalf("tick count after first = %d, want 1", got)
 	}
@@ -556,14 +666,12 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	} else {
 		resp.Body.Close()
 	}
+	waitForTickCount(t, engine, 2)
 	if got := engine.TickCount(); got != 2 {
 		t.Fatalf("tick count after second = %d, want 2", got)
 	}
 
-	resp, err := http.Get(server.URL + "/api/events")
-	if err != nil {
-		t.Fatalf("GET /api/events: %v", err)
-	}
+	resp := diagnosticGet(t, server.URL+"/api/events")
 	defer resp.Body.Close()
 	var events []analytics.Event
 	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
@@ -589,6 +697,162 @@ func TestAnalyticsUpdatesAfterAcceptedSnapshotOnly(t *testing.T) {
 	}
 }
 
+func TestRestartRebuildsFreshLiveAdaptersForEveryCursorState(t *testing.T) {
+	for _, tc := range []struct{ name, cursor string }{
+		{name: "valid", cursor: `{"session_id":"restart-live","sequence":2}`},
+		{name: "stale", cursor: `{"session_id":"restart-live","sequence":1}`},
+		{name: "missing"},
+		{name: "corrupt", cursor: `not-json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := session.NewStore(root, session.WithSessionID("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+			second := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+			if _, err := store.Append([]byte(first)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append([]byte(second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cursorPath := filepath.Join(root, "restart-live", "live_projection_cursor.json")
+			if tc.cursor != "" {
+				if err := os.WriteFile(cursorPath, []byte(tc.cursor), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reopened, err := session.NewStore(root, session.WithSessionID("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			latest := state.NewLatest()
+			profiler := profile.NewProfiler()
+			engine := analytics.NewEngine()
+			handler := gsi.NewServer(reopened, gsi.WithLatest(latest), gsi.WithProfiler(profiler), gsi.WithAnalytics(engine), diagnosticOption())
+			waitForTickCount(t, engine, 2)
+			if got := latest.Snapshot("restart-live"); got.Status != "ok" || got.SnapshotCount != 2 {
+				t.Fatalf("latest=%#v", got)
+			}
+			if got := profiler.Snapshot(); got.SnapshotCount != 2 {
+				t.Fatalf("profile=%#v", got)
+			}
+			if got := engine.Snapshot("restart-live"); got.TickCount != 2 || !containsEvent(got.RecentEvents, analytics.EventHeroDeath) {
+				t.Fatalf("analytics=%#v", got)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/latest", nil)
+			req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			want, err := json.Marshal(latest.Snapshot("restart-live"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want = append(want, '\n')
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), want) {
+				t.Fatalf("rebuilt diagnostic status=%d got=%s want=%s", rec.Code, rec.Body.Bytes(), want)
+			}
+			for _, path := range []string{"/v1/operator/commands", "/v1/overlay/state"} {
+				rec = httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf("rebuild exposed %s status=%d", path, rec.Code)
+				}
+			}
+			handler.Wait()
+			_ = reopened.Close()
+		})
+	}
+}
+
+func TestProfileRetryAfterSummaryFailureDoesNotDoubleApplyEvidence(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("profile-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(store.SessionDir(), "session_summary.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	profiler := profile.NewProfiler()
+	handler := gsi.NewServer(store, gsi.WithProfiler(profiler))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(`{"hero":{"team2":{"player0":{"alive":true}}}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for profiler.Snapshot().SnapshotCount == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := profiler.Snapshot().SnapshotCount; got != 1 {
+		t.Fatalf("profile retry count=%d, want 1", got)
+	}
+	handler.Wait()
+	_ = store.Close()
+}
+
+func TestAnalyticsRetryAfterSummaryFailureDoesNotDoubleApplyTransition(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.NewStore(root, session.WithSessionID("analytics-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := analytics.NewEngine()
+	handler := gsi.NewServer(store, gsi.WithAnalytics(engine))
+	first := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":100},"hero":{"team2":{"player0":{"alive":true,"level":6}}}}`
+	second := `{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":101},"hero":{"team2":{"player0":{"alive":false,"level":7,"respawn_seconds":12}}}}`
+	post := func(body string) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/gsi", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d", rec.Code)
+		}
+	}
+	post(first)
+	waitForTickCount(t, engine, 1)
+	summaryPath := filepath.Join(store.SessionDir(), "analytics_summary.json")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(summaryPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first summary not written")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := os.Remove(summaryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(summaryPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	post(second)
+	waitForTickCount(t, engine, 2)
+	time.Sleep(30 * time.Millisecond)
+	snap := engine.Snapshot("analytics-retry")
+	if snap.TickCount != 2 || snap.EventCounts[analytics.EventHeroDeath] != 1 {
+		t.Fatalf("analytics retry=%#v", snap)
+	}
+	handler.Wait()
+	_ = store.Close()
+}
+
+func waitForTickCount(t *testing.T, engine *analytics.Engine, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for engine.TickCount() != want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func containsEvent(events []analytics.Event, ty string) bool {
 	for _, e := range events {
 		if e.Type == ty {
@@ -596,4 +860,146 @@ func containsEvent(events []analytics.Event, ty string) bool {
 		}
 	}
 	return false
+}
+
+func TestProductionProfileDisablesLegacyDiagnosticsAndDeliveryRoutes(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("production-private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := gsi.NewServer(store,
+		gsi.WithLatest(state.NewLatest()), gsi.WithProfiler(profile.NewProfiler()),
+		gsi.WithAnalytics(analytics.NewEngine()),
+		gsi.WithLiveProjections(&countingProjection{}),
+		gsi.WithDashboard(http.FileServer(http.FS(fstest.MapFS{"index.html": {Data: []byte("private")}}))),
+	)
+	defer handler.Wait()
+	for _, target := range []string{"/", "/api/latest", "/api/profile", "/api/analytics", "/api/events", "/v1/operator/commands", "/v1/overlay/state"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d body=%s", target, rec.Code, rec.Body.String())
+		}
+	}
+	for _, target := range []string{"/healthz", "/api/status"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d", target, rec.Code)
+		}
+	}
+}
+
+func TestDiagnosticModeRequiresBearerAndSameOriginWithoutCORS(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("diagnostic-private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := gsi.NewServer(store, gsi.WithLatest(state.NewLatest()), gsi.WithLiveProjections(&countingProjection{}), diagnosticOption())
+	defer handler.Wait()
+	tests := []struct {
+		name, method string
+		headers      map[string]string
+		want         int
+	}{
+		{name: "missing bearer", method: http.MethodGet, want: http.StatusUnauthorized},
+		{name: "cookie only", method: http.MethodGet, headers: map[string]string{"Cookie": "token=" + diagnosticToken}, want: http.StatusUnauthorized},
+		{name: "wrong bearer", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer wrong"}, want: http.StatusUnauthorized},
+		{name: "cross origin", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken, "Origin": "https://hostile.invalid"}, want: http.StatusForbidden},
+		{name: "null origin", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken, "Origin": "null"}, want: http.StatusForbidden},
+		{name: "wrong method", method: http.MethodPost, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken}, want: http.StatusMethodNotAllowed},
+		{name: "same origin", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken, "Origin": "http://127.0.0.1:43210"}, want: http.StatusOK},
+		{name: "non browser", method: http.MethodGet, headers: map[string]string{"Authorization": "Bearer " + diagnosticToken}, want: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/api/latest", nil)
+			for key, value := range tc.headers {
+				req.Header.Set(key, value)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+			if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+				t.Fatal("diagnostic route enabled CORS")
+			}
+			if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatalf("security headers=%v", rec.Header())
+			}
+		})
+	}
+}
+
+func TestDiagnosticModeWithUnsafeOriginFailsClosed(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("unsafe-origin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := gsi.NewServer(store, gsi.WithDiagnostics(gsi.DiagnosticConfig{
+		BearerToken: diagnosticToken, AllowedOrigin: "https://hostile.invalid",
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/latest", nil)
+	req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unsafe diagnostic origin status=%d", rec.Code)
+	}
+}
+
+func TestAuthorizedDiagnosticJSONShapesRemainExact(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("shape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := state.NewLatest()
+	profiler := profile.NewProfiler()
+	engine := analytics.NewEngine()
+	handler := gsi.NewServer(store, gsi.WithLatest(latest), gsi.WithProfiler(profiler), gsi.WithAnalytics(engine), diagnosticOption())
+	tests := []struct {
+		target string
+		value  any
+	}{
+		{target: "/api/latest", value: latest.Snapshot(store.SessionID())},
+		{target: "/api/profile", value: profiler.Snapshot()},
+		{target: "/api/analytics", value: engine.Snapshot(store.SessionID())},
+		{target: "/api/events", value: engine.Events()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			want, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want = append(want, '\n')
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), want) {
+				t.Fatalf("status=%d\ngot =%s\nwant=%s", rec.Code, rec.Body.Bytes(), want)
+			}
+		})
+	}
+}
+
+func TestAuthorizedDiagnosticDashboardBodyRemainsUnchanged(t *testing.T) {
+	store, err := session.NewStore(t.TempDir(), session.WithSessionID("dashboard-shape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("<html>legacy dashboard</html>")
+	dashboard := http.FileServer(http.FS(fstest.MapFS{"index.html": {Data: want}}))
+	handler := gsi.NewServer(store, gsi.WithDashboard(dashboard), diagnosticOption())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+diagnosticToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), want) {
+		t.Fatalf("status=%d got=%q want=%q", rec.Code, rec.Body.Bytes(), want)
+	}
 }
