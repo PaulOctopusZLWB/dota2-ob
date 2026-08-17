@@ -2,12 +2,12 @@
 
 Date: 2026-08-12
 
-Amended: 2026-08-16
+Amended: 2026-08-17
 
 Decision owner: Paul
 
-Status: M0-M3 and the M4 functional candidate accepted; P4 harness correction
-and independent review remain open
+Status: M0-M3 and the M4 functional/harness candidates accepted; the P4
+non-TI public tournament substitution is pending independent review
 
 ## Objective
 
@@ -1139,12 +1139,16 @@ Acceptance:
   command replay/revision conflict, and out-of-order delivery.
 - Failures outside raw capture do not corrupt evidence; presentation failures do
   not block capture; all unsafe states fail closed.
-- One complete official TI match passes protocol P4 on PaulPC4090, from an armed
-  capture/OBS stack before game clock `0:00` through the normal post-game state.
-  A late join, remake, abandoned game, incomplete recording, unexplained GSI
-  gap, or missing terminal state does not count. Match duration is measured but
-  has no artificial minimum; completeness replaces the former 12-hour
-  synthetic-duration gate.
+- One complete authoritative public professional/tournament DotaTV match passes
+  protocol P4 on PaulPC4090, from an armed capture/OBS stack before game clock
+  `0:00` through the normal post-game state. The match need not be a TI match for
+  this M4 systems gate, but it must be a live Valve-visible league/tournament
+  game with a stable nonzero public match ID and public competition, series/game,
+  and team identities. Arbitrary matchmaking, private lobbies, bot games,
+  replay playback, and synthetic feeds do not count. A late join, remake,
+  abandoned game, incomplete recording, unexplained GSI gap, or missing terminal
+  state does not count. Match duration is measured but has no artificial
+  minimum; completeness replaces the former 12-hour synthetic-duration gate.
 - During that match there are zero lost accepted raw records; notification
   capacity remains one; candidate queue capacity remains 64; accepted GSI
   request bodies remain at most the existing 10 MiB limit, other API
@@ -1157,16 +1161,16 @@ Acceptance:
   root number at most 192 and use at most 1.6 GiB; rotated operational logs use
   at most ten files/100 MiB; no temporary file remains at exit; all backlogs
   expose deterministic health and the process exits cleanly.
-- Paul manually launches Dota 2, joins the identified official TI DotaTV match
-  before the start boundary, confirms the match/series identity, and performs
-  the prescribed operator checks. No account, Dota UI, or gameplay automation
-  is introduced. All service, evidence, OBS-profile, measurement, recovery, and
-  cleanup work remains agent-owned.
+- Paul manually launches Dota 2, joins the identified qualifying public DotaTV
+  match before the start boundary, confirms the competition/match/series
+  identity, and performs the prescribed operator checks. No account, Dota UI,
+  or gameplay automation is introduced. All service, evidence, OBS-profile,
+  measurement, recovery, and cleanup work remains agent-owned.
 - Before Paul is asked to join, the deterministic captured-GSI golden, complete
   M4 fault matrix, restart/tail/cache/queue adversarial tests, security checks,
   and a short production-stack resource preflight must pass. Those automated
   tests retain fault coverage but cannot substitute for or claim the complete
-  TI-match P4 result.
+  live-match P4 result.
 - Full test, race, vet, contract, frontend, screenshot, and end-to-end suites
   pass from one documented command set.
 
@@ -1272,6 +1276,11 @@ Acceptance:
 - Three consecutive full-match dress rehearsals complete with DotaTV, local GSI,
   historical snapshot, insight engine, operator console, OBS Browser Source,
   recording, and audit enabled.
+- At least one of those three rehearsals uses one complete official TI DotaTV
+  match on the exact release candidate. A non-TI P4 pass at M4 validates the
+  live pipeline but does not satisfy this TI-specific release gate. If no TI
+  match remains available, the release cannot claim TI-live validation and the
+  gate stays open rather than silently substituting another match.
 - No P0/P1 factual, privacy, hidden-state, crash, evidence-loss within the stated
   OS-buffered capture failure model, stale-on-air, or operator-control defect
   remains open.
@@ -1348,7 +1357,7 @@ and excluded samples are reported, never silently removed.
   and attach sanitized frames/logs. A short preflight can reject a configuration
   but cannot pass P3 or justify a threshold change.
 
-### P4 — one complete official TI match
+### P4 - one complete authoritative public tournament DotaTV match
 
 - The capture source is the accepted localhost HTTP GSI boundary. Dota GSI does
   not provide an authenticated OS-process identity for each request, so a
@@ -1367,11 +1376,18 @@ and excluded samples are reported, never silently removed.
   `localhost_gsi_sender_unattested` as a residual source limitation. Any
   contradictory correlation evidence fails the attempt; same-user local
   substitution remains explicitly outside what this interface can disprove.
-- Use one official TI DotaTV game that reaches a normal post-game terminal
-  state. Arm the exact candidate, isolated data root, sanitized evidence sink,
-  operator UI, native 750x640 Browser Source, and OBS recording before Paul
-  manually joins and before game clock `0:00`. Record public tournament,
-  series/game, teams, match ID when available, Dota/OBS/application builds,
+- Use one live professional/tournament DotaTV game that reaches a normal
+  post-game terminal state. Before arming, bind the in-client public DotaTV
+  listing and nonzero Valve match ID to either Valve-provided league metadata or
+  the tournament organizer's official public schedule. Retain source class,
+  sanitized endpoint/URL, retrieval time, response/page hash, pagination where
+  relevant, and conflicts; never retain a Steam Web API key. Community indexes
+  may supplement discovery but cannot be the sole authority or independent
+  corroboration for a Valve-derived fact. Missing competition, series/game,
+  team, or match identity fails closed. Arm the exact candidate, isolated data
+  root, sanitized evidence sink, operator UI, native 750x640 Browser Source, and
+  OBS recording before Paul manually joins and before game clock `0:00`. Record
+  public competition, series/game, teams, match ID, Dota/OBS/application builds,
   exact candidate/configuration hashes, start/end boundaries, DotaTV pause and
   observer-delay context, and the actual wall-clock duration. Do not retain
   credentials, private chat, account identifiers, or unrelated screen content.
@@ -1404,13 +1420,26 @@ and excluded samples are reported, never silently removed.
   run every deterministic restart, `SIGKILL`, incomplete-tail/cache/checkpoint/
   policy-frame, saturation, stale, out-of-order, audit-failure, and overlay-
   disconnect case from the accepted M4 matrix. These are automated preflight
-  evidence, not a shortened substitute for the complete TI match.
+  evidence, not a shortened substitute for the complete live match.
 - Any late join, remake/abandon, accepted-record loss, silent queue drop,
   unreported saturation, unsafe or stale on-air claim, nondeterministic rebuild,
   missing evidence boundary, recording loss, or unclean exit fails P4 and
-  requires another complete TI match. Passing P4 requires Paul's explicit
-  confirmation that the prescribed manual steps were performed; technical gate
-  evaluation and acceptance remain with the independent reviewer and G胖.
+  requires another complete qualifying match. Passing P4 requires Paul's
+  explicit confirmation that the prescribed manual steps were performed;
+  technical gate evaluation and acceptance remain with the independent reviewer
+  and G胖.
+
+The accepted harness candidate
+`abb4210257f26364c2a539de90e386f411f3229a` pins spec
+`271cc47d503828528b7c69212deb4d22683cb715`, requires an International URL,
+and emits TI-specific human instructions. It must not be bypassed or used
+unchanged for a non-TI match. Before this amendment can authorize a live run,
+one narrow immutable harness successor must bind this exact spec revision,
+replace only the typed match/source classification and human wording, preserve
+all accepted process, timing, evidence, privacy, fault, resource, recovery, and
+cleanup semantics, and pass full independent exact-SHA review. The existing
+`DOT-70` window remains closed until that successor and one exact qualifying
+match are both accepted.
 
 ### P5 — production rehearsal latency
 
