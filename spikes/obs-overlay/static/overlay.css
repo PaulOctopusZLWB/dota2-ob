@@ -1,0 +1,228 @@
+:root {
+  color-scheme: dark;
+  background: transparent;
+  --ink: #f5f2e9;
+  --muted: #bbb8ad;
+  --paper: rgba(9, 13, 15, 0.94);
+  --line: rgba(255, 255, 255, 0.18);
+  --accent: #dfb85a;
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  color: var(--ink);
+}
+
+#overlay-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#overlay-card {
+  position: absolute;
+  top: clamp(64px, 9vh, 132px);
+  right: clamp(54px, 5vw, 132px);
+  width: clamp(500px, 31vw, 620px);
+  min-height: 276px;
+  padding: 26px 28px 24px 34px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px 18px 4px 4px;
+  background:
+    linear-gradient(118deg, rgba(255, 255, 255, 0.055), transparent 38%),
+    var(--paper);
+  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.48);
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 140ms linear, transform 180ms ease-out, visibility 0s linear 0s;
+  visibility: visible;
+}
+
+body[data-render-state="hidden"] #overlay-card,
+body[data-render-state="booting"] #overlay-card {
+  opacity: 0;
+  transform: translateX(18px);
+  visibility: hidden;
+  transition: opacity 110ms linear, transform 140ms ease-in, visibility 0s linear 140ms;
+}
+
+.signal-rail {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  display: flex;
+  gap: 5px;
+}
+
+.signal-rail span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 72%, transparent);
+}
+
+.card-header,
+.provenance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.card-header {
+  min-height: 28px;
+  padding-right: 42px;
+  border-bottom: 1px solid var(--line);
+}
+
+.kicker,
+.age,
+.evidence,
+.provenance,
+.body-copy,
+h1 {
+  margin: 0;
+}
+
+.kicker {
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+.age {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.claim {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 20px;
+  align-items: center;
+  padding: 22px 0 18px;
+}
+
+.asset-frame {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 78px;
+  height: 78px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 62%, transparent);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 32%, color-mix(in srgb, var(--accent) 25%, transparent), transparent 46%),
+    rgba(255, 255, 255, 0.045);
+}
+
+#asset-image {
+  position: absolute;
+  inset: 0;
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+#asset-image.loaded {
+  display: block;
+}
+
+.asset-fallback {
+  color: var(--accent);
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", serif;
+  font-size: 34px;
+  font-weight: 700;
+}
+
+.copy {
+  min-width: 0;
+}
+
+h1 {
+  color: var(--ink);
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", serif;
+  font-size: clamp(25px, 1.6vw, 34px);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+}
+
+.body-copy {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: clamp(15px, 0.9vw, 18px);
+  font-weight: 500;
+  line-height: 1.62;
+  overflow-wrap: anywhere;
+}
+
+.card-footer {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.evidence {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.provenance {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.provenance strong {
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+body[data-family="draft-context"] { --accent: #d9b24c; }
+body[data-family="lane-checkpoint"] { --accent: #67c996; }
+body[data-family="item-timing"] { --accent: #e3a94f; }
+body[data-family="objective-exchange"] { --accent: #df7464; }
+body[data-family="teamfight-readiness"] { --accent: #72bde3; }
+
+@media (max-width: 1600px), (max-height: 900px) {
+  #overlay-card {
+    top: clamp(46px, 7vh, 84px);
+    right: clamp(42px, 4vw, 78px);
+    width: clamp(480px, 32vw, 570px);
+    min-height: 252px;
+    padding: 22px 24px 20px 30px;
+  }
+
+  .claim {
+    padding: 18px 0 15px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #overlay-card {
+    transition: none;
+  }
+}

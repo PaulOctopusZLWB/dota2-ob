@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "objective-exchange",
+    "kicker": "直播洞察 · 目标交换",
+    "title": "肉山换两塔，双方各取推进筹码",
+    "body": "夜魇取得不朽之守护；天辉同期拆除两座外塔，交换结论仅使用当前可观察目标与经济变化。",
+    "evidence": "观察窗口 38 秒 · 两座外塔 · 经济差 +620",
+    "confidenceLabel": "高置信度",
+    "sourceLabel": "实时观察 · 目标状态",
+    "ageLabel": "更新于 1 秒前",
+    "asset": null
+  }
+}

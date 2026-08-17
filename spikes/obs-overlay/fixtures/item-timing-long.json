@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "item-timing",
+    "kicker": "直播洞察 · 关键装备节奏",
+    "title": "核心装备完成时间显著提前，下一轮关键团战拥有更宽的主动窗口",
+    "body": "在同选手、同英雄、同位置且限定当前版本的可比样本中，本场完成时间位于最快十分位；低样本与缺失记录均未参与比较。",
+    "evidence": "本场 17:42 · 历史中位数 21:08 · 有效样本 27 场",
+    "confidenceLabel": "高置信度 · 27 场",
+    "sourceLabel": "实时观察 · 当前版本历史基线",
+    "ageLabel": "更新于 1 秒前",
+    "asset": null
+  }
+}
