@@ -25,20 +25,20 @@ func syntheticRawEvents(matchID string, withAllTen bool, endSecond float64) []by
 	// engine, game-state transitions, hero positions, a tower death, deaths,
 	// buybacks, and a parse-done event.
 	type fi struct {
-		MatchID      uint64 `json:"match_id"`
-		GameMode     int32  `json:"game_mode"`
-		GameWinner   int32  `json:"game_winner"`
-		LeagueID     uint32 `json:"league_id"`
-		RadiantTeamID uint32 `json:"radiant_team_id"`
-		DireTeamID   uint32 `json:"dire_team_id"`
-		EndTime      uint32 `json:"end_time_unix"`
-		PlaybackTime float32 `json:"playback_time"`
-		Players      []struct {
-			HeroName    string `json:"hero_name"`
-			PlayerName  string `json:"player_name"`
-			IsFakeClient bool  `json:"is_fake_client"`
-			SteamID     uint64 `json:"steam_id"`
-			GameTeam    int32  `json:"game_team"`
+		MatchID       uint64  `json:"match_id"`
+		GameMode      int32   `json:"game_mode"`
+		GameWinner    int32   `json:"game_winner"`
+		LeagueID      uint32  `json:"league_id"`
+		RadiantTeamID uint32  `json:"radiant_team_id"`
+		DireTeamID    uint32  `json:"dire_team_id"`
+		EndTime       uint32  `json:"end_time_unix"`
+		PlaybackTime  float32 `json:"playback_time"`
+		Players       []struct {
+			HeroName     string `json:"hero_name"`
+			PlayerName   string `json:"player_name"`
+			IsFakeClient bool   `json:"is_fake_client"`
+			SteamID      uint64 `json:"steam_id"`
+			GameTeam     int32  `json:"game_team"`
 		} `json:"players"`
 	}
 	f := &fi{MatchID: mustUint(matchID), GameMode: 22, LeagueID: 19719, EndTime: 1786766917, PlaybackTime: 1180}
@@ -60,11 +60,11 @@ func syntheticRawEvents(matchID string, withAllTen bool, endSecond float64) []by
 			hero = heroesD[i-5]
 		}
 		f.Players = append(f.Players, struct {
-			HeroName    string `json:"hero_name"`
-			PlayerName  string `json:"player_name"`
-			IsFakeClient bool  `json:"is_fake_client"`
-			SteamID     uint64 `json:"steam_id"`
-			GameTeam    int32  `json:"game_team"`
+			HeroName     string `json:"hero_name"`
+			PlayerName   string `json:"player_name"`
+			IsFakeClient bool   `json:"is_fake_client"`
+			SteamID      uint64 `json:"steam_id"`
+			GameTeam     int32  `json:"game_team"`
 		}{HeroName: hero, PlayerName: fmt.Sprintf("p%d", i), SteamID: 76561197960265728 + uint64(1000+i), GameTeam: team})
 	}
 
@@ -86,8 +86,8 @@ func syntheticRawEvents(matchID string, withAllTen bool, endSecond float64) []by
 				cls = "CDOTA_Unit_Hero_Tiny"
 			}
 			emit("hero_state", map[string]interface{}{
-				"tick": 1200 + s*30, "hero_index": i, "class": cls, "player_id": i, "team_num": 2+int32(i/5),
-				"pos_x": float64(100+i), "pos_y": float64(200+i), "pos_z": 0.0,
+				"tick": 1200 + s*30, "hero_index": i, "class": cls, "player_id": i, "team_num": 2 + int32(i/5),
+				"pos_x": float64(100 + i), "pos_y": float64(200 + i), "pos_z": 0.0,
 				"health": 1000, "max_health": 1000, "level": 1, "xp": 0, "alive": true,
 				"hero_account": acct,
 			})
@@ -710,6 +710,197 @@ func TestOverrideMissingTimestampFailsClosed(t *testing.T) {
 	if !strings.Contains(res.Reason, "override_timestamp_required") {
 		t.Fatalf("reason=%s want override_timestamp_required", res.Reason)
 	}
+}
+
+// blockArtifact makes the given artifact path a directory so that the atomic
+// WriteAtomic rename to it fails deterministically (fault injection).
+func blockArtifact(t *testing.T, st *store.Store, matchID, artifact string) {
+	t.Helper()
+	path := st.ArtifactPath(matchID, artifact)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStatusWriteFailureArchivePath: a failed status write on the archive
+// early-return path must return an error, not (terminalResult, nil).
+func TestStatusWriteFailureArchivePath(t *testing.T) {
+	mt, _, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	// Force archive missing: use an empty replay root.
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactStatus)
+	res, err := RunMatch(st, mt, t.TempDir(), testOptions(), stubParseStage, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestStatusWriteFailureParsePath: a failed status write on the parse
+// early-return path must return an error, not (parse_failed, nil).
+func TestStatusWriteFailureParsePath(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactStatus)
+	failParse := func(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+		return nil, fmt.Errorf("synthetic parse failure")
+	}
+	res, err := RunMatch(st, mt, root, testOptions(), failParse, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestRawMetaWriteFailurePropagates: a failed raw-meta.json write on the
+// parse-failure path must propagate an error (not discard it).
+func TestRawMetaWriteFailurePropagates(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactRawMeta)
+	failParse := func(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+		return nil, fmt.Errorf("synthetic parse failure")
+	}
+	res, err := RunMatch(st, mt, root, testOptions(), failParse, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from raw-meta write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "parse-failure raw-meta") {
+		t.Fatalf("error=%v want raw-meta write propagation", err)
+	}
+}
+
+// TestStatusWriteFailureIdentityPath: a failed status write on the identity
+// quarantine early-return path must return an error. The synthetic match uses
+// only 9 participants so identity quarantines after archive/parse succeed.
+func TestStatusWriteFailureIdentityPath(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000003", false, 300)
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000003", store.ArtifactStatus)
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestStatusWriteFailureClockPath: a failed status write on the clock
+// quarantine early-return path must return an error. A public-duration
+// mismatch makes the clock fail closed after identity passes.
+func TestStatusWriteFailureClockPath(t *testing.T) {
+	mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+	// Break the clock gate: wildly wrong public duration.
+	mt.PublicDurationSeconds = 300 + 5000
+	st, _ := store.New(t.TempDir())
+	blockArtifact(t, st, "1000000001", store.ArtifactStatus)
+	res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+	if err == nil {
+		t.Fatalf("expected error from status-write failure, got result %+v", res)
+	}
+	if !strings.Contains(err.Error(), "persist terminal status") {
+		t.Fatalf("error=%v want status-write propagation", err)
+	}
+}
+
+// TestTerminalStatusRecordsFullState: every early terminal path must populate
+// the applicable StatusRecord fields so catalog/API/UI show real stage state
+// instead of empty dashes.
+func TestTerminalStatusRecordsFullState(t *testing.T) {
+	t.Run("archive_fail", func(t *testing.T) {
+		mt, _, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		st, _ := store.New(t.TempDir())
+		// Point at an empty root so the archive is missing.
+		res, err := RunMatch(st, mt, t.TempDir(), testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusMissing {
+			t.Fatalf("status=%s want missing", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState == "" || sr.Status != store.StatusMissing {
+			t.Fatalf("status record missing archive_state: %+v", sr)
+		}
+	})
+	t.Run("parse_fail", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		st, _ := store.New(t.TempDir())
+		failParse := func(demoPath, rawPath, matchID string, progress ProgressFn) (*rawMetaPayload, error) {
+			return nil, fmt.Errorf("synthetic parse failure")
+		}
+		res, err := RunMatch(st, mt, root, testOptions(), failParse, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusParseFailed {
+			t.Fatalf("status=%s want parse_failed", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState != "verified" || sr.ParseState != "parse_error" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+	})
+	t.Run("identity_quarantine", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000003", false, 300)
+		st, _ := store.New(t.TempDir())
+		res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusQuarantined {
+			t.Fatalf("status=%s want quarantined", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000003")
+		if sr.ArchiveState != "verified" || sr.ParseState != "ok" || sr.IdentityState == "" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+	})
+	t.Run("clock_quarantine", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		mt.PublicDurationSeconds = 300 + 5000
+		st, _ := store.New(t.TempDir())
+		res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusQuarantined {
+			t.Fatalf("status=%s want quarantined", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState != "verified" || sr.ParseState != "ok" || sr.IdentityState != "verified" || sr.ClockState == "" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+	})
+	t.Run("verified", func(t *testing.T) {
+		mt, root, _ := writeSyntheticArchive(t, "1000000001", true, 300)
+		st, _ := store.New(t.TempDir())
+		res, err := RunMatch(st, mt, root, testOptions(), stubParseStage, func(string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != store.StatusVerified {
+			t.Fatalf("status=%s want verified", res.Status)
+		}
+		sr, _ := st.ReadStatus("1000000001")
+		if sr.ArchiveState != "verified" || sr.ParseState != "ok" || sr.IdentityState != "verified" || sr.ClockState != "calibrated" {
+			t.Fatalf("status record incomplete: %+v", sr)
+		}
+		// Catalog must carry the same stage states.
+		cat, err := st.RebuildCatalog("t")
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := cat.Matches[0]
+		if row.ArchiveState != "verified" || row.IdentityState != "verified" || row.ClockState != "calibrated" || row.ParseState != "ok" {
+			t.Fatalf("catalog row incomplete: %+v", row)
+		}
+	})
 }
 
 func TestRunMatchCorruptIsolated(t *testing.T) {

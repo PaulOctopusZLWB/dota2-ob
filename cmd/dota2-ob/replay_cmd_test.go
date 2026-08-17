@@ -81,7 +81,7 @@ func TestReplayRebuildCatalogEmpty(t *testing.T) {
 func TestReplayParseUnknownMatch(t *testing.T) {
 	mt := archive.Match{
 		MatchID: "9999999999", ArchiveSHA256: "a", DemoSHA256: "b",
-		ExpectedTeams:       make([]archive.ExpectedTeam, 2),
+		ExpectedTeams:        make([]archive.ExpectedTeam, 2),
 		ExpectedParticipants: make([]archive.ExpectedPlayer, 10),
 	}
 	manifest := writeTestManifest(t, []archive.Match{mt})

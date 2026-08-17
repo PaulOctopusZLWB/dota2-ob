@@ -144,9 +144,9 @@ func TestEndpoints(t *testing.T) {
 
 	var report struct {
 		Data struct {
-			Status         string `json:"status"`
-			Publication    string `json:"publication_state"`
-			Participants   []struct {
+			Status       string `json:"status"`
+			Publication  string `json:"publication_state"`
+			Participants []struct {
 				AccountID   string `json:"account_id"`
 				NominalRole string `json:"nominal_role"`
 				RoleSource  string `json:"role_source_kind"`
@@ -190,7 +190,9 @@ func TestEndpoints(t *testing.T) {
 
 	var metrics struct {
 		Data struct {
-			Definitions []struct{ ID string `json:"id"` } `json:"definitions"`
+			Definitions []struct {
+				ID string `json:"id"`
+			} `json:"definitions"`
 		} `json:"data"`
 	}
 	if code := getJSON(t, ts.URL+Version+"/metrics/registry", &metrics); code != 200 {

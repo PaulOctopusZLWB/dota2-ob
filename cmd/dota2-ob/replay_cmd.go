@@ -67,11 +67,11 @@ func replayFlags(fs *flag.FlagSet) (*string, *string, *string, *string) {
 
 // roleInputs bundles the effective role-provenance inputs for the runner.
 type roleInputs struct {
-	Registry  *roles.Registry
-	Overrides *roles.OverrideFile
-	RegistrySHA string
-	OverridesSHA string
-	RegistryPath string
+	Registry      *roles.Registry
+	Overrides     *roles.OverrideFile
+	RegistrySHA   string
+	OverridesSHA  string
+	RegistryPath  string
 	OverridesPath string
 }
 
@@ -267,12 +267,12 @@ func cmdProbe(args []string, output io.Writer) int {
 	})
 	wall := time.Since(start)
 	summary := map[string]interface{}{
-		"command":        "probe",
-		"wall_seconds":   wall.Seconds(),
-		"workers":        *workers,
-		"data_root":      st.Root,
-		"status_counts":  countByStatus(results),
-		"results":        results,
+		"command":       "probe",
+		"wall_seconds":  wall.Seconds(),
+		"workers":       *workers,
+		"data_root":     st.Root,
+		"status_counts": countByStatus(results),
+		"results":       results,
 	}
 	enc := json.NewEncoder(output)
 	_ = enc.Encode(summary)

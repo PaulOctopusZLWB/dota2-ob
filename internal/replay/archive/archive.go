@@ -38,34 +38,34 @@ func Terminal(s string) bool {
 
 // Manifest is the frozen probe/109-match manifest.
 type Manifest struct {
-	SchemaVersion string        `json:"schema_version"`
-	Issue         string        `json:"issue"`
-	CorpusRoot    string        `json:"corpus_root_runtime_only,omitempty"`
-	Matches       []Match       `json:"matches"`
+	SchemaVersion string  `json:"schema_version"`
+	Issue         string  `json:"issue"`
+	CorpusRoot    string  `json:"corpus_root_runtime_only,omitempty"`
+	Matches       []Match `json:"matches"`
 }
 
 // Match is one manifest entry.
 type Match struct {
-	Category                 string            `json:"category"`
-	MatchID                  string            `json:"match_id"`
-	Cluster                  int               `json:"cluster"`
-	ReplaySalt               int64             `json:"replay_salt"`
-	StartTime                int64             `json:"start_time"`
-	PublicDurationSeconds    int               `json:"public_duration_seconds"`
-	PublicRadiantTeam        string            `json:"public_radiant_team"`
-	PublicDireTeam           string            `json:"public_dire_team"`
-	PublicScore              string            `json:"public_score"`
-	ArchiveRelativePath      string            `json:"archive_relative_path"`
-	ArchiveBytes             int64             `json:"archive_bytes"`
-	ArchiveSHA256            string            `json:"archive_sha256"`
-	ArchiveMagicHex          string            `json:"archive_magic_hex"`
-	DemoRelativePath         string            `json:"demo_relative_path"`
-	DemoBytes                int64             `json:"demo_bytes"`
-	DemoSHA256               string            `json:"demo_sha256"`
-	DemoMagic                string            `json:"demo_magic"`
-	ExpectedTeams            []ExpectedTeam    `json:"expected_teams"`
-	ExpectedParticipants     []ExpectedPlayer  `json:"expected_participants"`
-	InitialStates            InitialStates     `json:"initial_states"`
+	Category              string           `json:"category"`
+	MatchID               string           `json:"match_id"`
+	Cluster               int              `json:"cluster"`
+	ReplaySalt            int64            `json:"replay_salt"`
+	StartTime             int64            `json:"start_time"`
+	PublicDurationSeconds int              `json:"public_duration_seconds"`
+	PublicRadiantTeam     string           `json:"public_radiant_team"`
+	PublicDireTeam        string           `json:"public_dire_team"`
+	PublicScore           string           `json:"public_score"`
+	ArchiveRelativePath   string           `json:"archive_relative_path"`
+	ArchiveBytes          int64            `json:"archive_bytes"`
+	ArchiveSHA256         string           `json:"archive_sha256"`
+	ArchiveMagicHex       string           `json:"archive_magic_hex"`
+	DemoRelativePath      string           `json:"demo_relative_path"`
+	DemoBytes             int64            `json:"demo_bytes"`
+	DemoSHA256            string           `json:"demo_sha256"`
+	DemoMagic             string           `json:"demo_magic"`
+	ExpectedTeams         []ExpectedTeam   `json:"expected_teams"`
+	ExpectedParticipants  []ExpectedPlayer `json:"expected_participants"`
+	InitialStates         InitialStates    `json:"initial_states"`
 }
 
 // ExpectedTeam is the frozen team binding.
@@ -77,26 +77,26 @@ type ExpectedTeam struct {
 
 // ExpectedPlayer is the frozen participant binding.
 type ExpectedPlayer struct {
-	RoleRecordID  string `json:"role_record_id"`
-	AccountID     string `json:"account_id"`
-	PlayerName    string `json:"player_name"`
-	MatchName     string `json:"match_name"`
-	TeamID        string `json:"team_id"`
-	TeamName      string `json:"team_name"`
-	Side          string `json:"side"`
+	RoleRecordID   string `json:"role_record_id"`
+	AccountID      string `json:"account_id"`
+	PlayerName     string `json:"player_name"`
+	MatchName      string `json:"match_name"`
+	TeamID         string `json:"team_id"`
+	TeamName       string `json:"team_name"`
+	Side           string `json:"side"`
 	ExpectedHeroID int    `json:"expected_hero_id"`
-	NominalRole   string `json:"nominal_role"`
+	NominalRole    string `json:"nominal_role"`
 	RoleConfidence string `json:"role_confidence"`
 }
 
 // InitialStates captures the pre-parse manifest states.
 type InitialStates struct {
-	ArchiveState   string `json:"archive_state"`
-	IdentityState  string `json:"identity_state"`
-	ParseState     string `json:"parse_state"`
-	PublicationState string `json:"publication_state"`
-	TerminalState  *string `json:"terminal_state"`
-	Reason         string `json:"reason"`
+	ArchiveState     string  `json:"archive_state"`
+	IdentityState    string  `json:"identity_state"`
+	ParseState       string  `json:"parse_state"`
+	PublicationState string  `json:"publication_state"`
+	TerminalState    *string `json:"terminal_state"`
+	Reason           string  `json:"reason"`
 }
 
 // LoadManifest reads a manifest JSON file.
@@ -154,26 +154,26 @@ func (m *Manifest) Find(matchID string) (*Match, bool) {
 
 // Verification is the content-identity record for one archive/demo pair.
 type Verification struct {
-	SchemaVersion        string `json:"schema_version"`
-	MatchID              string `json:"match_id"`
-	ArchiveRelativePath  string `json:"archive_relative_path"`
-	DemoRelativePath     string `json:"demo_relative_path"`
-	ArchiveBytesExpected int64  `json:"archive_bytes_expected"`
-	ArchiveBytesActual   int64  `json:"archive_bytes_actual"`
+	SchemaVersion         string `json:"schema_version"`
+	MatchID               string `json:"match_id"`
+	ArchiveRelativePath   string `json:"archive_relative_path"`
+	DemoRelativePath      string `json:"demo_relative_path"`
+	ArchiveBytesExpected  int64  `json:"archive_bytes_expected"`
+	ArchiveBytesActual    int64  `json:"archive_bytes_actual"`
 	ArchiveSHA256Expected string `json:"archive_sha256_expected"`
-	ArchiveSHA256Actual  string `json:"archive_sha256_actual"`
-	ArchiveMagicOK       bool   `json:"archive_magic_ok"`
-	DemoBytesExpected    int64  `json:"demo_bytes_expected"`
-	DemoBytesActual      int64  `json:"demo_bytes_actual"`
-	DemoSHA256Expected   string `json:"demo_sha256_expected"`
-	DemoSHA256Actual     string `json:"demo_sha256_actual"`
-	DemoMagicOK          bool   `json:"demo_magic_ok"`
-	State                string `json:"state"`
-	Reason               string `json:"reason"`
-	CheckedAt            string `json:"checked_at"`
-	ParserName           string `json:"parser_name"`
-	ParserVersion        string `json:"parser_version"`
-	AdapterVersion       string `json:"adapter_version"`
+	ArchiveSHA256Actual   string `json:"archive_sha256_actual"`
+	ArchiveMagicOK        bool   `json:"archive_magic_ok"`
+	DemoBytesExpected     int64  `json:"demo_bytes_expected"`
+	DemoBytesActual       int64  `json:"demo_bytes_actual"`
+	DemoSHA256Expected    string `json:"demo_sha256_expected"`
+	DemoSHA256Actual      string `json:"demo_sha256_actual"`
+	DemoMagicOK           bool   `json:"demo_magic_ok"`
+	State                 string `json:"state"`
+	Reason                string `json:"reason"`
+	CheckedAt             string `json:"checked_at"`
+	ParserName            string `json:"parser_name"`
+	ParserVersion         string `json:"parser_version"`
+	AdapterVersion        string `json:"adapter_version"`
 }
 
 // VerifyContent checks a manifest entry against the corpus root and returns a
@@ -190,17 +190,17 @@ type VerifyOptions struct {
 // Verify performs the container and hash gate.
 func Verify(root string, mt *Match, opts VerifyOptions) (*Verification, error) {
 	v := &Verification{
-		SchemaVersion:        version.IdentitySchema,
-		MatchID:              mt.MatchID,
-		ArchiveRelativePath:  mt.ArchiveRelativePath,
-		DemoRelativePath:     mt.DemoRelativePath,
-		ArchiveBytesExpected: mt.ArchiveBytes,
+		SchemaVersion:         version.IdentitySchema,
+		MatchID:               mt.MatchID,
+		ArchiveRelativePath:   mt.ArchiveRelativePath,
+		DemoRelativePath:      mt.DemoRelativePath,
+		ArchiveBytesExpected:  mt.ArchiveBytes,
 		ArchiveSHA256Expected: mt.ArchiveSHA256,
-		DemoBytesExpected:    mt.DemoBytes,
-		DemoSHA256Expected:   mt.DemoSHA256,
-		ParserName:           version.ParserName,
-		ParserVersion:        version.ParserVersion,
-		AdapterVersion:       version.AdapterVersion,
+		DemoBytesExpected:     mt.DemoBytes,
+		DemoSHA256Expected:    mt.DemoSHA256,
+		ParserName:            version.ParserName,
+		ParserVersion:         version.ParserVersion,
+		AdapterVersion:        version.AdapterVersion,
 	}
 
 	arcPath := filepath.Join(root, mt.ArchiveRelativePath)

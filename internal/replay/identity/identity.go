@@ -20,8 +20,8 @@ const SteamID64Offset uint64 = 76561197960265728
 
 // State values for an Identity record.
 const (
-	StateVerified  = "verified"
-	StateFailed    = "fail_closed"
+	StateVerified    = "verified"
+	StateFailed      = "fail_closed"
 	StateUnavailable = "unavailable"
 )
 
@@ -39,32 +39,32 @@ type Participant struct {
 
 // Team is one verified team binding.
 type Team struct {
-	TeamID       string `json:"team_id"`
-	TeamName     string `json:"team_name"`
-	Tag          string `json:"tag"`
-	Side         string `json:"side"`
+	TeamID       string  `json:"team_id"`
+	TeamName     string  `json:"team_name"`
+	Tag          string  `json:"tag"`
+	Side         string  `json:"side"`
 	TournamentID *uint32 `json:"tournament_id"`
 }
 
 // Identity is the verification record.
 type Identity struct {
-	SchemaVersion string        `json:"schema_version"`
-	MatchID       string        `json:"match_id"`
-	State         string        `json:"state"`
-	Reason        string        `json:"reason"`
-	GameBuild     uint32        `json:"game_build"`
-	GameMode      int32         `json:"game_mode"`
-	GameWinner    int32         `json:"game_winner"`
-	LeagueID      uint32        `json:"league_id"`
-	HeaderServer  string        `json:"header_server"`
-	Teams         []Team        `json:"teams"`
-	Participants  []Participant `json:"participants"`
-	GateMatch     bool          `json:"gate_match"`
-	GateBuild     bool          `json:"gate_build"`
-	GateTeams     bool          `json:"gate_teams"`
-	GateParticipants bool       `json:"gate_participants"`
-	Mismatches    []string      `json:"mismatches"`
-	Missing       []string      `json:"missing_inputs"`
+	SchemaVersion    string        `json:"schema_version"`
+	MatchID          string        `json:"match_id"`
+	State            string        `json:"state"`
+	Reason           string        `json:"reason"`
+	GameBuild        uint32        `json:"game_build"`
+	GameMode         int32         `json:"game_mode"`
+	GameWinner       int32         `json:"game_winner"`
+	LeagueID         uint32        `json:"league_id"`
+	HeaderServer     string        `json:"header_server"`
+	Teams            []Team        `json:"teams"`
+	Participants     []Participant `json:"participants"`
+	GateMatch        bool          `json:"gate_match"`
+	GateBuild        bool          `json:"gate_build"`
+	GateTeams        bool          `json:"gate_teams"`
+	GateParticipants bool          `json:"gate_participants"`
+	Mismatches       []string      `json:"mismatches"`
+	Missing          []string      `json:"missing_inputs"`
 }
 
 // Build verifies the raw summary against the frozen manifest entry. teamByNum

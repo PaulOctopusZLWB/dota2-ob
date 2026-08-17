@@ -14,8 +14,8 @@ func testRegistry() *Registry {
 			MatchID: "1000000001",
 			Teams: []RoleTeam{{
 				TeamID: "T1", TeamName: "Team One", Side: "radiant",
-				SourceKind: "reliable_public_tournament_roster",
-				SourceURL:  "https://example.com/roster",
+				SourceKind:  "reliable_public_tournament_roster",
+				SourceURL:   "https://example.com/roster",
 				RetrievedAt: "2026-08-17T04:15:00Z",
 				Participants: []RoleRecord{
 					{RoleRecordID: "1000000001:1000", AccountID: "1000", PlayerName: "p1", NominalRole: "1", RoleConfidence: "high"},

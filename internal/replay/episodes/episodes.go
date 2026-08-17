@@ -19,45 +19,45 @@ import (
 
 // Kinds of behavior episodes.
 const (
-	KindLaneSegment    = "lane_segment"
-	KindLaneDeparture  = "lane_departure"
-	KindRoamAttempt    = "roam_attempt"
-	KindFarmInterval   = "farm_interval"
-	KindRuneContest    = "rune_contest"
-	KindSmoke          = "smoke_activation"
-	KindWard           = "ward_placement"
-	KindFight          = "fight_interval"
-	KindObjective      = "objective_attempt"
-	KindReset          = "reset"
-	KindDeathRound     = "death_respawn_buyback_round"
-	KindItemWindow     = "key_item_window"
+	KindLaneSegment   = "lane_segment"
+	KindLaneDeparture = "lane_departure"
+	KindRoamAttempt   = "roam_attempt"
+	KindFarmInterval  = "farm_interval"
+	KindRuneContest   = "rune_contest"
+	KindSmoke         = "smoke_activation"
+	KindWard          = "ward_placement"
+	KindFight         = "fight_interval"
+	KindObjective     = "objective_attempt"
+	KindReset         = "reset"
+	KindDeathRound    = "death_respawn_buyback_round"
+	KindItemWindow    = "key_item_window"
 )
 
 // Unavailable episode families (explicit reason; deterministic, not inferred).
 const (
-	UnavailLaneSegment  = "lane_segment"
+	UnavailLaneSegment   = "lane_segment"
 	UnavailLaneDeparture = "lane_departure"
-	UnavailRoamAttempt  = "roam_attempt"
-	UnavailFarmInterval = "farm_interval"
-	UnavailRuneContest  = "rune_contest"
+	UnavailRoamAttempt   = "roam_attempt"
+	UnavailFarmInterval  = "farm_interval"
+	UnavailRuneContest   = "rune_contest"
 )
 
 // Episode is one behavior episode.
 type Episode struct {
-	ID               string   `json:"id"`
-	MatchID          string   `json:"match_id"`
-	Kind             string   `json:"kind"`
-	StartGameSecond  float64  `json:"start_game_second"`
-	EndGameSecond    float64  `json:"end_game_second"`
-	Participants     []string `json:"participants"`
-	AccountID        string   `json:"account_id,omitempty"`
-	Region           string   `json:"region,omitempty"`
-	Detail           string   `json:"detail,omitempty"`
-	EvidenceIDs      []int64  `json:"evidence_ids"`
-	RuleVersion      string   `json:"rule_version"`
-	MissingInputs    []string `json:"missing_inputs"`
-	Exclusions       []string `json:"exclusions"`
-	Confidence       float64  `json:"confidence"`
+	ID              string   `json:"id"`
+	MatchID         string   `json:"match_id"`
+	Kind            string   `json:"kind"`
+	StartGameSecond float64  `json:"start_game_second"`
+	EndGameSecond   float64  `json:"end_game_second"`
+	Participants    []string `json:"participants"`
+	AccountID       string   `json:"account_id,omitempty"`
+	Region          string   `json:"region,omitempty"`
+	Detail          string   `json:"detail,omitempty"`
+	EvidenceIDs     []int64  `json:"evidence_ids"`
+	RuleVersion     string   `json:"rule_version"`
+	MissingInputs   []string `json:"missing_inputs"`
+	Exclusions      []string `json:"exclusions"`
+	Confidence      float64  `json:"confidence"`
 }
 
 // Unavailable is an explicitly unavailable episode family.
@@ -84,9 +84,9 @@ func (o *Output) CanonicalJSON() ([]byte, error) { return json.Marshal(o) }
 
 // Builder accumulates episodes from a fact stream.
 type Builder struct {
-	matchID   string
+	matchID     string
 	accountName map[string]string
-	episodes  []Episode
+	episodes    []Episode
 }
 
 // NewBuilder creates an episode builder for a match.
@@ -301,10 +301,10 @@ func handleRespawn(b *Builder, rounds map[string]*deathRound, drb *facts.DeathRe
 
 func objectiveEpisode(of *facts.ObjectiveFact, gs float64) *Episode {
 	ep := &Episode{
-		Kind: KindObjective,
+		Kind:            KindObjective,
 		StartGameSecond: gs, EndGameSecond: gs + 1,
-		Detail: of.BuildingName,
-		Region: fmt.Sprintf("%s/%s", of.Team, of.BuildingKind),
+		Detail:       of.BuildingName,
+		Region:       fmt.Sprintf("%s/%s", of.Team, of.BuildingKind),
 		Participants: of.Attackers,
 		EvidenceIDs:  []int64{int64(gs)},
 		Confidence:   1.0,
@@ -373,13 +373,13 @@ func (w *fightWindow) close() {
 			parts = append(parts, a)
 		}
 		ep := &Episode{
-			Kind:             KindFight,
-			StartGameSecond:  w.start,
-			EndGameSecond:    w.last + 1,
-			Participants:     parts,
-			EvidenceIDs:      append([]int64(nil), w.seqs...),
-			Confidence:       1.0,
-			Detail:           fmt.Sprintf("death_cluster_%d", len(parts)),
+			Kind:            KindFight,
+			StartGameSecond: w.start,
+			EndGameSecond:   w.last + 1,
+			Participants:    parts,
+			EvidenceIDs:     append([]int64(nil), w.seqs...),
+			Confidence:      1.0,
+			Detail:          fmt.Sprintf("death_cluster_%d", len(parts)),
 		}
 		w.b.Add(ep)
 	}

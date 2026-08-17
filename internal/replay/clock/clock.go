@@ -48,25 +48,25 @@ type Transition struct {
 
 // Clock is the calibrated clock record.
 type Clock struct {
-	SchemaVersion      string       `json:"schema_version"`
-	RuleVersion        string       `json:"rule_version"`
-	State              string       `json:"state"`
-	Reason             string       `json:"reason"`
-	Transitions        []Transition `json:"transitions"`
-	AnchorCombatTS     float64      `json:"anchor_combat_ts"`
-	AnchorTick         uint32       `json:"anchor_tick"`
-	EndCombatTS        *float64     `json:"end_combat_ts"`
-	EndTick            *uint32      `json:"end_tick"`
-	PregameSeconds     float64      `json:"pregame_seconds"`
-	GameDurationSeconds *float64    `json:"game_duration_seconds"`
-	PlaybackSeconds    float64      `json:"playback_seconds"`
-	PublicDurationSeconds *int      `json:"public_duration_seconds"`
-	DurationDeltaSeconds *float64   `json:"duration_delta_seconds"`
-	DurationGateOK     bool         `json:"duration_gate_ok"`
-	GameStartUnix      *int64       `json:"game_start_unix"`
-	GameEndUnix        *int64       `json:"game_end_unix"`
-	Missing            []string     `json:"missing_inputs"`
-	EventAlignmentErrors []float64  `json:"event_alignment_errors"`
+	SchemaVersion         string       `json:"schema_version"`
+	RuleVersion           string       `json:"rule_version"`
+	State                 string       `json:"state"`
+	Reason                string       `json:"reason"`
+	Transitions           []Transition `json:"transitions"`
+	AnchorCombatTS        float64      `json:"anchor_combat_ts"`
+	AnchorTick            uint32       `json:"anchor_tick"`
+	EndCombatTS           *float64     `json:"end_combat_ts"`
+	EndTick               *uint32      `json:"end_tick"`
+	PregameSeconds        float64      `json:"pregame_seconds"`
+	GameDurationSeconds   *float64     `json:"game_duration_seconds"`
+	PlaybackSeconds       float64      `json:"playback_seconds"`
+	PublicDurationSeconds *int         `json:"public_duration_seconds"`
+	DurationDeltaSeconds  *float64     `json:"duration_delta_seconds"`
+	DurationGateOK        bool         `json:"duration_gate_ok"`
+	GameStartUnix         *int64       `json:"game_start_unix"`
+	GameEndUnix           *int64       `json:"game_end_unix"`
+	Missing               []string     `json:"missing_inputs"`
+	EventAlignmentErrors  []float64    `json:"event_alignment_errors"`
 }
 
 // GameSecondOfCombatTS converts a combat-log timestamp to a game second.
@@ -122,14 +122,14 @@ type BuildOptions struct {
 // must be in observed order (ascending combat timestamp).
 func Build(transitions []Transition, opts BuildOptions) *Clock {
 	c := &Clock{
-		SchemaVersion:      version.ClockSchema,
-		RuleVersion:        version.PhaseRuleVersion,
-		State:              StateFailClosed,
-		Reason:             "no_game_in_progress_anchor",
-		Transitions:        transitions,
-		PlaybackSeconds:    opts.PlaybackSeconds,
+		SchemaVersion:         version.ClockSchema,
+		RuleVersion:           version.PhaseRuleVersion,
+		State:                 StateFailClosed,
+		Reason:                "no_game_in_progress_anchor",
+		Transitions:           transitions,
+		PlaybackSeconds:       opts.PlaybackSeconds,
 		PublicDurationSeconds: &opts.PublicDurationSeconds,
-		Missing:            []string{},
+		Missing:               []string{},
 	}
 
 	if opts.PublicDurationSeconds <= 0 {

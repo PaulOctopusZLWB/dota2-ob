@@ -20,18 +20,18 @@ import (
 
 // Family names for the normalized fact partitions.
 const (
-	FamilyMatchState       = "match_state"
-	FamilyParticipant      = "participant_binding"
-	FamilyHeroState        = "hero_state_sample"
-	FamilyEconomy          = "economy_sample"
-	FamilyCombat           = "combat_event"
-	FamilyObjective        = "objective_event"
-	FamilyDeathRespawn     = "death_respawn_buyback_event"
-	FamilyItem             = "item_event"
-	FamilyAbility          = "ability_event"
-	FamilyModifier         = "modifier_event"
-	FamilyVision           = "vision_event"
-	FamilyEntityLifecycle  = "entity_lifecycle_event"
+	FamilyMatchState      = "match_state"
+	FamilyParticipant     = "participant_binding"
+	FamilyHeroState       = "hero_state_sample"
+	FamilyEconomy         = "economy_sample"
+	FamilyCombat          = "combat_event"
+	FamilyObjective       = "objective_event"
+	FamilyDeathRespawn    = "death_respawn_buyback_event"
+	FamilyItem            = "item_event"
+	FamilyAbility         = "ability_event"
+	FamilyModifier        = "modifier_event"
+	FamilyVision          = "vision_event"
+	FamilyEntityLifecycle = "entity_lifecycle_event"
 )
 
 // Combat event kinds.
@@ -46,71 +46,71 @@ const (
 
 // Fact is one normalized fact line.
 type Fact struct {
-	Seq          int64           `json:"seq"`
-	Family       string          `json:"family"`
-	MatchID      string          `json:"match_id"`
-	GameSecond   float64         `json:"game_second"`
-	GameSecondOK bool            `json:"game_second_ok"`
-	Tick         uint32          `json:"tick"`
-	SourceSeq    int64           `json:"source_seq"`
-	SchemaVersion string         `json:"schema_version"`
-	Payload      json.RawMessage `json:"payload"`
+	Seq           int64           `json:"seq"`
+	Family        string          `json:"family"`
+	MatchID       string          `json:"match_id"`
+	GameSecond    float64         `json:"game_second"`
+	GameSecondOK  bool            `json:"game_second_ok"`
+	Tick          uint32          `json:"tick"`
+	SourceSeq     int64           `json:"source_seq"`
+	SchemaVersion string          `json:"schema_version"`
+	Payload       json.RawMessage `json:"payload"`
 }
 
 // MatchState is the single match-level fact.
 type MatchState struct {
-	MatchID      string `json:"match_id"`
-	GameMode     int32  `json:"game_mode"`
-	GameWinner   int32  `json:"game_winner"`
-	LeagueID     uint32 `json:"league_id"`
-	GameBuild    uint32 `json:"game_build"`
-	DurationSec  *float64 `json:"duration_seconds"`
-	WinnerSide   string `json:"winner_side"`
-	SourceKind   string `json:"source_kind"`
-	SchemaVersion string `json:"schema_version"`
+	MatchID       string   `json:"match_id"`
+	GameMode      int32    `json:"game_mode"`
+	GameWinner    int32    `json:"game_winner"`
+	LeagueID      uint32   `json:"league_id"`
+	GameBuild     uint32   `json:"game_build"`
+	DurationSec   *float64 `json:"duration_seconds"`
+	WinnerSide    string   `json:"winner_side"`
+	SourceKind    string   `json:"source_kind"`
+	SchemaVersion string   `json:"schema_version"`
 }
 
 // ParticipantFact is one participant binding fact.
 type ParticipantFact struct {
-	Slot       int32  `json:"slot"`
-	AccountID  string `json:"account_id"`
-	SteamID64  uint64 `json:"steam_id64"`
-	PlayerName string `json:"player_name"`
-	HeroName   string `json:"hero_name"`
-	HeroID     int32  `json:"hero_id"`
-	Side       string `json:"side"`
-	Team       int32  `json:"team"`
+	Slot          int32  `json:"slot"`
+	AccountID     string `json:"account_id"`
+	SteamID64     uint64 `json:"steam_id64"`
+	PlayerName    string `json:"player_name"`
+	HeroName      string `json:"hero_name"`
+	HeroID        int32  `json:"hero_id"`
+	Side          string `json:"side"`
+	Team          int32  `json:"team"`
 	BindingSource string `json:"binding_source"`
 	SchemaVersion string `json:"schema_version"`
 }
 
 // HeroStateSample is a resampled per-player position/economy snapshot.
 type HeroStateSample struct {
-	AccountID  string   `json:"account_id"`
-	HeroName   string   `json:"hero_name"`
-	Side       string   `json:"side"`
-	PosX       *float64 `json:"pos_x"`
-	PosY       *float64 `json:"pos_y"`
-	PosZ       *float64 `json:"pos_z"`
-	Health     *int64   `json:"health"`
-	MaxHealth  *int64   `json:"max_health"`
-	Level      *int32   `json:"level"`
-	XP         *int64   `json:"xp"`
-	Alive      *bool    `json:"alive"`
+	AccountID        string   `json:"account_id"`
+	HeroName         string   `json:"hero_name"`
+	Side             string   `json:"side"`
+	PosX             *float64 `json:"pos_x"`
+	PosY             *float64 `json:"pos_y"`
+	PosZ             *float64 `json:"pos_z"`
+	Health           *int64   `json:"health"`
+	MaxHealth        *int64   `json:"max_health"`
+	Level            *int32   `json:"level"`
+	XP               *int64   `json:"xp"`
+	Alive            *bool    `json:"alive"`
 	RespawnRemaining *float64 `json:"respawn_remaining"`
-	Missing    []string `json:"missing"`
+	Missing          []string `json:"missing"`
 }
 
 // EconomySample is a gold/xp/net-worth/last-hits sample.
 type EconomySample struct {
-	AccountID  string   `json:"account_id"`
-	HeroName   string   `json:"hero_name"`
-	Networth   *uint32  `json:"networth"`
-	LastHits   *uint32  `json:"last_hits"`
-	Gold       *int64   `json:"gold"`
-	Xp         *int64   `json:"xp"`
-	Reason     *uint32  `json:"reason"`
-	Missing    []string `json:"missing"`
+	AccountID string   `json:"account_id"`
+	HeroName  string   `json:"hero_name"`
+	Networth  *uint32  `json:"networth"`
+	LastHits  *uint32  `json:"last_hits"`
+	Gold      *int64   `json:"gold"`
+	Xp        *int64   `json:"xp"`
+	Reason    *uint32  `json:"reason"`
+	Missing   []string `json:"missing"`
 }
 
 // CombatFact is a normalized combat event.
@@ -135,32 +135,32 @@ type CombatFact struct {
 
 // ObjectiveFact is a building/objective transition.
 type ObjectiveFact struct {
-	BuildingName  string   `json:"building_name"`
-	BuildingKind  string   `json:"building_kind"`
-	BuildingTier  *int     `json:"building_tier"`
-	BuildingLane  string   `json:"building_lane"`
-	Team          string   `json:"team"`
-	ActorAccount  string   `json:"actor_account,omitempty"`
-	ActorName     string   `json:"actor_name,omitempty"`
-	Attackers     []string `json:"attackers"`
-	IsRealBuilding bool    `json:"is_real_building"`
-	Exclusion     string   `json:"exclusion,omitempty"`
-	Missing       []string `json:"missing"`
+	BuildingName   string   `json:"building_name"`
+	BuildingKind   string   `json:"building_kind"`
+	BuildingTier   *int     `json:"building_tier"`
+	BuildingLane   string   `json:"building_lane"`
+	Team           string   `json:"team"`
+	ActorAccount   string   `json:"actor_account,omitempty"`
+	ActorName      string   `json:"actor_name,omitempty"`
+	Attackers      []string `json:"attackers"`
+	IsRealBuilding bool     `json:"is_real_building"`
+	Exclusion      string   `json:"exclusion,omitempty"`
+	Missing        []string `json:"missing"`
 }
 
 // DeathRespawnBuyback is one death, respawn, or buyback round event.
 type DeathRespawnBuyback struct {
-	Kind          string   `json:"kind"` // death|respawn|buyback
-	AccountID     string   `json:"account_id"`
-	HeroName      string   `json:"hero_name"`
-	Side          string   `json:"side"`
-	KillerAccount string   `json:"killer_account,omitempty"`
-	KillerName    string   `json:"killer_name,omitempty"`
+	Kind           string   `json:"kind"` // death|respawn|buyback
+	AccountID      string   `json:"account_id"`
+	HeroName       string   `json:"hero_name"`
+	Side           string   `json:"side"`
+	KillerAccount  string   `json:"killer_account,omitempty"`
+	KillerName     string   `json:"killer_name,omitempty"`
 	AssistAccounts []string `json:"assist_accounts"`
-	RespawnTime   *float64 `json:"respawn_time"`
-	BuybackCost   *int64   `json:"buyback_cost"`
-	DeathValue    *int64   `json:"death_value"`
-	Missing       []string `json:"missing"`
+	RespawnTime    *float64 `json:"respawn_time"`
+	BuybackCost    *int64   `json:"buyback_cost"`
+	DeathValue     *int64   `json:"death_value"`
+	Missing        []string `json:"missing"`
 }
 
 // ItemFact is an item purchase or use.
@@ -176,33 +176,33 @@ type ItemFact struct {
 
 // AbilityFact is an ability cast.
 type AbilityFact struct {
-	AccountID string   `json:"account_id"`
-	HeroName  string   `json:"hero_name"`
-	AbilityName string `json:"ability_name"`
-	Level     *uint32  `json:"level"`
-	TargetAccount string `json:"target_account,omitempty"`
-	TargetName string   `json:"target_name,omitempty"`
-	Missing   []string `json:"missing"`
+	AccountID     string   `json:"account_id"`
+	HeroName      string   `json:"hero_name"`
+	AbilityName   string   `json:"ability_name"`
+	Level         *uint32  `json:"level"`
+	TargetAccount string   `json:"target_account,omitempty"`
+	TargetName    string   `json:"target_name,omitempty"`
+	Missing       []string `json:"missing"`
 }
 
 // ModifierFact is a modifier add/remove.
 type ModifierFact struct {
-	Kind      string   `json:"kind"` // add|remove
-	AccountID string   `json:"account_id"`
-	HeroName  string   `json:"hero_name"`
-	Modifier  string   `json:"modifier"`
-	Duration  *float64 `json:"duration"`
-	SourceAccount string `json:"source_account,omitempty"`
-	SourceName string   `json:"source_name,omitempty"`
-	Missing   []string `json:"missing"`
+	Kind          string   `json:"kind"` // add|remove
+	AccountID     string   `json:"account_id"`
+	HeroName      string   `json:"hero_name"`
+	Modifier      string   `json:"modifier"`
+	Duration      *float64 `json:"duration"`
+	SourceAccount string   `json:"source_account,omitempty"`
+	SourceName    string   `json:"source_name,omitempty"`
+	Missing       []string `json:"missing"`
 }
 
 // VisionFact is a ward placement/destruction.
 type VisionFact struct {
-	Kind      string `json:"kind"` // obs_ward_placed|sentry_ward_placed|ward_destroyed
-	AccountID string `json:"account_id"`
-	HeroName  string `json:"hero_name"`
-	Team      string `json:"team"`
+	Kind      string   `json:"kind"` // obs_ward_placed|sentry_ward_placed|ward_destroyed
+	AccountID string   `json:"account_id"`
+	HeroName  string   `json:"hero_name"`
+	Team      string   `json:"team"`
 	LocationX *float64 `json:"location_x"`
 	LocationY *float64 `json:"location_y"`
 }
@@ -225,32 +225,32 @@ type HeroBinding struct {
 
 // Coverage reports availability of a fact family.
 type Coverage struct {
-	Family        string   `json:"family"`
-	Count         int64    `json:"count"`
-	Eligible      int64    `json:"eligible_count"`
-	Missing       int64    `json:"missing_count"`
+	Family            string `json:"family"`
+	Count             int64  `json:"count"`
+	Eligible          int64  `json:"eligible_count"`
+	Missing           int64  `json:"missing_count"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
-	Available     bool     `json:"available"`
+	Available         bool   `json:"available"`
 }
 
 // Summary is the aggregated facts record.
 type Summary struct {
-	SchemaVersion string            `json:"schema_version"`
-	MatchID       string            `json:"match_id"`
-	Families      []Coverage        `json:"families"`
-	HeroBindings  []HeroBinding     `json:"hero_bindings"`
-	GameSecondMin float64           `json:"game_second_min"`
-	GameSecondMax float64           `json:"game_second_max"`
-	EligibleSeconds int64           `json:"eligible_seconds"`
-	PositionGaps  map[string]int64  `json:"position_gap_seconds"`
-	RawEvents     int64             `json:"raw_events"`
-	CombatEvents  int64             `json:"combat_events"`
+	SchemaVersion   string           `json:"schema_version"`
+	MatchID         string           `json:"match_id"`
+	Families        []Coverage       `json:"families"`
+	HeroBindings    []HeroBinding    `json:"hero_bindings"`
+	GameSecondMin   float64          `json:"game_second_min"`
+	GameSecondMax   float64          `json:"game_second_max"`
+	EligibleSeconds int64            `json:"eligible_seconds"`
+	PositionGaps    map[string]int64 `json:"position_gap_seconds"`
+	RawEvents       int64            `json:"raw_events"`
+	CombatEvents    int64            `json:"combat_events"`
 }
 
 // Builder consumes a raw stream and emits normalized facts.
 type Builder struct {
-	clk     *clock.Clock
-	idn     *identity.Identity
+	clk               *clock.Clock
+	idn               *identity.Identity
 	heroNameToAccount map[string]string
 	accountToName     map[string]string
 	accountToSide     map[string]string
@@ -925,6 +925,7 @@ func classifyBuilding(name string, targetTeam, attackerTeam *uint32) (kind strin
 	}
 	return
 }
+
 // Reader streams facts from a deterministic JSONL source.
 type Reader struct {
 	sc *bufio.Scanner

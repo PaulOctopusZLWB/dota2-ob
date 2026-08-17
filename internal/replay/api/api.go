@@ -151,9 +151,9 @@ func (s *Server) loadReport(matchID string) (*report.Report, error) {
 
 // timeline merges the phase stream and episodes into one renderable timeline.
 type timeline struct {
-	MatchID  string             `json:"match_id"`
-	Phases   *phase.Output      `json:"phases"`
-	Episodes *episodes.Output   `json:"episodes"`
+	MatchID  string           `json:"match_id"`
+	Phases   *phase.Output    `json:"phases"`
+	Episodes *episodes.Output `json:"episodes"`
 }
 
 func (s *Server) timeline(matchID string) timeline {
@@ -177,8 +177,8 @@ type tracks struct {
 }
 
 type playerTrack struct {
-	AccountID string     `json:"account_id"`
-	HeroName  string     `json:"hero_name"`
+	AccountID string       `json:"account_id"`
+	HeroName  string       `json:"hero_name"`
 	Samples   []trackPoint `json:"samples"`
 }
 

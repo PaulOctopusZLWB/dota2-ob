@@ -80,15 +80,15 @@ type InputFingerprint struct {
 	ParserVersion  string `json:"parser_version"`
 	AdapterVersion string `json:"adapter_version"`
 	// Schema versions of every persisted artifact family.
-	RawSchema     string `json:"raw_schema"`
-	FactsSchema   string `json:"facts_schema"`
-	ClockSchema   string `json:"clock_schema"`
+	RawSchema      string `json:"raw_schema"`
+	FactsSchema    string `json:"facts_schema"`
+	ClockSchema    string `json:"clock_schema"`
 	IdentitySchema string `json:"identity_schema"`
-	EpisodeSchema string `json:"episode_schema"`
-	PhaseSchema   string `json:"phase_schema"`
-	MetricsSchema string `json:"metrics_schema"`
-	ReportSchema  string `json:"report_schema"`
-	RoleSchema    string `json:"role_schema"`
+	EpisodeSchema  string `json:"episode_schema"`
+	PhaseSchema    string `json:"phase_schema"`
+	MetricsSchema  string `json:"metrics_schema"`
+	ReportSchema   string `json:"report_schema"`
+	RoleSchema     string `json:"role_schema"`
 	// Rule/algorithm versions of every derived artifact.
 	PhaseRuleVersion   string `json:"phase_rule_version"`
 	EpisodeRuleVersion string `json:"episode_rule_version"`
@@ -96,7 +96,7 @@ type InputFingerprint struct {
 	MetricsRuleVersion string `json:"metrics_rule_version"`
 	// Effective role-registry identity: registry content hash plus override
 	// content hash when overrides exist (both affect published results).
-	RoleRegistrySHA256 string `json:"role_registry_sha256"`
+	RoleRegistrySHA256  string `json:"role_registry_sha256"`
 	RoleOverridesSHA256 string `json:"role_overrides_sha256,omitempty"`
 }
 
@@ -171,7 +171,8 @@ func (s *Store) StatusExists(matchID string) bool {
 // WriteAtomic writes data to path via a temporary file and atomic rename.
 // The file is fsynced before promotion so an interrupted run never observes a
 // partial artifact as canonical.
-func WriteAtomic(path string, data []byte) error {	dir := filepath.Dir(path)
+func WriteAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
@@ -300,27 +301,27 @@ func (s *Store) OpenArtifact(matchID, artifact string) (*os.File, error) {
 // effective role registry and override inputs (empty when absent).
 func Fingerprint(archiveSHA, demoSHA, matchID, roleRegistrySHA, roleOverridesSHA string) InputFingerprint {
 	return InputFingerprint{
-		SchemaVersion:      version.IdentitySchema,
-		MatchID:            matchID,
-		ArchiveSHA256:      archiveSHA,
-		DemoSHA256:         demoSHA,
-		ParserName:         version.ParserName,
-		ParserVersion:      version.ParserVersion,
-		AdapterVersion:     version.AdapterVersion,
-		RawSchema:          version.RawSchema,
-		FactsSchema:        version.FactsSchema,
-		ClockSchema:        version.ClockSchema,
-		IdentitySchema:     version.IdentitySchema,
-		EpisodeSchema:      version.EpisodeSchema,
-		PhaseSchema:        version.PhaseSchema,
-		MetricsSchema:      version.MetricsSchema,
-		ReportSchema:       version.ReportSchema,
-		RoleSchema:         version.RoleSchema,
-		PhaseRuleVersion:   version.PhaseRuleVersion,
-		EpisodeRuleVersion: version.EpisodeRuleVersion,
-		LaneRuleVersion:    version.LaneRuleVersion,
-		MetricsRuleVersion: version.MetricsRuleVersion,
-		RoleRegistrySHA256: roleRegistrySHA,
+		SchemaVersion:       version.IdentitySchema,
+		MatchID:             matchID,
+		ArchiveSHA256:       archiveSHA,
+		DemoSHA256:          demoSHA,
+		ParserName:          version.ParserName,
+		ParserVersion:       version.ParserVersion,
+		AdapterVersion:      version.AdapterVersion,
+		RawSchema:           version.RawSchema,
+		FactsSchema:         version.FactsSchema,
+		ClockSchema:         version.ClockSchema,
+		IdentitySchema:      version.IdentitySchema,
+		EpisodeSchema:       version.EpisodeSchema,
+		PhaseSchema:         version.PhaseSchema,
+		MetricsSchema:       version.MetricsSchema,
+		ReportSchema:        version.ReportSchema,
+		RoleSchema:          version.RoleSchema,
+		PhaseRuleVersion:    version.PhaseRuleVersion,
+		EpisodeRuleVersion:  version.EpisodeRuleVersion,
+		LaneRuleVersion:     version.LaneRuleVersion,
+		MetricsRuleVersion:  version.MetricsRuleVersion,
+		RoleRegistrySHA256:  roleRegistrySHA,
 		RoleOverridesSHA256: roleOverridesSHA,
 	}
 }
@@ -552,6 +553,10 @@ func (s *Store) catalogRow(matchID string) CatalogRow {
 		row.Status = sr.Status
 		row.Publication = sr.Publication
 		row.Reason = sr.Reason
+		row.ArchiveState = sr.ArchiveState
+		row.IdentityState = sr.IdentityState
+		row.ClockState = sr.ClockState
+		row.ParseState = sr.ParseState
 		var can Canonical
 		if err := s.ReadJSON(matchID, ArtifactCanonical, &can); err == nil {
 			row.TreeSHA256 = can.TreeSHA256
@@ -584,10 +589,10 @@ func (s *Store) catalogRow(matchID string) CatalogRow {
 		}
 	}
 	var clk struct {
-		State            string   `json:"state"`
+		State               string   `json:"state"`
 		GameDurationSeconds *float64 `json:"game_duration_seconds"`
-		GameStartUnix    *int64   `json:"game_start_unix"`
-		Reason           string   `json:"reason"`
+		GameStartUnix       *int64   `json:"game_start_unix"`
+		Reason              string   `json:"reason"`
 	}
 	if err := s.ReadJSON(matchID, ArtifactClock, &clk); err == nil {
 		row.ClockState = clk.State

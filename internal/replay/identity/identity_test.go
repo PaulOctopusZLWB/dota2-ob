@@ -61,7 +61,7 @@ func summaryFor(players []raw.PlayerInfo) *raw.Summary {
 			DireTeamID:    10149530,
 			Players:       players,
 		},
-		Teams:    map[int32]*raw.TeamState{},
+		Teams:     map[int32]*raw.TeamState{},
 		ParseDone: &raw.ParseDone{GameBuild: 6902},
 	}
 }

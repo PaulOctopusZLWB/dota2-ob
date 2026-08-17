@@ -28,23 +28,23 @@ import (
 // source/reason/timestamp are carried alongside the underlying registry
 // provenance so both are auditable.
 type Participant struct {
-	Slot         int32  `json:"slot"`
-	AccountID    string `json:"account_id"`
-	PlayerName   string `json:"player_name"`
-	HeroName     string `json:"hero_name"`
-	HeroID       int32  `json:"hero_id"`
-	Side         string `json:"side"`
-	TeamID       string `json:"team_id"`
-	TeamName     string `json:"team_name"`
-	NominalRole  string `json:"nominal_role"`
+	Slot        int32  `json:"slot"`
+	AccountID   string `json:"account_id"`
+	PlayerName  string `json:"player_name"`
+	HeroName    string `json:"hero_name"`
+	HeroID      int32  `json:"hero_id"`
+	Side        string `json:"side"`
+	TeamID      string `json:"team_id"`
+	TeamName    string `json:"team_name"`
+	NominalRole string `json:"nominal_role"`
 	// RoleSourceKind is the effective source of the nominal role: the base
 	// registry source kind, or "manual_override" when an override applies.
 	RoleSourceKind string `json:"role_source_kind"`
 	// Base registry provenance retained separately from any override.
-	RoleSourceURL string `json:"role_source_url"`
+	RoleSourceURL         string `json:"role_source_url"`
 	RoleSourceRetrievedAt string `json:"role_source_retrieved_at"`
-	RoleConfidence string `json:"role_confidence"`
-	RoleRecordVersion string `json:"role_record_version"`
+	RoleConfidence        string `json:"role_confidence"`
+	RoleRecordVersion     string `json:"role_record_version"`
 	// Effective manual-override provenance (present only when an override is
 	// applied to this participant's role).
 	OverrideApplied bool    `json:"override_applied"`
@@ -62,24 +62,24 @@ type Team struct {
 
 // Report is the combined per-match document.
 type Report struct {
-	SchemaVersion    string            `json:"schema_version"`
-	MatchID          string            `json:"match_id"`
-	Category         string            `json:"category"`
-	Status           string            `json:"status"`
-	Reason           string            `json:"reason,omitempty"`
-	Publication      string            `json:"publication_state"`
-	Verification     *archive.Verification `json:"verification"`
-	Identity         *identity.Identity `json:"identity"`
-	Clock            *clock.Clock       `json:"clock"`
-	FactsSummary     *facts.Summary     `json:"facts_summary"`
-	Episodes         *episodes.Output   `json:"episodes"`
-	Phases           *phase.Output      `json:"phases"`
-	Metrics          *metrics.Output    `json:"metrics"`
-	Participants     []Participant      `json:"participants"`
-	Teams            []Team             `json:"teams"`
-	Canonical        *store.Canonical   `json:"canonical"`
-	RoleRegistry     string             `json:"role_registry_version"`
-	UnavailableReasons []string         `json:"unavailable_reasons"`
+	SchemaVersion      string                `json:"schema_version"`
+	MatchID            string                `json:"match_id"`
+	Category           string                `json:"category"`
+	Status             string                `json:"status"`
+	Reason             string                `json:"reason,omitempty"`
+	Publication        string                `json:"publication_state"`
+	Verification       *archive.Verification `json:"verification"`
+	Identity           *identity.Identity    `json:"identity"`
+	Clock              *clock.Clock          `json:"clock"`
+	FactsSummary       *facts.Summary        `json:"facts_summary"`
+	Episodes           *episodes.Output      `json:"episodes"`
+	Phases             *phase.Output         `json:"phases"`
+	Metrics            *metrics.Output       `json:"metrics"`
+	Participants       []Participant         `json:"participants"`
+	Teams              []Team                `json:"teams"`
+	Canonical          *store.Canonical      `json:"canonical"`
+	RoleRegistry       string                `json:"role_registry_version"`
+	UnavailableReasons []string              `json:"unavailable_reasons"`
 }
 
 // Build loads the persisted artifacts for one match from the store and merges
@@ -91,9 +91,9 @@ type Report struct {
 // table. Publication still requires the role gate via PublicationGate.
 func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *roles.OverrideFile) (*Report, error) {
 	r := &Report{
-		SchemaVersion: version.ReportSchema,
-		MatchID:       matchID,
-		Publication:   "suppressed",
+		SchemaVersion:      version.ReportSchema,
+		MatchID:            matchID,
+		Publication:        "suppressed",
 		UnavailableReasons: []string{},
 	}
 

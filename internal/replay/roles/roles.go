@@ -27,14 +27,14 @@ type RoleMatch struct {
 
 // RoleTeam is one team's roster records with provenance.
 type RoleTeam struct {
-	TeamID       string       `json:"team_id"`
-	TeamName     string       `json:"team_name"`
-	Side         string       `json:"side"`
-	SourceKind   string       `json:"source_kind"`
-	SourceURL    string       `json:"source_url"`
-	SourceLocator string      `json:"source_locator"`
-	RetrievedAt  string       `json:"retrieved_at"`
-	Participants []RoleRecord `json:"participants"`
+	TeamID        string       `json:"team_id"`
+	TeamName      string       `json:"team_name"`
+	Side          string       `json:"side"`
+	SourceKind    string       `json:"source_kind"`
+	SourceURL     string       `json:"source_url"`
+	SourceLocator string       `json:"source_locator"`
+	RetrievedAt   string       `json:"retrieved_at"`
+	Participants  []RoleRecord `json:"participants"`
 }
 
 // RoleRecord is one participant's nominal role record.
@@ -58,28 +58,28 @@ type Override struct {
 
 // OverrideFile is the persisted override set.
 type OverrideFile struct {
-	SchemaVersion string      `json:"schema_version"`
-	Overrides     []Override  `json:"overrides"`
+	SchemaVersion string     `json:"schema_version"`
+	Overrides     []Override `json:"overrides"`
 }
 
 // EffectiveRole is the resolved role for one participant in one match.
 type EffectiveRole struct {
-	TournamentID  string  `json:"tournament_id"`
-	MatchID       string  `json:"match_id"`
-	TeamID        string  `json:"team_id"`
-	TeamName      string  `json:"team_name"`
-	AccountID     string  `json:"account_id"`
-	PlayerName    string  `json:"player_name"`
-	NominalRole   string  `json:"nominal_role"`
-	SourceKind    string  `json:"source_kind"`
-	SourceURL     string  `json:"source_url"`
-	SourceLocator string  `json:"source_locator"`
-	RetrievedAt   string  `json:"retrieved_at"`
-	Confidence    string  `json:"confidence"`
-	RecordVersion string  `json:"record_version"`
-	OverrideApplied bool `json:"override_applied"`
-	OverrideReason *string `json:"override_reason,omitempty"`
-	OverrideAt     *string `json:"override_at,omitempty"`
+	TournamentID    string  `json:"tournament_id"`
+	MatchID         string  `json:"match_id"`
+	TeamID          string  `json:"team_id"`
+	TeamName        string  `json:"team_name"`
+	AccountID       string  `json:"account_id"`
+	PlayerName      string  `json:"player_name"`
+	NominalRole     string  `json:"nominal_role"`
+	SourceKind      string  `json:"source_kind"`
+	SourceURL       string  `json:"source_url"`
+	SourceLocator   string  `json:"source_locator"`
+	RetrievedAt     string  `json:"retrieved_at"`
+	Confidence      string  `json:"confidence"`
+	RecordVersion   string  `json:"record_version"`
+	OverrideApplied bool    `json:"override_applied"`
+	OverrideReason  *string `json:"override_reason,omitempty"`
+	OverrideAt      *string `json:"override_at,omitempty"`
 }
 
 // LoadRegistry reads a role registry JSON file.
@@ -159,7 +159,7 @@ func (r *Registry) Effective(matchID, accountID string, overrides *OverrideFile)
 
 type rawRole struct {
 	teamID, teamName, playerName, nominalRole, confidence string
-	sourceKind, sourceURL, sourceLocator, retrievedAt      string
+	sourceKind, sourceURL, sourceLocator, retrievedAt     string
 }
 
 func (r *Registry) raw(matchID, accountID string) *rawRole {
@@ -174,15 +174,15 @@ func (r *Registry) raw(matchID, accountID string) *rawRole {
 				p := &t.Participants[k]
 				if p.AccountID == accountID {
 					return &rawRole{
-						teamID:       t.TeamID,
-						teamName:     t.TeamName,
-						playerName:   p.PlayerName,
-						nominalRole:  p.NominalRole,
-						confidence:   p.RoleConfidence,
-						sourceKind:   t.SourceKind,
-						sourceURL:    t.SourceURL,
+						teamID:        t.TeamID,
+						teamName:      t.TeamName,
+						playerName:    p.PlayerName,
+						nominalRole:   p.NominalRole,
+						confidence:    p.RoleConfidence,
+						sourceKind:    t.SourceKind,
+						sourceURL:     t.SourceURL,
 						sourceLocator: t.SourceLocator,
-						retrievedAt:  t.RetrievedAt,
+						retrievedAt:   t.RetrievedAt,
 					}
 				}
 			}

@@ -68,7 +68,7 @@ func TestBuildFactsBasic(t *testing.T) {
 	idn := testIdentity(t)
 	b := NewBuilder(clk, idn)
 
-var buf bytes.Buffer
+	var buf bytes.Buffer
 	writer := raw.NewWriter(&buf)
 	_ = writer.Write(rawCombat(1, 130, "DOTA_COMBATLOG_DEATH", "npc_dota_hero_antimage", "npc_dota_hero_axe"))
 	_ = writer.Write(rawCombat(2, 131, "DOTA_COMBATLOG_GOLD", "npc_dota_hero_antimage", ""))

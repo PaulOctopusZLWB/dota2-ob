@@ -17,46 +17,46 @@ import (
 
 // Capability and epistemic class constants (V1 subset).
 const (
-	CapabilityV1 = "V1"
-	ClassDirect  = "direct"
+	CapabilityV1     = "V1"
+	ClassDirect      = "direct"
 	ClassUnavailable = "unavailable"
 )
 
 // Definition is one metric's machine-readable contract (V1 fields).
 type Definition struct {
-	ID                  string   `json:"id"`
-	Name                string   `json:"name"`
-	Description         string   `json:"description"`
-	Domain              string   `json:"domain"`
-	CapabilityLevel     string   `json:"capability_level"`
-	EpistemicClass      string   `json:"epistemic_class"`
-	MetricVersion       string   `json:"metric_version"`
-	ReportLevel         string   `json:"report_level"` // player|team|match
-	Unit                string   `json:"unit"`
-	AggregationRule     string   `json:"aggregation_rule"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Description          string   `json:"description"`
+	Domain               string   `json:"domain"`
+	CapabilityLevel      string   `json:"capability_level"`
+	EpistemicClass       string   `json:"epistemic_class"`
+	MetricVersion        string   `json:"metric_version"`
+	ReportLevel          string   `json:"report_level"` // player|team|match
+	Unit                 string   `json:"unit"`
+	AggregationRule      string   `json:"aggregation_rule"`
 	RequiredFactFamilies []string `json:"required_fact_families"`
-	ScorePublicationGate string  `json:"score_publication_gate"`
+	ScorePublicationGate string   `json:"score_publication_gate"`
 }
 
 // Value is a computed metric value with provenance.
 type Value struct {
-	MetricID        string   `json:"metric_id"`
-	Name            string   `json:"name"`
-	ReportLevel     string   `json:"report_level"`
-	AccountID       string   `json:"account_id,omitempty"`
-	TeamID          string   `json:"team_id,omitempty"`
-	Value           *float64 `json:"value"`
-	IntValue        *int64   `json:"int_value,omitempty"`
-	Unit            string   `json:"unit"`
-	EpistemicClass  string   `json:"epistemic_class"`
-	CapabilityLevel string   `json:"capability_level"`
-	MetricVersion   string   `json:"metric_version"`
-	Numerator       *float64 `json:"numerator"`
-	Denominator     *float64 `json:"denominator"`
-	SampleCount     int64    `json:"sample_count"`
-	UnavailableReason string `json:"unavailable_reason,omitempty"`
-	EvidenceCount   int64    `json:"evidence_count"`
-	Confidence      float64  `json:"confidence"`
+	MetricID          string   `json:"metric_id"`
+	Name              string   `json:"name"`
+	ReportLevel       string   `json:"report_level"`
+	AccountID         string   `json:"account_id,omitempty"`
+	TeamID            string   `json:"team_id,omitempty"`
+	Value             *float64 `json:"value"`
+	IntValue          *int64   `json:"int_value,omitempty"`
+	Unit              string   `json:"unit"`
+	EpistemicClass    string   `json:"epistemic_class"`
+	CapabilityLevel   string   `json:"capability_level"`
+	MetricVersion     string   `json:"metric_version"`
+	Numerator         *float64 `json:"numerator"`
+	Denominator       *float64 `json:"denominator"`
+	SampleCount       int64    `json:"sample_count"`
+	UnavailableReason string   `json:"unavailable_reason,omitempty"`
+	EvidenceCount     int64    `json:"evidence_count"`
+	Confidence        float64  `json:"confidence"`
 }
 
 // Output is the metrics artifact for one match.

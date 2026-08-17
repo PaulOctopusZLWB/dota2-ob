@@ -46,15 +46,15 @@ func DefaultParseStage(demoPath, rawPath, matchID string, progress ProgressFn) (
 
 // MatchResult is the outcome of one match run.
 type MatchResult struct {
-	MatchID string
-	Status  string
-	Reason  string
+	MatchID     string
+	Status      string
+	Reason      string
 	Publication string
 	// Canonical tree hash when the match completed a verified artifact tree.
-	TreeSHA256 string
-	Elapsed    time.Duration
+	TreeSHA256  string
+	Elapsed     time.Duration
 	PeakHeapMiB uint64
-	RawEvents  int64
+	RawEvents   int64
 	FactsEvents int64
 	OutputBytes int64
 }
@@ -168,7 +168,9 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		res.Reason = ver.Reason
 		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
-		_ = writeTerminalStatus(st, res, fp)
+		if err := writeTerminalStatus(st, res, fp, terminalState{ArchiveState: ver.State}); err != nil {
+			return nil, fmt.Errorf("runner: persist terminal status: %w", err)
+		}
 		progress(fmt.Sprintf("match %s: terminal %s (%s)", mt.MatchID, res.Status, ver.Reason))
 		return res, nil
 	}
@@ -179,12 +181,19 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 	rawMeta, err := parseStage(demoPath, rawPath, mt.MatchID, progress)
 	if err != nil {
 		rawErr := &rawMetaPayload{Outcome: "parse_error", Error: err.Error()}
-		_ = st.WriteJSON(mt.MatchID, store.ArtifactRawMeta, rawErr)
+		if werr := st.WriteJSON(mt.MatchID, store.ArtifactRawMeta, rawErr); werr != nil {
+			return nil, fmt.Errorf("runner: persist parse-failure raw-meta: %w", werr)
+		}
 		res.Status = store.StatusParseFailed
 		res.Reason = err.Error()
 		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
-		_ = writeTerminalStatus(st, res, fp)
+		if serr := writeTerminalStatus(st, res, fp, terminalState{
+			ArchiveState: "verified",
+			ParseState:   "parse_error",
+		}); serr != nil {
+			return nil, fmt.Errorf("runner: persist terminal status: %w", serr)
+		}
 		progress(fmt.Sprintf("match %s: parse failed: %v", mt.MatchID, err))
 		return res, nil
 	}
@@ -215,7 +224,14 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		res.Reason = "identity_" + idn.Reason
 		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
-		_ = writeTerminalStatus(st, res, fp)
+		if err := writeTerminalStatus(st, res, fp, terminalState{
+			ArchiveState:       "verified",
+			ParseState:         rawMeta.Outcome,
+			IdentityState:      idn.State,
+			IdentityMismatches: idn.Mismatches,
+		}); err != nil {
+			return nil, fmt.Errorf("runner: persist terminal status: %w", err)
+		}
 		progress(fmt.Sprintf("match %s: quarantined identity (%s)", mt.MatchID, idn.Reason))
 		return res, nil
 	}
@@ -241,7 +257,16 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		res.Reason = "clock_" + clk.Reason
 		res.Publication = "suppressed"
 		res.Elapsed = time.Since(t0)
-		_ = writeTerminalStatus(st, res, fp)
+		if err := writeTerminalStatus(st, res, fp, terminalState{
+			ArchiveState:  "verified",
+			ParseState:    rawMeta.Outcome,
+			IdentityState: identity.StateVerified,
+			ClockState:    clk.State,
+			DurationSec:   clk.GameDurationSeconds,
+			GameStartUnix: clk.GameStartUnix,
+		}); err != nil {
+			return nil, fmt.Errorf("runner: persist terminal status: %w", err)
+		}
 		progress(fmt.Sprintf("match %s: quarantined clock (%s)", mt.MatchID, clk.Reason))
 		return res, nil
 	}
@@ -315,6 +340,7 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		Publication:   res.Publication,
 		Reason:        res.Reason,
 		InputHash:     fpHash(fp),
+		ParseState:    rawMeta.Outcome,
 	}
 	if clk2 := rep.Clock; clk2 != nil {
 		sr.ClockState = clk2.State
@@ -376,10 +402,25 @@ func fpHash(fp store.InputFingerprint) string {
 	return fmt.Sprintf("%x", h[:8])
 }
 
+// terminalState carries the per-stage states available at each early terminal
+// path so the persisted StatusRecord is as complete and auditable as possible.
+type terminalState struct {
+	ArchiveState       string
+	ParseState         string
+	IdentityState      string
+	IdentityMismatches []string
+	ClockState         string
+	DurationSec        *float64
+	GameStartUnix      *int64
+}
+
 // writeTerminalStatus durably persists the terminal state for the early-fail
 // paths (verify/parse/identity/clock) so quarantine/interruption states are
-// recorded authoritatively and can never be resumed as verified.
-func writeTerminalStatus(st *store.Store, res *MatchResult, fp store.InputFingerprint) error {
+// recorded authoritatively and can never be resumed as verified. All
+// available stage states are copied into the authoritative record. A write
+// failure is returned to the caller: an unpersisted terminal state must never
+// be reported as a completed result.
+func writeTerminalStatus(st *store.Store, res *MatchResult, fp store.InputFingerprint, ts terminalState) error {
 	sr := &store.StatusRecord{
 		SchemaVersion: store.StatusSchema,
 		MatchID:       res.MatchID,
@@ -387,6 +428,13 @@ func writeTerminalStatus(st *store.Store, res *MatchResult, fp store.InputFinger
 		Publication:   "suppressed",
 		Reason:        res.Reason,
 		InputHash:     fpHash(fp),
+		ArchiveState:  ts.ArchiveState,
+		ParseState:    ts.ParseState,
+		IdentityState: ts.IdentityState,
+		ClockState:    ts.ClockState,
+		Mismatches:    ts.IdentityMismatches,
+		DurationSec:   ts.DurationSec,
+		GameStartUnix: ts.GameStartUnix,
 	}
 	return st.WriteStatus(res.MatchID, sr)
 }

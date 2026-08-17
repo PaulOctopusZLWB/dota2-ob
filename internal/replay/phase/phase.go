@@ -35,7 +35,7 @@ func (p Phase) Official() bool {
 type InputKind int
 
 const (
-	InputHeroDeath  InputKind = iota
+	InputHeroDeath InputKind = iota
 	InputHeroBuyback
 	InputTowerDeath
 	InputRaxDeath
@@ -60,36 +60,36 @@ type Input struct {
 // Interval is one phase interval. Intervals are left-closed/right-open,
 // ordered, non-overlapping, and gap-free over eligible game time.
 type Interval struct {
-	StartGameSecond int     `json:"start_game_second"`
-	EndGameSecond   int     `json:"end_game_second"`
-	GlobalPhase     Phase   `json:"global_phase"`
-	RoundIndex      int     `json:"round_index"`
-	Confidence      float64 `json:"confidence"`
-	EvidenceSeqs    []int64 `json:"evidence_event_ids"`
+	StartGameSecond int      `json:"start_game_second"`
+	EndGameSecond   int      `json:"end_game_second"`
+	GlobalPhase     Phase    `json:"global_phase"`
+	RoundIndex      int      `json:"round_index"`
+	Confidence      float64  `json:"confidence"`
+	EvidenceSeqs    []int64  `json:"evidence_event_ids"`
 	MissingInputs   []string `json:"missing_inputs"`
-	RuleVersion     string  `json:"rule_version"`
+	RuleVersion     string   `json:"rule_version"`
 }
 
 // ResetEpisode is an evidence-backed decisive->midgame reset.
 type ResetEpisode struct {
-	StartGameSecond int      `json:"start_game_second"`
-	EndGameSecond   int      `json:"end_game_second"`
-	Reason          string   `json:"reason"`
-	EvidenceSeqs    []int64  `json:"evidence_event_ids"`
-	RuleVersion     string   `json:"rule_version"`
+	StartGameSecond int     `json:"start_game_second"`
+	EndGameSecond   int     `json:"end_game_second"`
+	Reason          string  `json:"reason"`
+	EvidenceSeqs    []int64 `json:"evidence_event_ids"`
+	RuleVersion     string  `json:"rule_version"`
 }
 
 // Output is the complete phase result.
 type Output struct {
-	SchemaVersion string          `json:"schema_version"`
-	RuleVersion   string          `json:"rule_version"`
-	State         string          `json:"state"`
-	Reason        string          `json:"reason"`
-	Intervals     []Interval      `json:"intervals"`
-	Resets        []ResetEpisode  `json:"resets"`
-	MissingInputs []string        `json:"missing_inputs"`
-	EligibleSeconds int           `json:"eligible_seconds"`
-	CoveredSeconds  int           `json:"covered_seconds"`
+	SchemaVersion   string         `json:"schema_version"`
+	RuleVersion     string         `json:"rule_version"`
+	State           string         `json:"state"`
+	Reason          string         `json:"reason"`
+	Intervals       []Interval     `json:"intervals"`
+	Resets          []ResetEpisode `json:"resets"`
+	MissingInputs   []string       `json:"missing_inputs"`
+	EligibleSeconds int            `json:"eligible_seconds"`
+	CoveredSeconds  int            `json:"covered_seconds"`
 }
 
 // Engine configures the phase engine.
@@ -101,23 +101,23 @@ type Engine struct {
 type posSample struct{ x, y float64 }
 
 type Engine_ struct {
-	cfg        Engine
-	current    Phase
+	cfg          Engine
+	current      Phase
 	currentStart int
-	roundIndex int
-	lastSecond int
+	roundIndex   int
+	lastSecond   int
 
 	// per-second windows
-	deaths      map[int][]string
-	buybacks    map[int][]string
-	towerDeaths map[int][]string
-	raxDeaths   map[int][]string
-	damageHeroes map[int]map[string]bool
+	deaths             map[int][]string
+	buybacks           map[int][]string
+	towerDeaths        map[int][]string
+	raxDeaths          map[int][]string
+	damageHeroes       map[int]map[string]bool
 	ancientDeathSecond *int
 
 	// positions per account per second (last sample per second)
-	pos     map[string]map[int]posSample
-	anchors map[string]*posSample
+	pos          map[string]map[int]posSample
+	anchors      map[string]*posSample
 	anchorSecond map[string]int
 
 	// alive tracking
@@ -137,23 +137,23 @@ type Engine_ struct {
 // NewEngine creates a phase engine for a match ending at GameEndSecond.
 func NewEngine(cfg Engine) *Engine_ {
 	e := &Engine_{
-		cfg:           cfg,
-		current:       Laning,
-		currentStart:  0,
-		roundIndex:    0,
-		lastSecond:    -1,
-		deaths:        map[int][]string{},
-		buybacks:      map[int][]string{},
-		towerDeaths:   map[int][]string{},
-		raxDeaths:     map[int][]string{},
-		damageHeroes:  map[int]map[string]bool{},
-		pos:           map[string]map[int]posSample{},
-		anchors:       map[string]*posSample{},
-		anchorSecond:  map[string]int{},
-		respawnBySecond: map[string]int{},
-		lastAliveSecond: map[string]bool{},
+		cfg:                  cfg,
+		current:              Laning,
+		currentStart:         0,
+		roundIndex:           0,
+		lastSecond:           -1,
+		deaths:               map[int][]string{},
+		buybacks:             map[int][]string{},
+		towerDeaths:          map[int][]string{},
+		raxDeaths:            map[int][]string{},
+		damageHeroes:         map[int]map[string]bool{},
+		pos:                  map[string]map[int]posSample{},
+		anchors:              map[string]*posSample{},
+		anchorSecond:         map[string]int{},
+		respawnBySecond:      map[string]int{},
+		lastAliveSecond:      map[string]bool{},
 		lastDecisiveEvidence: -1,
-		missing:       map[string]bool{},
+		missing:              map[string]bool{},
 	}
 	return e
 }
@@ -242,7 +242,7 @@ func (e *Engine_) finalizeSecond(s, next int) {
 	}
 
 	if e.ancientDeathSecond != nil && *e.ancientDeathSecond <= s {
-		e.closeInterval(s + 1, Ended)
+		e.closeInterval(s+1, Ended)
 		e.ended = true
 		return
 	}
