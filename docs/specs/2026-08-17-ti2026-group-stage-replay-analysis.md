@@ -4,7 +4,7 @@ Date: 2026-08-17
 
 Issue: DOT-72
 
-Status: research/specification complete; implementation and bulk replay acquisition are not authorized by this document.
+Status: research foundation revised by [the complete implementation specification](2026-08-17-ti2026-replay-analytics-implementation.md). Where the two conflict, the implementation specification controls.
 
 ## Objective
 
@@ -15,22 +15,22 @@ Define an auditable path from the 109 played TI 2026 group-stage maps to:
 - event-driven phase labels that survive lane swaps, fast pushes, long games, and repeated late-game rounds; and
 - a field-by-field gate for any later translation to GSI or visible-screen CV.
 
-The first release must publish atomic facts and normalized rates. It must not collapse them into a single ability score or present modelled/counterfactual claims as facts.
+The product publishes atomic facts and normalized rates before scoring. It also publishes a transparent role-relative total score whose full axis/metric decomposition remains visible. Modelled/counterfactual claims remain a separate experimental layer and never appear as facts or contaminate the official score.
 
 ## Context
 
-TI 2026 group play finished on August 16, one day before this specification. DOT-22/DOT-54 already proved that the earlier broad historical-acquisition path cannot publish identity-verified replay facts under the unchanged source gate. This work therefore treats the completed tournament as an urgent, game-by-game recovery archive and designs richer analysis without inheriting the failed historical assumption.
+TI 2026 group play finished on August 16, one day before this specification. DOT-22/DOT-54 proved that the earlier broad historical-acquisition path could not publish identity-verified replay facts under the unchanged source gate. Paul has since supplied a fresh local corpus containing 109 compressed replay archives, 109 decompressed Source 2 demos, and a 109-row `matches.json`. File presence and container integrity are established; replay-to-match identity, ten-player binding, clock calibration, and parser capability still require the explicit gates below.
 
 ## Requirements
 
 1. Freeze the official group-stage denominator and preserve the distinction between series identity, game-slot identity, Dota match identity, and replay content identity.
 2. Give every expected game one auditable state and prove coverage from records rather than estimates.
-3. Define event-driven global/team/lane phases while retaining fixed time cuts as a comparison baseline.
+3. Define exactly one event-driven global phase stream using only `laning`, `midgame`, and `decisive`; team/lane/behavior evidence stays separate and fixed time cuts are not a parallel report dimension.
 4. Define 1-5 role functions and metrics with numerator, opportunity denominator, windows, exclusions, inputs, algorithm, confidence, bias, and test case.
 5. Classify every fact/metric against the accepted parser, not against library theory.
-6. Fix a three-replay probe, manual gold-set process, error taxonomy, and quantitative promotion gates.
+6. Fix a five-TI-replay vertical slice, lightweight Paul gold-review process, error taxonomy, and quantitative promotion gates.
 7. Map historical metrics to GSI, visible CV, replay-only, or unavailable realtime classes without hidden-state leakage.
-8. Keep all acquisition and implementation work behind a separate reviewed build specification.
+8. Implement the complete reviewed V1/V2/V3, radar, score, UI, and 109-match workflow defined by the implementation specification.
 
 ## Source of truth
 
@@ -72,13 +72,13 @@ The response also contains 14 future main-event series. They are outside this sp
 4. It does not emit a replay-derived Dota match ID, a calibrated game clock, ten verified participant bindings, positions, inventories over time, entity orders, wards, Roshan/Aegis state, modifiers, ability targets, damage/heal detail, last hits/denies, net worth, death timers, or buyback availability.
 5. Combat-log actor name resolution is partial. Accepted evidence includes `dota_unknown` attackers for first blood, building kills, and buybacks, and `TEAM_BUILDING_KILL` entries for temporary units such as Underlord portals.
 6. `MaxCombatLogTimestampSec` is explicitly not authoritative match duration. Phase logic may not use it until a replay-clock calibration is independently proven.
-7. The official TI schedule endpoint proves 109 played group-stage maps but does not expose their Dota match IDs.
+7. The official TI schedule endpoint proves 109 played group-stage maps but does not expose their Dota match IDs. The local `matches.json` supplies 109 candidate Dota match ID/salt pairs; each pair must still be mapped to one official game slot and verified against replay content before publication.
 
 ### Assumptions that require an experiment
 
 1. A successor parser adapter can reconstruct stable per-tick hero/entity positions at an acceptable cost.
 2. Replay messages contain enough unit ownership/order data to identify pulls, stacks, creep cuts, ward entities, Roshan/Aegis transitions, and modifier windows.
-3. Manual client import remains available for each TI replay. Availability duration is unknown; therefore recovery is urgent, not guaranteed.
+3. A corrupt or mismatched local replay can be reacquired through an approved public/client path with its URL, retrieval time, and hashes recorded. Future availability is unknown and cannot be assumed.
 4. Map geometry and vision rules can be versioned for the tournament build well enough to support lane and theoretical-vision models.
 
 ### Rejected assumptions
@@ -97,31 +97,27 @@ The response also contains 14 future main-event series. They are outside this sp
 - [Replay manifest JSON Schema](ti2026-replay-manifest-v1.schema.json)
 - [Event-driven phase state machine](2026-08-17-ti2026-phase-state-machine.md)
 - [Role/phase metric dictionary](ti2026-role-phase-metrics-v1.json)
+- [Eight-axis radar and total-score contract](ti2026-radar-scoring-v1.json)
 - [Current parser field feasibility matrix](2026-08-17-ti2026-replay-field-feasibility.md)
-- [Three-replay probe and gold-set plan](2026-08-17-ti2026-three-replay-probe-plan.md)
+- [Five-replay vertical-slice and gold-label plan](2026-08-17-ti2026-five-replay-probe-plan.md)
+- [Complete implementation specification](2026-08-17-ti2026-replay-analytics-implementation.md)
 - [Historical-to-realtime translation matrix](2026-08-17-ti2026-realtime-translation.md)
 
 ## Recommended reporting grain
 
-Use three concurrent labels rather than forcing one boundary to do every job:
+Use one official phase plus separate descriptive evidence:
 
-1. `global_phase` is the primary report dimension: `laning`, `midgame`, `decisive_round`, or `reset`.
+1. `global_phase` is the only formal report phase: `laning`, `midgame`, or `decisive`.
 2. `team_shape` describes each team independently: lane structure, split map, grouped objective, siege, defense, disengage, or unknown.
 3. `lane_segment` describes a player/lane assignment and may change repeatedly.
 
-Every event and interval also carries `fixed_baseline_phase` for comparison only:
-
-- `laning_0_10`: `[0, 600)` game seconds;
-- `midgame_10_30`: `[600, 1800)`; and
-- `late_30_plus`: `[1800, end]`.
-
-The event-driven label controls the primary report. The fixed baseline never overwrites it.
+`reset` is a behavior episode and transition reason from `decisive` back to `midgame`, not a fourth phase. Fixed clock cuts are not emitted as formal labels or scoring inputs.
 
 ## 1-5 role x phase x function framework
 
-The roster position is a report facet, not a permanent in-game truth. Each metric also records the inferred responsibility segment and lineup/hero context.
+The source-backed nominal roster position is the fixed role report facet. Each metric also records behavior episodes and lineup/hero context, but replay behavior never reclassifies the nominal role.
 
-| Position | Laning | Midgame | Decisive round / reset |
+| Position | Laning | Midgame | Decisive / reset evidence |
 |---|---|---|---|
 | 1 | safe farm opportunities, lane survival, resource handoff | safe/dangerous farm mix, item timing, selective participation | survival, buyback, damage window, building conversion |
 | 2 | lane pressure/recovery, rune access | first rotations, side-lane pressure, tempo item/skill windows | target access, spell sequence, reset and re-entry |
@@ -129,7 +125,7 @@ The roster position is a report facet, not a permanent in-game truth. Each metri
 | 4 | partner reinforcement, pull/stack/rune/roam choices | smoke/vision/rotation efficiency, initiation or response | control, saves, smoke break evidence, buyback resource use |
 | 5 | core protection, lane equilibrium, supply/vision | vision plan, smoke organization, resource sacrifice | positioning, saves, vision renewal, buyback and reset management |
 
-Role changes are represented as time intervals. A player may be roster position 4 while temporarily taking farm or assuming initiation responsibility; reports must preserve both facts.
+Temporary farm, initiation, support, or lane duties are represented as behavior episodes. A nominal position 4 remains position 4 for role-relative reporting unless a source-backed match override is recorded.
 
 ## Metric publication rules
 
@@ -148,7 +144,7 @@ Publication rules:
 4. `counterfactual` is excluded from default player/team reports. It may appear only in a research appendix with explicit alternatives and uncertainty.
 5. `unavailable` stays null with a reason code. It is never zero.
 6. Every rate reports numerator, denominator/opportunity count, excluded opportunities, sample size, and confidence class.
-7. No composite player ability score is in scope.
+7. A role-relative total score is allowed only through the versioned eight-axis scoring contract. It must expose every axis, metric, weight, opportunity, sample, confidence, and unavailable component. Official scores contain no V3 inputs.
 
 ## Confidence and release gates
 
@@ -159,29 +155,29 @@ Publication rules:
 | Modelled | evidence trace and calibrated confidence | precision >= 0.85, recall >= 0.70, expected calibration error <= 0.10; minimum 20 structurally diverse games |
 | Counterfactual | research-only qualitative review | never default-published under DOT-72 |
 
-Three games are a feasibility probe, not a model release corpus.
+Five games are a feasibility probe and initial gold set, not a model release corpus.
 
-## Decisions requested from Paul
+## Decisions confirmed by Paul
 
-The recommended option is listed first in each case.
-
-1. Phase reporting: approve the event-driven global phase as primary, with team/lane sublabels and fixed-time baselines retained only for comparison. Alternative: fixed-time primary (not recommended because it fails fast-push and long-game cases).
-2. Role attribution: approve dynamic responsibility segments alongside frozen roster 1-5 labels. Alternative: roster position only (simpler but conflates lineup task and player choice).
-3. Archive policy: approve immediate recovery mode for the completed group stage—freeze the 109 game slots now, attempt only approved public replay paths, then prompt manual client import for every unresolved slot. Alternative: wait for a later bulk source (high loss risk).
-4. Metric launch: approve atomic direct/derived metrics first and hold all modelled metrics behind the gold-set gate. Alternative: launch heuristic scores early (not recommended).
+1. One official event-driven phase stream; no fixed-time parallel phase.
+2. Source-backed nominal role 1-5 with explicit match override; no behavioral role classifier.
+3. Five local TI replay probes and lightweight Paul review.
+4. Eight-axis radar plus a transparent role-relative total score.
+5. V3 appears as a separate dashed experimental layer and never enters the official score.
+6. One complete implementation covering V1/V2/V3, UI, gold workflow, and all 109 matches.
 
 ## Non-goals
 
-- No bulk replay download, production parser change, database, dashboard, or scoring model in DOT-72.
+- This research document does not itself implement code; implementation is authorized and governed by the linked complete implementation specification and child issues.
 - No credentials, GC login/automation, Dota UI automation, replay-salt automation, packet capture, memory access, code injection, protocol bypass, anti-cheat bypass, hidden-state live output, or DotaTV delay/fog bypass.
 - No causal or counterfactual truth claim.
-- No claim that all 109 replays are currently available or verified.
+- No claim that local file presence alone makes all 109 replays identity-verified or analytically publishable.
 
 ## Acceptance criteria for a later implementation
 
 1. The official 109-map denominator is materialized as 109 unique game slots, and every slot reaches one allowed terminal state.
 2. Every `verified` replay passes content, Source 2, match/build/time, team, and ten-participant checks; failures are quarantined.
-3. The phase state machine passes lane-swap, fast-push, long-game, and decisive-round exit/re-entry fixtures while retaining the fixed baseline.
+3. The phase state machine passes lane-swap, fast-push, long-game, and decisive exit/re-entry fixtures while emitting only the three official phase labels.
 4. Every published metric satisfies its dictionary definition and release gate with no fabricated denominator.
 5. Vision, smoke-break, save, and sacrifice claims remain downgraded when FoW or counterfactual evidence is missing.
 6. Realtime mappings expose only facts observed through GSI or visible CV and retain source delay/confidence.

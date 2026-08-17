@@ -136,4 +136,4 @@ For each candidate metric, capture a complete GSI session and its verified repla
 - match/mismatch reason;
 - whether the realtime class changes.
 
-Minimum live acceptance is three complete spectator sessions spanning normal, early-disruption, and long/multi-round games. This is separate from the three replay parser probes and may reuse a match only when both source identities are verified.
+Minimum live acceptance is three complete spectator sessions spanning normal, early-disruption, and long/multi-round games. This is separate from the five replay vertical-slice probes and may reuse a match only when both source identities are verified.

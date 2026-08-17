@@ -6,7 +6,7 @@ Issue: DOT-72
 
 ## Decision
 
-Use an event-driven `global_phase` as the primary phase, independent `team_shape` labels per team, and mutable `lane_segment` labels per player. Retain fixed time cuts only as `fixed_baseline_phase` for comparable aggregates.
+Use exactly one event-driven `global_phase`, with independent descriptive `team_shape` labels per team and mutable `lane_segment`/behavior episodes per player. The only official phase labels are `laning`, `midgame`, and `decisive`. Fixed time cuts are not emitted as a parallel report dimension or scoring input. `reset` is an evidence episode and transition reason, not a fourth phase.
 
 The accepted replay adapter cannot run this state machine today because it lacks a calibrated game clock, participant bindings, positions, entity state, Roshan/Aegis state, death timers, and buyback availability. Until those field gates pass, the event-driven phase is `unavailable`, not inferred from current aggregate facts.
 
@@ -37,18 +37,6 @@ Missing required inputs reduce confidence or suppress the corresponding label. N
 
 `MaxCombatLogTimestampSec` is never used as match duration or directly subtracted by a hard-coded constant.
 
-## Fixed baseline
-
-The comparison-only label is deterministic:
-
-```text
-[0, 600)       -> laning_0_10
-[600, 1800)    -> midgame_10_30
-[1800, end]    -> late_30_plus
-```
-
-Pregame is excluded. Pauses do not consume game seconds. Every metric may be grouped by this label in addition to, but never instead of, the event-driven phase.
-
 ## Lane assignment and lane segments
 
 ### Lane geometry
@@ -69,7 +57,7 @@ Otherwise the assignment is `unknown`. A 2-1-2/1-1-3 shape is an observed occupa
 
 A new lane segment begins when the candidate lane differs from the current lane for 30 continuous game seconds and contains at least 20 valid samples. Teleports/displacements start a 5-second grace window. A return shorter than 20 seconds is merged into the surrounding segment.
 
-Role labels do not drive lane assignment. The resulting lane history is later joined with the roster 1-5 facet and dynamic team responsibility model.
+Role labels do not drive lane assignment. The resulting lane history is later joined with the source-backed nominal roster 1-5 facet and behavior episodes. Replay behavior never changes the nominal role.
 
 ## Team shape labels
 
@@ -92,18 +80,17 @@ The label is descriptive. It does not assert that the shape was strategically co
 States:
 
 ```text
-pregame -> laning -> midgame <-> decisive_round
+pregame -> laning -> midgame <-> decisive
                          ^          |
-                         |          v
-                         +-------- reset
+                         +--reset---+
 all non-terminal states -> ended
 ```
 
-`decisive_round` and `reset` may repeat any number of times.
+`decisive` may repeat any number of times. A `reset` episode is emitted when the engine confirms the transition back to `midgame`; it is not a `global_phase` value.
 
 ### `pregame -> laning`
 
-Enter `laning` at game second 0 when at least eight participant/hero bindings are active. Missing bindings make the whole phase stream unavailable; they do not shrink the match to observed players.
+Enter `laning` at game second 0 only when all ten participant/hero bindings are verified. Missing bindings make the whole phase stream unavailable; they do not shrink the match to observed players.
 
 ### Lane-structure score
 
@@ -121,7 +108,7 @@ lane_structure_intact =
   AND fewer than 2 of the four transition signals are active
 ```
 
-Position numbers above are roster facets only for the first candidate. A later model must compare inferred responsibilities; if roster and observed task conflict, confidence is reduced and both are retained.
+Position numbers above are source-backed nominal roster facets. Observed task differences are retained as behavior evidence but never used to relabel the role.
 
 ### `laning -> midgame`
 
@@ -132,7 +119,7 @@ Transition at the first second where either rule holds:
 
 Do not trigger on temporary summoned structures, a single support rune trip, one teleport, a single kill, or clock time alone.
 
-If the match ends before the rule, it remains a fast-ending `laning` match with a fixed-baseline comparison. A fast push normally triggers through sustained grouping/objective pressure, not through 10:00.
+If the match ends before the rule, it remains a fast-ending `laning` match. A fast push normally triggers through sustained grouping/objective pressure, not through a clock threshold.
 
 ### Decisive-round evidence
 
@@ -146,7 +133,7 @@ Compute only from verified inputs:
 - `major_fight`: >=6 distinct heroes deal/receive hero combat effects within 20 seconds and at least two deaths occur within 30 seconds;
 - `barracks_change`: a real melee/ranged barracks health transition or death.
 
-### `midgame -> decisive_round`
+### `midgame -> decisive`
 
 Enter when any one high-specificity rule holds:
 
@@ -157,24 +144,22 @@ Enter when any one high-specificity rule holds:
 
 These are candidate thresholds. They remain `modelled` until the gold-set release gate passes.
 
-### `decisive_round -> reset`
+### `decisive -> midgame` with reset evidence
 
-Enter `reset` after 30 seconds without major fight or high-ground damage when all are true:
+Confirm a reset after 30 seconds without major fight or high-ground damage when all are true:
 
 - each team has at least four alive heroes, or the disadvantaged team has begun stable respawns/buybacks;
 - neither team has a siege shape;
 - opposing main components are separating or one team is in its own base;
 - no barracks/Roshan transition is active.
 
-The reset interval begins at the last decisive event plus the debounce, not at an arbitrary minute.
+The official phase changes to `midgame` at the last decisive event plus the 30-second debounce once these conditions are confirmed. Emit a separate `reset` behavior episode beginning at that boundary.
 
-### `reset -> decisive_round`
+The reset episode ends when either a new decisive entry occurs or 90 seconds pass with both teams outside siege/defense and ordinary map-resource exchange resumed.
 
-Re-enter immediately when any decisive-round entry rule holds. Increment `round_index`.
+### `midgame -> decisive` after a reset
 
-### `reset -> midgame`
-
-Return to `midgame` after 90 seconds with no decisive entry, both teams outside siege/defense, and normal map-resource exchange resumes. `round_index` is retained for audit.
+Re-enter immediately when any decisive entry rule holds. End the active reset episode and increment `round_index`.
 
 ### `* -> ended`
 
@@ -184,10 +169,9 @@ Enter on verified game-end/ancient event. If game-end is missing, the phase stre
 
 1. Direct game-end/objective/entity facts outrank modelled spatial labels.
 2. A phase transition can use only evidence at or before that game second. No look-ahead is allowed in live-translatable variants.
-3. Offline replay reports may provide a separately labelled smoothed phase using up to 30 seconds of look-ahead; never compare it as if it were live.
-4. Concurrent decisive evidence from both teams produces one global `decisive_round` with team-specific `attack`, `defend`, or `contested` posture.
-5. A player event at the exact transition second belongs to the new phase; intervals are left-closed/right-open.
-6. Missing position coverage >10 consecutive seconds makes spatial features unknown for that gap. It does not preserve the prior value.
+3. Concurrent decisive evidence from both teams produces one global `decisive` interval with team-specific `attack`, `defend`, or `contested` posture.
+4. A player event at the exact transition second belongs to the new phase; intervals are left-closed/right-open.
+5. Missing position coverage >10 consecutive seconds makes spatial features unknown for that gap. It does not preserve the prior value.
 
 ## Output contract
 
@@ -199,7 +183,6 @@ Each phase interval includes:
   "end_game_second": 600,
   "global_phase": "laning",
   "round_index": 0,
-  "fixed_baseline_phase": "laning_0_10",
   "team_shapes": { "radiant": "lane_structure", "dire": "lane_structure" },
   "confidence": 0.0,
   "evidence_event_ids": [],
@@ -208,7 +191,7 @@ Each phase interval includes:
 }
 ```
 
-Intervals split at either event-driven or fixed-baseline boundaries so each interval has one value for each label.
+Intervals split only at official phase boundaries or end-of-match. Team-shape and behavior-episode boundaries remain separate evidence streams.
 
 ## Required test scenarios
 
@@ -216,9 +199,9 @@ Intervals split at either event-driven or fixed-baseline boundaries so each inte
 2. Level-one lane swap that stabilizes: still `laning`; lane segments reflect the swap.
 3. Repeated support rune trips: no false lane end.
 4. Early 1-1-3/trilane: valid lane structure, not automatically midgame.
-5. Fast five-player push before 10:00: event-driven midgame/decisive transition while fixed baseline remains `laning_0_10`.
+5. Fast five-player push: sustained structure/objective evidence may cause an early midgame/decisive transition without a clock cut.
 6. Short stomp ending before the lane-end rule: no fabricated midgame.
-7. Long game with multiple Roshan/Aegis and buyback rounds: repeated decisive/reset indices.
+7. Long game with multiple Roshan/Aegis and buyback rounds: repeated decisive intervals separated by reset episodes and midgame intervals.
 8. High-ground poke without death/buyback: no decisive round unless sustained threat rule passes.
 9. Buybacks in a river fight without high-ground pressure: only the major-fight rule may trigger.
 10. Underlord portals/summoned structures: never count as tower/rax transitions.
@@ -233,4 +216,4 @@ Intervals split at either event-driven or fixed-baseline boundaries so each inte
 - Team shape: per-second macro F1 by label.
 - Inter-annotator agreement: Cohen's kappa >= 0.70 before treating the gold label as stable; disagreements are adjudicated and retained.
 
-No threshold is tuned on the same three games used for the final probe report without labelling that result exploratory.
+No threshold is tuned on the same five games used for the final probe report without labelling that result exploratory.

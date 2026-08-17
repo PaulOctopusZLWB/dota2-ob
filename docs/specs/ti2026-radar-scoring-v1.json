@@ -1,0 +1,151 @@
+{
+  "schema_version": "ti2026.radar-score.v1",
+  "issue": "DOT-72",
+  "comparison_population": "same nominal role within the frozen TI 2026 109-map corpus",
+  "score_range": [0, 100],
+  "metric_normalization": "empirical_midrank_percentile",
+  "official_metric_source": "Only metric definitions with official_score_eligible=true and passed V1/V2 publication gates.",
+  "experimental_metric_source": "Only metric definitions with experimental_score_eligible=true and passed V3 evidence/calibration gates; counterfactual values remain explicitly experimental.",
+  "minimum_matches": 3,
+  "minimum_publishable_axes": 6,
+  "missing_metric_policy": "Suppress an axis when a required applicable metric is unavailable. Never impute 0 or 50.",
+  "optional_axis_policy": "A role may declare an optional axis. If it is unavailable, disclose the omission and renormalize only the remaining role axis weights for that displayed total.",
+  "mandatory_axis_policy": "If any mandatory axis is unavailable, suppress the total score.",
+  "experimental_axis_formula": {
+    "official_base_weight": 0.75,
+    "v3_component_weight": 0.25,
+    "rule": "When at least one calibrated applicable V3 component exists, combine the official axis with the equal-weight V3 component mean. Otherwise suppress the dashed experimental axis rather than copying the official value."
+  },
+  "axes": [
+    {
+      "id": "laning",
+      "display_name_zh": "对线",
+      "description": "Lane execution, pressure, survival, and role-specific lane opportunity outcomes."
+    },
+    {
+      "id": "resources",
+      "display_name_zh": "资源",
+      "description": "Farm/resource opportunities, item timing, and role-specific resource conversion."
+    },
+    {
+      "id": "tempo",
+      "display_name_zh": "节奏",
+      "description": "Rotation, rune, smoke, response, and ability/item timing windows."
+    },
+    {
+      "id": "map",
+      "display_name_zh": "地图",
+      "description": "Observed side-lane, split-map, pressure, response, and cross-map exchange outcomes."
+    },
+    {
+      "id": "vision",
+      "display_name_zh": "视野",
+      "description": "Ward/deward, visibility/contact, information, and smoke evidence under source gates."
+    },
+    {
+      "id": "fight",
+      "display_name_zh": "团战",
+      "description": "Damage, control, healing/save events, initiation evidence, and survival by opportunity."
+    },
+    {
+      "id": "objectives",
+      "display_name_zh": "目标转化",
+      "description": "Tower, Roshan, Tormentor, barracks, high-ground, and post-fight conversion."
+    },
+    {
+      "id": "endgame",
+      "display_name_zh": "终局决策",
+      "description": "Death/buyback exposure, buyback rounds, decisive resets/re-entry, and terminal decisions."
+    }
+  ],
+  "official_axis_components_by_role": {
+    "1": {
+      "laning": {"lane_pressure_damage_per_contact": 1.0},
+      "resources": {"item_timing_opportunity_percentile": 1.0},
+      "tempo": {"key_ability_window_conversion": 1.0},
+      "map": {"observed_map_exchange_outcome_rate": 1.0},
+      "vision": {"ward_lifetime_share": 1.0},
+      "fight": {"fight_damage_share": 0.65, "control_duration_per_opportunity": 0.35},
+      "objectives": {"resource_to_objective_conversion": 0.55, "highground_building_conversion": 0.45},
+      "endgame": {"death_without_buyback_exposure": 0.5, "buyback_round_participation": 0.5}
+    },
+    "2": {
+      "laning": {"lane_pressure_damage_per_contact": 1.0},
+      "resources": {"item_timing_opportunity_percentile": 0.7, "stack_attempt_success_rate": 0.3},
+      "tempo": {"roam_conversion_rate": 0.35, "rune_control_contribution": 0.25, "key_ability_window_conversion": 0.4},
+      "map": {"observed_map_exchange_outcome_rate": 1.0},
+      "vision": {"ward_lifetime_share": 1.0},
+      "fight": {"fight_damage_share": 0.5, "control_duration_per_opportunity": 0.5},
+      "objectives": {"resource_to_objective_conversion": 0.55, "highground_building_conversion": 0.45},
+      "endgame": {"death_without_buyback_exposure": 0.5, "buyback_round_participation": 0.5}
+    },
+    "3": {
+      "laning": {"lane_pressure_damage_per_contact": 1.0},
+      "resources": {"item_timing_opportunity_percentile": 0.7, "stack_attempt_success_rate": 0.3},
+      "tempo": {"roam_conversion_rate": 0.35, "rune_control_contribution": 0.25, "key_ability_window_conversion": 0.4},
+      "map": {"observed_map_exchange_outcome_rate": 1.0},
+      "vision": {"ward_lifetime_share": 1.0},
+      "fight": {"fight_damage_share": 0.4, "control_duration_per_opportunity": 0.6},
+      "objectives": {"resource_to_objective_conversion": 0.55, "highground_building_conversion": 0.45},
+      "endgame": {"death_without_buyback_exposure": 0.5, "buyback_round_participation": 0.5}
+    },
+    "4": {
+      "laning": {"lane_pressure_damage_per_contact": 0.5, "pull_attempt_success_rate": 0.5},
+      "resources": {"item_timing_opportunity_percentile": 0.4, "stack_attempt_success_rate": 0.6},
+      "tempo": {"roam_conversion_rate": 0.35, "rune_control_contribution": 0.25, "key_ability_window_conversion": 0.4},
+      "map": {"observed_map_exchange_outcome_rate": 1.0},
+      "vision": {"ward_lifetime_share": 1.0},
+      "fight": {"fight_damage_share": 0.3, "control_duration_per_opportunity": 0.7},
+      "objectives": {"resource_to_objective_conversion": 0.55, "highground_building_conversion": 0.45},
+      "endgame": {"death_without_buyback_exposure": 0.5, "buyback_round_participation": 0.5}
+    },
+    "5": {
+      "laning": {"lane_pressure_damage_per_contact": 0.5, "pull_attempt_success_rate": 0.5},
+      "resources": {"item_timing_opportunity_percentile": 0.4, "stack_attempt_success_rate": 0.6},
+      "tempo": {"roam_conversion_rate": 0.35, "rune_control_contribution": 0.25, "key_ability_window_conversion": 0.4},
+      "map": {"observed_map_exchange_outcome_rate": 1.0},
+      "vision": {"ward_lifetime_share": 1.0},
+      "fight": {"fight_damage_share": 0.25, "control_duration_per_opportunity": 0.75},
+      "objectives": {"resource_to_objective_conversion": 0.55, "highground_building_conversion": 0.45},
+      "endgame": {"death_without_buyback_exposure": 0.5, "buyback_round_participation": 0.5}
+    }
+  },
+  "axis_weights_by_role": {
+    "1": {"laning": 0.14, "resources": 0.18, "tempo": 0.08, "map": 0.12, "vision": 0.04, "fight": 0.18, "objectives": 0.14, "endgame": 0.12},
+    "2": {"laning": 0.15, "resources": 0.12, "tempo": 0.15, "map": 0.13, "vision": 0.05, "fight": 0.18, "objectives": 0.12, "endgame": 0.10},
+    "3": {"laning": 0.14, "resources": 0.10, "tempo": 0.12, "map": 0.16, "vision": 0.07, "fight": 0.18, "objectives": 0.13, "endgame": 0.10},
+    "4": {"laning": 0.12, "resources": 0.06, "tempo": 0.18, "map": 0.12, "vision": 0.16, "fight": 0.20, "objectives": 0.10, "endgame": 0.06},
+    "5": {"laning": 0.13, "resources": 0.05, "tempo": 0.15, "map": 0.10, "vision": 0.22, "fight": 0.18, "objectives": 0.09, "endgame": 0.08}
+  },
+  "mandatory_axes_by_role": {
+    "1": ["laning", "resources", "tempo", "map", "fight", "objectives", "endgame"],
+    "2": ["laning", "resources", "tempo", "map", "fight", "objectives", "endgame"],
+    "3": ["laning", "resources", "tempo", "map", "fight", "objectives", "endgame"],
+    "4": ["laning", "tempo", "map", "vision", "fight", "objectives", "endgame"],
+    "5": ["laning", "tempo", "map", "vision", "fight", "objectives", "endgame"]
+  },
+  "optional_axes_by_role": {
+    "1": ["vision"],
+    "2": ["vision"],
+    "3": ["vision"],
+    "4": ["resources"],
+    "5": ["resources"]
+  },
+  "experimental_components_by_axis": {
+    "laning": ["core_partner_protection_uptime", "forced_regen_or_retreat_rate"],
+    "resources": ["core_safe_cs_opportunity_conversion"],
+    "tempo": ["failed_roam_resource_cost", "smoke_break_outcome"],
+    "map": ["side_lane_pressure_uptime"],
+    "vision": ["ward_enemy_track_intersection", "deward_opportunity_conversion", "beneficial_smoke_break_sacrifice"],
+    "fight": ["initiation_and_counterinitiation_participation", "death_prevented_by_save"],
+    "objectives": [],
+    "endgame": ["reset_discipline"]
+  },
+  "display_requirements": [
+    "Show raw metric values, percentiles, weights, opportunities, matches, coverage, confidence, and unavailable reasons.",
+    "Show official solid and experimental dashed radars separately.",
+    "Show official and experimental totals as differently named values.",
+    "Never render a cross-role combined leaderboard.",
+    "A score drilldown must reproduce the displayed value exactly."
+  ]
+}

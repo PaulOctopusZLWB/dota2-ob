@@ -1,23 +1,53 @@
 {
   "schema_version": "ti2026.role-phase-metrics.v1",
   "issue": "DOT-72",
-  "epistemic_classes": ["direct", "derived", "modelled", "counterfactual", "unavailable"],
+  "epistemic_classes": [
+    "direct",
+    "derived",
+    "modelled",
+    "counterfactual",
+    "unavailable"
+  ],
   "conventions": {
     "current_class": "Defensible class using the accepted DOT-54 adapter and identity gate today.",
     "target_class": "Intended class only after every named raw input and release gate passes.",
     "missing": "Missing numerator or opportunity evidence produces null with a reason, never zero.",
     "intervals": "All time intervals are left-closed and right-open in calibrated game seconds; pauses do not advance windows.",
     "positions": "World-unit thresholds use a content-addressed patch/build map geometry version.",
-    "roles": "Roster 1-5 is a report facet; dynamic responsibility segments are retained separately.",
-    "publication": "Every rate publishes numerator, denominator, exclusions, sample size, class, confidence, and evidence IDs."
+    "roles": "Roster 1-5 is a report facet; behavior episodes are retained separately and never reclassify the nominal role.",
+    "publication": "Every rate publishes numerator, denominator, exclusions, sample size, class, confidence, and evidence IDs.",
+    "capability_levels": {
+      "V1": "Direct facts and deterministic atomic transforms without quality judgement.",
+      "V2": "Opportunity-normalized contextual deterministic/heuristic conclusions that pass gold gates.",
+      "V3": "Modelled or counterfactual evaluation with confidence, calibration, abstention, and evidence."
+    },
+    "radar_axes": [
+      "laning",
+      "resources",
+      "tempo",
+      "map",
+      "vision",
+      "fight",
+      "objectives",
+      "endgame"
+    ],
+    "scoring": "Only metrics with official_score_eligible=true may enter the official radar/total. Experimental V3 inputs stay separate."
   },
   "metrics": [
     {
       "id": "lane_presence_share",
       "name": "Lane presence share",
       "business_meaning": "How consistently a player occupied the lane assigned by observed early-game movement.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["laning"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Eligible alive seconds inside the active lane polygon or its 1200-unit margin.",
@@ -25,19 +55,45 @@
       "opportunity": "Each second with a verified player binding, calibrated clock, valid position, and stable lane segment.",
       "time_window": "1-second resample; 30-second lane-change debounce.",
       "space_window": "Patch lane polygons plus 1200 world units.",
-      "exclusions": ["pregame", "pause", "dead time", "teleport grace 5 seconds", "position gaps over 10 seconds", "unknown lane"],
-      "raw_inputs": ["participant binding", "game clock", "hero position", "alive state", "map geometry"],
+      "exclusions": [
+        "pregame",
+        "pause",
+        "dead time",
+        "teleport grace 5 seconds",
+        "position gaps over 10 seconds",
+        "unknown lane"
+      ],
+      "raw_inputs": [
+        "participant binding",
+        "game clock",
+        "hero position",
+        "alive state",
+        "map geometry"
+      ],
       "algorithm": "Count eligible second-grid samples in the active lane and divide by all eligible samples.",
       "confidence": "High only when position coverage is at least 95% and lane assignment meets share/margin gates; otherwise medium or unavailable.",
-      "known_biases": ["Heroes can contribute from outside the polygon", "unusual trilanes make roster expectations misleading"],
-      "test_case": "8771908040 ordinary-lane candidate plus a confirmed level-one swap fixture."
+      "known_biases": [
+        "Heroes can contribute from outside the polygon",
+        "unusual trilanes make roster expectations misleading"
+      ],
+      "test_case": "8944521919 ordinary-lane candidate plus a confirmed level-one swap fixture.",
+      "capability_level": "V1",
+      "radar_axis": "laning",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "core_partner_protection_uptime",
       "name": "Core partner protection uptime",
       "business_meaning": "For supports, time spent in actionable proximity to the assigned lane core while that core faced lane pressure.",
-      "roles": ["4", "5"],
-      "phases": ["laning"],
+      "roles": [
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Threat-opportunity seconds with the support alive, within 1800 units, and not disabled/retreating beyond action range.",
@@ -45,19 +101,47 @@
       "opportunity": "Enemy hero within 2200 units of the core or verified hostile damage/control in the trailing 5 seconds.",
       "time_window": "Per second; threat persists 5 seconds after the last qualifying event.",
       "space_window": "Support-core 1800 units; enemy-core 2200 units.",
-      "exclusions": ["core deliberately left lane", "support dead", "position gap", "illusion-only contact", "uncertain partner assignment"],
-      "raw_inputs": ["positions", "lane segments", "damage/control events", "alive/status", "hero ownership"],
+      "exclusions": [
+        "core deliberately left lane",
+        "support dead",
+        "position gap",
+        "illusion-only contact",
+        "uncertain partner assignment"
+      ],
+      "raw_inputs": [
+        "positions",
+        "lane segments",
+        "damage/control events",
+        "alive/status",
+        "hero ownership"
+      ],
       "algorithm": "Construct threat opportunities, then measure actionable proximity over those opportunities.",
       "confidence": "Modelled probability with evidence features; release requires calibrated confidence and gold labels.",
-      "known_biases": ["Long-range saves are undervalued", "proximity does not prove correct positioning"],
-      "test_case": "Manual partner-threat intervals in 8771908040."
+      "known_biases": [
+        "Long-range saves are undervalued",
+        "proximity does not prove correct positioning"
+      ],
+      "test_case": "Manual partner-threat intervals in 8944521919.",
+      "capability_level": "V3",
+      "radar_axis": "laning",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "lane_pressure_damage_per_contact",
       "name": "Lane pressure damage per contact",
       "business_meaning": "Verified hero damage applied during eligible lane contacts, normalized by contact opportunity rather than game time.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["laning"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Post-mitigation hero damage attributed to the player during eligible lane contacts.",
@@ -65,19 +149,47 @@
       "opportunity": "Opposing real hero within 1800 units and both heroes alive for at least 2 seconds.",
       "time_window": "Contacts merge when separated by less than 5 seconds.",
       "space_window": "Same lane region and within 1800 units.",
-      "exclusions": ["illusion/summon damage without verified owner", "fountain/base damage", "pregame", "unknown actor", "self damage"],
-      "raw_inputs": ["positions", "damage events", "owner binding", "lane segments", "game clock"],
+      "exclusions": [
+        "illusion/summon damage without verified owner",
+        "fountain/base damage",
+        "pregame",
+        "unknown actor",
+        "self damage"
+      ],
+      "raw_inputs": [
+        "positions",
+        "damage events",
+        "owner binding",
+        "lane segments",
+        "game clock"
+      ],
       "algorithm": "Build contact intervals, sum qualifying damage, divide by opportunity count, and also publish raw damage.",
       "confidence": "Derived only with at least 98% actor/target resolution; otherwise unavailable.",
-      "known_biases": ["Damage can be strategically low value", "healing and consumable cost are separate metrics"],
-      "test_case": "Gold-labelled lane contacts in all three probes."
+      "known_biases": [
+        "Damage can be strategically low value",
+        "healing and consumable cost are separate metrics"
+      ],
+      "test_case": "Gold-labelled lane contacts in all three probes.",
+      "capability_level": "V2",
+      "radar_axis": "laning",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "forced_regen_or_retreat_rate",
       "name": "Forced regeneration or retreat rate",
       "business_meaning": "How often lane pressure is followed by an opponent consuming regeneration or losing lane access.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["laning"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Eligible pressure contacts followed within 12 seconds by verified regen use, base/behind-tower retreat for at least 8 seconds, or death.",
@@ -85,19 +197,45 @@
       "opportunity": "A lane contact with at least 8% max-health damage or qualifying control.",
       "time_window": "12-second outcome window; events deduplicated per target/contact.",
       "space_window": "Lane region; retreat crosses versioned safe-boundary geometry.",
-      "exclusions": ["scheduled rune/courier trip", "regen already active before contact", "forced movement ability", "ambiguous initiator"],
-      "raw_inputs": ["damage/control", "health", "item use", "positions", "lane geometry"],
+      "exclusions": [
+        "scheduled rune/courier trip",
+        "regen already active before contact",
+        "forced movement ability",
+        "ambiguous initiator"
+      ],
+      "raw_inputs": [
+        "damage/control",
+        "health",
+        "item use",
+        "positions",
+        "lane geometry"
+      ],
       "algorithm": "Score evidence features and output outcome probability plus raw evidence labels.",
       "confidence": "Modelled; never state that pressure caused the retreat without confidence and alternative signals.",
-      "known_biases": ["Opponent intent is unobserved", "regen may be planned independent of pressure"],
-      "test_case": "Adjudicated pressure/retreat episodes in 8835684858."
+      "known_biases": [
+        "Opponent intent is unobserved",
+        "regen may be planned independent of pressure"
+      ],
+      "test_case": "Adjudicated pressure/retreat episodes in 8944525313.",
+      "capability_level": "V3",
+      "radar_axis": "laning",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "core_safe_cs_opportunity_conversion",
       "name": "Core safe last-hit opportunity conversion",
       "business_meaning": "How much of a core's plausibly safe creep economy was converted, separating opportunity from raw last hits.",
-      "roles": ["1", "2", "3"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Eligible lane/neutral creeps last-hit by the core.",
@@ -105,19 +243,44 @@
       "opportunity": "A verified enemy creep/neutral is attackable in range before death with stable player/creep positions.",
       "time_window": "Per creep from first eligible health/range state to death.",
       "space_window": "Attack/cast range plus 200 units; threat uses only observed replay truth offline.",
-      "exclusions": ["denied creeps", "summoned units", "unreachable terrain", "player dead/disabled", "missing creep health/order"],
-      "raw_inputs": ["creep entity lifecycle", "positions", "orders/attacks", "last-hit event", "enemy positions/abilities"],
+      "exclusions": [
+        "denied creeps",
+        "summoned units",
+        "unreachable terrain",
+        "player dead/disabled",
+        "missing creep health/order"
+      ],
+      "raw_inputs": [
+        "creep entity lifecycle",
+        "positions",
+        "orders/attacks",
+        "last-hit event",
+        "enemy positions/abilities"
+      ],
       "algorithm": "Generate per-creep opportunities, classify safety with a calibrated threat model, and publish conversions by safety band.",
       "confidence": "Modelled because safety is contextual; raw last-hit facts remain separate.",
-      "known_biases": ["Replay omniscience overstates information available to the player", "spell-farm intent is ambiguous"],
-      "test_case": "Manual creep opportunities in the first 10 minutes of 8771908040."
+      "known_biases": [
+        "Replay omniscience overstates information available to the player",
+        "spell-farm intent is ambiguous"
+      ],
+      "test_case": "Manual creep opportunities in the opening lane interval of 8944521919.",
+      "capability_level": "V3",
+      "radar_axis": "resources",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "pull_attempt_success_rate",
       "name": "Pull attempt success rate",
       "business_meaning": "Support manipulation of lane equilibrium through neutral-to-lane creep contact.",
-      "roles": ["4", "5"],
-      "phases": ["laning"],
+      "roles": [
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Attempts where an eligible neutral camp engages the intended allied lane wave for at least 3 seconds.",
@@ -125,19 +288,46 @@
       "opportunity": "Player aggro/order interaction with an alive neutral camp in a pull window and path toward the lane wave.",
       "time_window": "Attempt starts at aggro; result window 20 seconds.",
       "space_window": "Versioned camp, pull-path, and lane-intersection polygons.",
-      "exclusions": ["enemy-created aggro", "accidental combat", "stack-only path", "camp blocked/empty before opportunity"],
-      "raw_inputs": ["creep ownership/class", "aggro/order", "positions", "camp/lane geometry", "game clock"],
+      "exclusions": [
+        "enemy-created aggro",
+        "accidental combat",
+        "stack-only path",
+        "camp blocked/empty before opportunity"
+      ],
+      "raw_inputs": [
+        "creep ownership/class",
+        "aggro/order",
+        "positions",
+        "camp/lane geometry",
+        "game clock"
+      ],
       "algorithm": "Deterministically identify initiator, path, and neutral-lane-wave contact.",
       "confidence": "Derived after >=0.90 precision and >=0.85 recall on annotated attempts.",
-      "known_biases": ["Unusual pull paths require geometry updates", "success does not imply net lane value"],
-      "test_case": "Annotate every pull/stack-looking episode in 8771908040 and 8835684858."
+      "known_biases": [
+        "Unusual pull paths require geometry updates",
+        "success does not imply net lane value"
+      ],
+      "test_case": "Annotate every pull/stack-looking episode in 8944521919 and 8944525313.",
+      "capability_level": "V2",
+      "radar_axis": "laning",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "stack_attempt_success_rate",
       "name": "Stack attempt success rate",
       "business_meaning": "Neutral camp stacking execution normalized by verified attempts.",
-      "roles": ["2", "3", "4", "5"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Attempts followed by an increase in eligible camp unit generation above the prior camp baseline.",
@@ -145,19 +335,47 @@
       "opportunity": "Player causes camp units to leave the spawn box within the versioned stack timing window.",
       "time_window": "From 8 seconds before the minute to 5 seconds after spawn.",
       "space_window": "Versioned camp spawn and leash polygons.",
-      "exclusions": ["blocked camp", "camp cleared before spawn", "enemy/summon initiator without owner", "double-counted pull"],
-      "raw_inputs": ["neutral entities", "spawn lifecycle", "positions/orders", "camp geometry", "owner binding"],
+      "exclusions": [
+        "blocked camp",
+        "camp cleared before spawn",
+        "enemy/summon initiator without owner",
+        "double-counted pull"
+      ],
+      "raw_inputs": [
+        "neutral entities",
+        "spawn lifecycle",
+        "positions/orders",
+        "camp geometry",
+        "owner binding"
+      ],
       "algorithm": "Detect attempt and compare post-spawn camp composition with the pre-attempt baseline.",
       "confidence": "Derived only when spawn and ownership completeness are proven.",
-      "known_biases": ["Patch-specific camp behavior", "shared attempts need multi-player attribution"],
-      "test_case": "All visible camp manipulations across the three probes."
+      "known_biases": [
+        "Patch-specific camp behavior",
+        "shared attempts need multi-player attribution"
+      ],
+      "test_case": "All visible camp manipulations across the three probes.",
+      "capability_level": "V2",
+      "radar_axis": "resources",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "creep_wave_manipulation_events",
       "name": "Creep wave manipulation events",
       "business_meaning": "Verified blocks, cuts, drags, and denied-wave reroutes as distinct atomic actions.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Count by subtype with initiator and affected wave identity.",
@@ -165,19 +383,44 @@
       "opportunity": "A complete lane-wave lifecycle intersects the player's actionable region.",
       "time_window": "Per wave from spawn to death/despawn.",
       "space_window": "Versioned lane paths, aggro regions, and tower boundaries.",
-      "exclusions": ["ordinary last hitting", "unowned summon interaction", "pathing anomaly", "incomplete wave"],
-      "raw_inputs": ["creep IDs/teams/positions/orders", "player positions/actions", "lane geometry"],
+      "exclusions": [
+        "ordinary last hitting",
+        "unowned summon interaction",
+        "pathing anomaly",
+        "incomplete wave"
+      ],
+      "raw_inputs": [
+        "creep IDs/teams/positions/orders",
+        "player positions/actions",
+        "lane geometry"
+      ],
       "algorithm": "Rule-based subtype classifier over wave paths and actor interactions.",
       "confidence": "Derived per subtype; unsupported subtype remains unavailable.",
-      "known_biases": ["Intent is not proven", "new patch pathing changes rules"],
-      "test_case": "Manual wave-by-wave labels in the early-disruption probe."
+      "known_biases": [
+        "Intent is not proven",
+        "new patch pathing changes rules"
+      ],
+      "test_case": "Manual wave-by-wave labels in the early-disruption probe.",
+      "capability_level": "V1",
+      "radar_axis": "laning",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "roam_attempt_rate",
       "name": "Roam attempt rate",
       "business_meaning": "Cross-lane movement choices normalized by eligible lane time.",
-      "roles": ["2", "3", "4", "5"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Lane departures lasting >=20 seconds that reach a different lane/objective region and create contact or objective presence.",
@@ -185,19 +428,47 @@
       "opportunity": "Stable origin lane plus valid position coverage and at least one reachable destination region.",
       "time_window": "Departure begins after 15 seconds outside lane; attempt must resolve within 90 seconds.",
       "space_window": "Origin lane distance >2500 units and entry into a different versioned region.",
-      "exclusions": ["death/respawn", "fountain resupply", "rune trip without cross-lane contact", "forced teleport", "lane swap segment"],
-      "raw_inputs": ["positions", "lane segments", "regions", "combat/objective events", "alive state"],
+      "exclusions": [
+        "death/respawn",
+        "fountain resupply",
+        "rune trip without cross-lane contact",
+        "forced teleport",
+        "lane swap segment"
+      ],
+      "raw_inputs": [
+        "positions",
+        "lane segments",
+        "regions",
+        "combat/objective events",
+        "alive state"
+      ],
       "algorithm": "Create deterministic movement attempts and classify destination/outcome separately from intent.",
       "confidence": "Derived for movement; intent label is modelled and separately exposed.",
-      "known_biases": ["Map-control moves may look like roams", "lane swaps can be misclassified without hysteresis"],
-      "test_case": "8835684858 must contain human-confirmed attempts or be replaced."
+      "known_biases": [
+        "Map-control moves may look like roams",
+        "lane swaps can be misclassified without hysteresis"
+      ],
+      "test_case": "8944525313 must contain human-confirmed attempts or be replaced.",
+      "capability_level": "V1",
+      "radar_axis": "tempo",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "roam_conversion_rate",
       "name": "Roam conversion rate",
       "business_meaning": "Observable results following a roam without claiming the roam caused them.",
-      "roles": ["2", "3", "4", "5"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Attempts followed by at least one labelled result: kill/assist, enemy retreat, rune, tower damage/death, Roshan/Tormentor, or space window.",
@@ -205,19 +476,45 @@
       "opportunity": "One record per roam attempt; each result label is evaluated independently.",
       "time_window": "Primary 30 seconds after arrival; secondary 60 seconds reported separately.",
       "space_window": "Destination region or within 3000 units of the contacted objective/fight.",
-      "exclusions": ["result began before arrival", "unknown participant", "duplicate result shared across attempts without attribution rule"],
-      "raw_inputs": ["roam attempts", "kills/assists", "positions", "objectives", "economy/retreat signals"],
+      "exclusions": [
+        "result began before arrival",
+        "unknown participant",
+        "duplicate result shared across attempts without attribution rule"
+      ],
+      "raw_inputs": [
+        "roam attempts",
+        "kills/assists",
+        "positions",
+        "objectives",
+        "economy/retreat signals"
+      ],
       "algorithm": "Join attempts to predeclared outcomes within fixed windows and publish a multi-label result vector.",
       "confidence": "Derived association, explicitly not causal.",
-      "known_biases": ["Delayed benefits outside the window", "team actions share credit"],
-      "test_case": "Every confirmed roam in 8835684858 with 30/60-second manual outcomes."
+      "known_biases": [
+        "Delayed benefits outside the window",
+        "team actions share credit"
+      ],
+      "test_case": "Every confirmed roam in 8944525313 with 30/60-second manual outcomes.",
+      "capability_level": "V2",
+      "radar_axis": "tempo",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "failed_roam_resource_cost",
       "name": "Failed roam resource cost",
       "business_meaning": "Observed lane/economy cost of roam attempts with no defined conversion.",
-      "roles": ["2", "3", "4", "5"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Estimated missed XP/gold opportunities, tower damage conceded, and origin-core pressure during non-converting attempts.",
@@ -225,19 +522,46 @@
       "opportunity": "A verified roam with zero primary/secondary result labels.",
       "time_window": "From departure until return/new responsibility segment, capped at 120 seconds.",
       "space_window": "Origin lane and destination path/region.",
-      "exclusions": ["intentional lane swap", "teamwide retreat", "missing creep/economy data", "unassigned origin responsibility"],
-      "raw_inputs": ["roam attempts", "creep opportunities", "XP/gold", "origin lane pressure", "positions"],
+      "exclusions": [
+        "intentional lane swap",
+        "teamwide retreat",
+        "missing creep/economy data",
+        "unassigned origin responsibility"
+      ],
+      "raw_inputs": [
+        "roam attempts",
+        "creep opportunities",
+        "XP/gold",
+        "origin lane pressure",
+        "positions"
+      ],
       "algorithm": "Compare observed opportunity loss with a documented local baseline; publish components, not one opaque penalty.",
       "confidence": "Modelled because the unobserved alternative action is uncertain.",
-      "known_biases": ["Counterfactual baseline sensitivity", "information gained is hard to value"],
-      "test_case": "Adjudicate non-converting attempts in the early-disruption probe."
+      "known_biases": [
+        "Counterfactual baseline sensitivity",
+        "information gained is hard to value"
+      ],
+      "test_case": "Adjudicate non-converting attempts in the early-disruption probe.",
+      "capability_level": "V3",
+      "radar_axis": "tempo",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "lower_better"
     },
     {
       "id": "rune_control_contribution",
       "name": "Rune control contribution",
       "business_meaning": "Presence and actions that secure or deny a contested rune opportunity.",
-      "roles": ["2", "3", "4", "5"],
-      "phases": ["laning", "midgame"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Eligible rune opportunities secured/denied while the player is present or contributes a qualifying control/damage action.",
@@ -245,19 +569,44 @@
       "opportunity": "Verified rune spawn with complete location, pickup/deny, and player positions.",
       "time_window": "20 seconds before through 10 seconds after spawn.",
       "space_window": "Within 1800 units for presence; reachability uses path distance and current movement state.",
-      "exclusions": ["illusion-only presence", "unknown pickup", "teleport unavailable path assumption", "uncontested bounty attribution without action"],
-      "raw_inputs": ["rune lifecycle", "positions", "pickup/deny", "damage/control", "map paths"],
+      "exclusions": [
+        "illusion-only presence",
+        "unknown pickup",
+        "teleport unavailable path assumption",
+        "uncontested bounty attribution without action"
+      ],
+      "raw_inputs": [
+        "rune lifecycle",
+        "positions",
+        "pickup/deny",
+        "damage/control",
+        "map paths"
+      ],
       "algorithm": "Create spawn opportunities and assign atomic presence/action labels; team result remains separate.",
       "confidence": "Derived for observed presence/action; strategic value is not scored.",
-      "known_biases": ["Reachability assumptions", "a player may intentionally concede a rune"],
-      "test_case": "Annotate all river/power rune windows in the ordinary and disruption probes."
+      "known_biases": [
+        "Reachability assumptions",
+        "a player may intentionally concede a rune"
+      ],
+      "test_case": "Annotate all river/power rune windows in the ordinary and disruption probes.",
+      "capability_level": "V2",
+      "radar_axis": "tempo",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "dangerous_farm_share",
       "name": "Dangerous farm share",
       "business_meaning": "Farm collected in map regions with high observed threat, separated from hidden-information claims.",
-      "roles": ["1", "2", "3"],
-      "phases": ["midgame", "reset"],
+      "roles": [
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Gold/XP/last-hit value collected in the high observed-threat band.",
@@ -265,19 +614,47 @@
       "opportunity": "A verified farm event with player position and threat features from replay truth.",
       "time_window": "Threat features over trailing 10 seconds and next 3 seconds only for offline labelled analysis.",
       "space_window": "Versioned territory/control regions and observed enemy distance/reach.",
-      "exclusions": ["unknown enemy positions", "base/fountain passive gold", "unbound summons", "live output using replay-hidden positions"],
-      "raw_inputs": ["farm events", "positions", "enemy positions", "vision assumptions", "map geometry"],
+      "exclusions": [
+        "unknown enemy positions",
+        "base/fountain passive gold",
+        "unbound summons",
+        "live output using replay-hidden positions"
+      ],
+      "raw_inputs": [
+        "farm events",
+        "positions",
+        "enemy positions",
+        "vision assumptions",
+        "map geometry"
+      ],
       "algorithm": "Publish farm by low/medium/high observed-threat probability; no binary safe claim.",
       "confidence": "Modelled and offline-only unless live GSI uses only delayed observed positions.",
-      "known_biases": ["Replay omniscience", "player information and team calls are unknown"],
-      "test_case": "Long-game probe split-map intervals with manual danger bands."
+      "known_biases": [
+        "Replay omniscience",
+        "player information and team calls are unknown"
+      ],
+      "test_case": "Long-game probe split-map intervals with manual danger bands.",
+      "capability_level": "V3",
+      "radar_axis": "resources",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "resource_to_objective_conversion",
       "name": "Resource-to-objective conversion",
       "business_meaning": "Observable objective impact after a player/team gains a defined resource spike.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["midgame", "decisive_round"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Tower/rax damage, objective deaths, Roshan/Tormentor results, or fight result within the fixed post-spike window.",
@@ -285,19 +662,46 @@
       "opportunity": "Item completion, level/ability breakpoint, Aegis acquisition, or team net-worth swing meeting a versioned threshold.",
       "time_window": "Report 60/120/180-second windows separately.",
       "space_window": "Objective/fight region; global economic spikes remain global.",
-      "exclusions": ["spike after objective already began", "unknown item completion", "duplicate overlapping spikes without attribution split"],
-      "raw_inputs": ["inventory/levels/economy", "objectives", "fight outcomes", "positions"],
+      "exclusions": [
+        "spike after objective already began",
+        "unknown item completion",
+        "duplicate overlapping spikes without attribution split"
+      ],
+      "raw_inputs": [
+        "inventory/levels/economy",
+        "objectives",
+        "fight outcomes",
+        "positions"
+      ],
       "algorithm": "Create typed spike opportunities and join fixed-window atomic outcomes without causal wording.",
       "confidence": "Derived association; confidence depends on complete item/economy/objective inputs.",
-      "known_biases": ["Timing may be coincidental", "team objectives share credit"],
-      "test_case": "Long-game probe item/Aegis spikes and ensuing objectives."
+      "known_biases": [
+        "Timing may be coincidental",
+        "team objectives share credit"
+      ],
+      "test_case": "Long-game probe item/Aegis spikes and ensuing objectives.",
+      "capability_level": "V2",
+      "radar_axis": "objectives",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "item_timing_opportunity_percentile",
       "name": "Opportunity-adjusted item timing percentile",
       "business_meaning": "Item completion timing compared with like-role/hero/patch opportunities, without calling later timing poor when resources were unavailable.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["laning", "midgame", "decisive_round"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Verified completion game second and accumulated eligible resource opportunity at completion.",
@@ -305,19 +709,44 @@
       "opportunity": "Complete inventory lifecycle and eligible resource stream for the player.",
       "time_window": "From game second 0 to first completed ownership; disassembly/rebuy rules versioned.",
       "space_window": "Not applicable.",
-      "exclusions": ["transferred item", "unknown component lifecycle", "sample below minimum", "patch/build mismatch"],
-      "raw_inputs": ["inventory lifecycle", "purchase/combine events", "player binding", "resource opportunity", "baseline manifest"],
+      "exclusions": [
+        "transferred item",
+        "unknown component lifecycle",
+        "sample below minimum",
+        "patch/build mismatch"
+      ],
+      "raw_inputs": [
+        "inventory lifecycle",
+        "purchase/combine events",
+        "player binding",
+        "resource opportunity",
+        "baseline manifest"
+      ],
       "algorithm": "Report raw timing, opportunity-adjusted timing, percentile, baseline N, and missingness.",
       "confidence": "Derived only with immutable eligible baseline; DOT-22 historical no-go means no current percentile is publishable.",
-      "known_biases": ["Hero/item strategy heterogeneity", "team funnel decisions affect opportunity"],
-      "test_case": "Three probes validate extraction only; percentile remains unavailable until a TI baseline passes minima."
+      "known_biases": [
+        "Hero/item strategy heterogeneity",
+        "team funnel decisions affect opportunity"
+      ],
+      "test_case": "Three probes validate extraction only; percentile remains unavailable until a TI baseline passes minima.",
+      "capability_level": "V2",
+      "radar_axis": "resources",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "side_lane_pressure_uptime",
       "name": "Side-lane pressure uptime",
       "business_meaning": "Time a player advances or holds a side lane while creating an observable response burden.",
-      "roles": ["1", "2", "3"],
-      "phases": ["midgame", "reset"],
+      "roles": [
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Eligible seconds advancing a side wave beyond the versioned pressure line with enemy response or structural threat evidence.",
@@ -325,19 +754,48 @@
       "opportunity": "Stable side-lane segment with a complete wave and enemy/tower state.",
       "time_window": "1-second samples; minimum pressure episode 15 seconds.",
       "space_window": "Side-lane pressure polygons and enemy response within 4000 units.",
-      "exclusions": ["base defense", "empty/incomplete wave", "teleport transit", "unverified responsibility segment"],
-      "raw_inputs": ["positions", "waves", "buildings", "enemy response", "responsibility model"],
+      "exclusions": [
+        "base defense",
+        "empty/incomplete wave",
+        "teleport transit",
+        "unverified responsibility segment"
+      ],
+      "raw_inputs": [
+        "positions",
+        "waves",
+        "buildings",
+        "enemy response",
+        "responsibility model"
+      ],
       "algorithm": "Detect pressure episodes and output response/structure components separately.",
       "confidence": "Modelled because responsibility and response causality are uncertain.",
-      "known_biases": ["Hidden teleport intent", "pressure without visible response may still create value"],
-      "test_case": "Split-map intervals in 8768555805."
+      "known_biases": [
+        "Hidden teleport intent",
+        "pressure without visible response may still create value"
+      ],
+      "test_case": "Split-map intervals in 8943477775.",
+      "capability_level": "V3",
+      "radar_axis": "map",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "ward_placement_rate",
       "name": "Ward placement rate",
       "business_meaning": "Verified observer/sentry placements normalized by ward inventory opportunities.",
-      "roles": ["4", "5", "1", "2", "3"],
-      "phases": ["laning", "midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "direct",
       "numerator": "Ward entity spawn events attributed to the player by ward type.",
@@ -345,19 +803,47 @@
       "opportunity": "Verified ownership of a ward charge while alive; raw placements also published without a denominator.",
       "time_window": "Event time; opportunity sampled per second.",
       "space_window": "Exact verified placement coordinate/region.",
-      "exclusions": ["ward purchase without placement", "item-use aggregate without entity spawn", "transferred charge with unknown owner", "duplicate entity event"],
-      "raw_inputs": ["ward entity spawn", "owner/player binding", "inventory lifecycle", "position"],
+      "exclusions": [
+        "ward purchase without placement",
+        "item-use aggregate without entity spawn",
+        "transferred charge with unknown owner",
+        "duplicate entity event"
+      ],
+      "raw_inputs": [
+        "ward entity spawn",
+        "owner/player binding",
+        "inventory lifecycle",
+        "position"
+      ],
       "algorithm": "Join each ward spawn to the consuming inventory event and owner; count by type/phase/region.",
       "confidence": "Direct only with exact owner/entity correlation; otherwise unavailable.",
-      "known_biases": ["Placement count does not measure quality", "shared ward ownership conventions vary"],
-      "test_case": "Manual visible ward placements across all probes."
+      "known_biases": [
+        "Placement count does not measure quality",
+        "shared ward ownership conventions vary"
+      ],
+      "test_case": "Manual visible ward placements across all probes.",
+      "capability_level": "V1",
+      "radar_axis": "vision",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "ward_lifetime_share",
       "name": "Ward lifetime share",
       "business_meaning": "How much of each ward's maximum legal lifetime was realized before deward/destruction.",
-      "roles": ["4", "5", "1", "2", "3"],
-      "phases": ["laning", "midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Observed alive seconds from spawn to death/expiry/end censor.",
@@ -365,19 +851,47 @@
       "opportunity": "Each verified ward entity spawn.",
       "time_window": "Ward lifecycle.",
       "space_window": "Placement region retained but not used in arithmetic.",
-      "exclusions": ["unknown spawn", "entity ownership mismatch", "match-end censor reported separately", "self-destruction rule ambiguity"],
-      "raw_inputs": ["ward spawn/death/expiry", "game clock", "patch constants", "owner binding"],
+      "exclusions": [
+        "unknown spawn",
+        "entity ownership mismatch",
+        "match-end censor reported separately",
+        "self-destruction rule ambiguity"
+      ],
+      "raw_inputs": [
+        "ward spawn/death/expiry",
+        "game clock",
+        "patch constants",
+        "owner binding"
+      ],
       "algorithm": "Compute lifecycle duration and censor type; aggregate distributions, not only mean.",
       "confidence": "Derived from direct lifecycle after completeness tests.",
-      "known_biases": ["Long lifetime is not always valuable", "deward can reveal enemy resources"],
-      "test_case": "Ward lifecycles manually visible in the long probe."
+      "known_biases": [
+        "Long lifetime is not always valuable",
+        "deward can reveal enemy resources"
+      ],
+      "test_case": "Ward lifecycles manually visible in the long probe.",
+      "capability_level": "V2",
+      "radar_axis": "vision",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "theoretical_ward_coverage_seconds",
       "name": "Theoretical ward coverage seconds",
       "business_meaning": "Geometry-based potential coverage, explicitly distinct from actual visibility or decision value.",
-      "roles": ["4", "5", "1", "2", "3"],
-      "phases": ["laning", "midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Ward-alive seconds multiplied by versioned visible-area estimate, reported by map region.",
@@ -385,19 +899,46 @@
       "opportunity": "Verified ward coordinate/lifetime and matching map/vision geometry version.",
       "time_window": "Per second over ward lifetime.",
       "space_window": "Patch height/tree/blocker-aware theoretical vision polygon.",
-      "exclusions": ["unknown coordinates", "geometry/build mismatch", "tree destruction state unavailable", "smoke/invisibility treated as visibility"],
-      "raw_inputs": ["ward coordinate/lifecycle", "map height/trees/blockers", "patch vision constants"],
+      "exclusions": [
+        "unknown coordinates",
+        "geometry/build mismatch",
+        "tree destruction state unavailable",
+        "smoke/invisibility treated as visibility"
+      ],
+      "raw_inputs": [
+        "ward coordinate/lifecycle",
+        "map height/trees/blockers",
+        "patch vision constants"
+      ],
       "algorithm": "Compute a labelled theoretical polygon; never join to enemy truth without a separate metric.",
       "confidence": "Modelled; confidence falls when dynamic blockers/trees are unknown.",
-      "known_biases": ["Actual FoW differs", "coverage area is not information value"],
-      "test_case": "Compare visible terrain occlusion around manually annotated wards in all probes."
+      "known_biases": [
+        "Actual FoW differs",
+        "coverage area is not information value"
+      ],
+      "test_case": "Compare visible terrain occlusion around manually annotated wards in all probes.",
+      "capability_level": "V3",
+      "radar_axis": "vision",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "ward_enemy_track_intersection",
       "name": "Ward/enemy track intersection",
       "business_meaning": "Enemy trajectory intersecting a theoretical ward polygon, without claiming the enemy was actually seen or influenced a decision.",
-      "roles": ["4", "5", "1", "2", "3"],
-      "phases": ["laning", "midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Enemy player-seconds whose replay track intersects the theoretical ward polygon while the ward is alive.",
@@ -405,19 +946,46 @@
       "opportunity": "Verified ward lifecycle plus complete enemy positions.",
       "time_window": "1-second resample.",
       "space_window": "Theoretical ward polygon only.",
-      "exclusions": ["actual visibility claim", "smoked/invisible detection assumption", "position gap", "dynamic geometry uncertainty"],
-      "raw_inputs": ["ward polygon/lifecycle", "enemy positions", "smoke/invisibility state when available"],
+      "exclusions": [
+        "actual visibility claim",
+        "smoked/invisible detection assumption",
+        "position gap",
+        "dynamic geometry uncertainty"
+      ],
+      "raw_inputs": [
+        "ward polygon/lifecycle",
+        "enemy positions",
+        "smoke/invisibility state when available"
+      ],
       "algorithm": "Calculate geometric intersections and label them potential track intersections.",
       "confidence": "Modelled; never upgraded to direct actual visibility.",
-      "known_biases": ["Replay hidden positions were not available to the team", "smoke/high-ground/trees alter visibility"],
-      "test_case": "Long-probe ward intervals with manually visible enemy crossings."
+      "known_biases": [
+        "Replay hidden positions were not available to the team",
+        "smoke/high-ground/trees alter visibility"
+      ],
+      "test_case": "Long-probe ward intervals with manually visible enemy crossings.",
+      "capability_level": "V3",
+      "radar_axis": "vision",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "deward_opportunity_conversion",
       "name": "Deward opportunity conversion",
       "business_meaning": "Enemy wards destroyed when the player had observable detection and attack access.",
-      "roles": ["4", "5", "2", "3", "1"],
-      "phases": ["laning", "midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "2",
+        "3",
+        "1"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Eligible enemy ward opportunities destroyed by the player/team within the opportunity window.",
@@ -425,19 +993,47 @@
       "opportunity": "Enemy ward exists and becomes detectable under verified sentry/gem/dust/true-sight state.",
       "time_window": "From first detection access until detection expires, ward dies, or actor leaves for 10 seconds.",
       "space_window": "Detection and attack/path range.",
-      "exclusions": ["replay-known but team-undetectable ward", "actor disabled/dead", "unknown true-sight", "ward already attacked before opportunity"],
-      "raw_inputs": ["enemy ward truth", "detection entities/items", "positions", "attacks", "ward death"],
+      "exclusions": [
+        "replay-known but team-undetectable ward",
+        "actor disabled/dead",
+        "unknown true-sight",
+        "ward already attacked before opportunity"
+      ],
+      "raw_inputs": [
+        "enemy ward truth",
+        "detection entities/items",
+        "positions",
+        "attacks",
+        "ward death"
+      ],
       "algorithm": "Construct detection/access opportunities, then join destruction and actor evidence.",
       "confidence": "Modelled until visibility/detection reconstruction is validated.",
-      "known_biases": ["Team may intentionally leave a ward", "replay omniscience must not define opportunity"],
-      "test_case": "All visible deward episodes in the three probes."
+      "known_biases": [
+        "Team may intentionally leave a ward",
+        "replay omniscience must not define opportunity"
+      ],
+      "test_case": "All visible deward episodes in the three probes.",
+      "capability_level": "V3",
+      "radar_axis": "vision",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "smoke_activation_participation",
       "name": "Smoke activation participation",
       "business_meaning": "Who used smoke, who received the modifier, and how the group moved before contact.",
-      "roles": ["4", "5", "1", "2", "3"],
-      "phases": ["midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Typed smoke events/participations by user and affected player.",
@@ -445,19 +1041,46 @@
       "opportunity": "Smoke item consumption with modifier application lifecycle.",
       "time_window": "Activation to modifier end, capped by patch maximum.",
       "space_window": "Activation coordinate and participant paths.",
-      "exclusions": ["aggregate item-use counter", "unknown user", "duplicate modifier event", "individual not affected at activation"],
-      "raw_inputs": ["item consumption", "smoke modifiers", "owner/player binding", "positions"],
+      "exclusions": [
+        "aggregate item-use counter",
+        "unknown user",
+        "duplicate modifier event",
+        "individual not affected at activation"
+      ],
+      "raw_inputs": [
+        "item consumption",
+        "smoke modifiers",
+        "owner/player binding",
+        "positions"
+      ],
       "algorithm": "Join the consumed charge to modifier applications and retain each participant path.",
       "confidence": "Derived after exact item/modifier identity tests.",
-      "known_biases": ["Participation does not imply organizational credit", "smoke may be defensive"],
-      "test_case": "Every smoke episode in 8768555805; shallow count 22 is only a screening signal."
+      "known_biases": [
+        "Participation does not imply organizational credit",
+        "smoke may be defensive"
+      ],
+      "test_case": "Every smoke episode in 8943477775; public metadata is only a screening signal.",
+      "capability_level": "V1",
+      "radar_axis": "tempo",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "smoke_break_outcome",
       "name": "Smoke break/contact outcome",
       "business_meaning": "Observed events after a smoke ends or contacts the enemy, without calling a death beneficial.",
-      "roles": ["4", "5", "1", "2", "3"],
-      "phases": ["midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "1",
+        "2",
+        "3"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Outcome vector: deaths/kills, objective damage/death, net-worth swing, disengage, and reset at 30/60/120 seconds.",
@@ -465,19 +1088,47 @@
       "opportunity": "Complete smoke modifier lifecycle with end reason/location and participant identities.",
       "time_window": "Separate 30, 60, and 120-second windows; no merged score.",
       "space_window": "Break/contact region and subsequent event regions.",
-      "exclusions": ["natural expiry mixed with enemy break", "unknown breaker", "outcome already underway", "replay-hidden intent"],
-      "raw_inputs": ["smoke lifecycle", "positions", "combat/objectives", "economy", "phase"],
+      "exclusions": [
+        "natural expiry mixed with enemy break",
+        "unknown breaker",
+        "outcome already underway",
+        "replay-hidden intent"
+      ],
+      "raw_inputs": [
+        "smoke lifecycle",
+        "positions",
+        "combat/objectives",
+        "economy",
+        "phase"
+      ],
       "algorithm": "Classify end evidence and publish a fixed-window outcome vector plus confidence.",
       "confidence": "Modelled for break cause/value; observed outcome components remain derived when inputs are complete.",
-      "known_biases": ["Association is not causation", "a support death may be good, neutral, or bad"],
-      "test_case": "Manual smoke timelines in the long and disruption probes."
+      "known_biases": [
+        "Association is not causation",
+        "a support death may be good, neutral, or bad"
+      ],
+      "test_case": "Manual smoke timelines in the long and disruption probes.",
+      "capability_level": "V3",
+      "radar_axis": "tempo",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "fight_damage_share",
       "name": "Fight hero-damage share",
       "business_meaning": "Post-mitigation hero damage during a defined fight, retaining raw value and opportunity context.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["midgame", "decisive_round"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Player-attributed real-hero damage inside the fight interval.",
@@ -485,19 +1136,47 @@
       "opportunity": "Verified fight interval and complete actor/target/owner damage events.",
       "time_window": "Fight detector interval with <=10-second combat gaps.",
       "space_window": "Fight participant component/region; global spells retain source event.",
-      "exclusions": ["illusion/summon damage without owner", "self/friendly damage", "non-hero targets", "unknown actor"],
-      "raw_inputs": ["damage events", "ownership", "fight intervals", "alive/positions"],
+      "exclusions": [
+        "illusion/summon damage without owner",
+        "self/friendly damage",
+        "non-hero targets",
+        "unknown actor"
+      ],
+      "raw_inputs": [
+        "damage events",
+        "ownership",
+        "fight intervals",
+        "alive/positions"
+      ],
       "algorithm": "Sum qualifying damage by player and divide by team total; publish raw and per-active-second values.",
       "confidence": "Derived only with >=98% actor/target resolution for the interval.",
-      "known_biases": ["Damage quality and target priority differ", "zoning/control may matter without damage"],
-      "test_case": "Adjudicated fights in all probes, especially long decisive rounds."
+      "known_biases": [
+        "Damage quality and target priority differ",
+        "zoning/control may matter without damage"
+      ],
+      "test_case": "Adjudicated fights in all probes, especially long decisive rounds.",
+      "capability_level": "V2",
+      "radar_axis": "fight",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "control_duration_per_opportunity",
       "name": "Effective control duration per opportunity",
       "business_meaning": "Verified disabling time applied to real enemy heroes, accounting for overlap and active opportunity.",
-      "roles": ["2", "3", "4", "5", "1"],
-      "phases": ["laning", "midgame", "decisive_round"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5",
+        "1"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Union duration of qualifying control modifiers attributed to the player, with overlapping control credited under a published rule.",
@@ -505,19 +1184,49 @@
       "opportunity": "Ready control source, valid target in range, actor alive/not disabled, and complete cooldown/state evidence.",
       "time_window": "Modifier add-to-remove lifecycle; opportunities sampled per ready window.",
       "space_window": "Versioned cast/impact range including projectile rules.",
-      "exclusions": ["creeps/illusions", "debuff immunity", "overlap beyond union rule", "unknown source", "dispels reported separately"],
-      "raw_inputs": ["ability/item state", "cast/impact", "modifier lifecycle", "status resistance", "positions"],
+      "exclusions": [
+        "creeps/illusions",
+        "debuff immunity",
+        "overlap beyond union rule",
+        "unknown source",
+        "dispels reported separately"
+      ],
+      "raw_inputs": [
+        "ability/item state",
+        "cast/impact",
+        "modifier lifecycle",
+        "status resistance",
+        "positions"
+      ],
       "algorithm": "Reconstruct modifier intervals, apply resistance/overlap policy, and normalize by eligible opportunities.",
       "confidence": "Derived after modifier lifecycle completeness and overlap tests.",
-      "known_biases": ["Holding a spell can be correct", "range/opportunity model may overcount"],
-      "test_case": "Manual control intervals in at least five fights across the probes."
+      "known_biases": [
+        "Holding a spell can be correct",
+        "range/opportunity model may overcount"
+      ],
+      "test_case": "Manual control intervals in at least five fights across the probes.",
+      "capability_level": "V2",
+      "radar_axis": "fight",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "heal_dispel_save_casts",
       "name": "Heal, dispel, and save casts",
       "business_meaning": "Atomic supportive effects delivered to allies, without claiming a life was saved.",
-      "roles": ["4", "5", "2", "3", "1"],
-      "phases": ["laning", "midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "2",
+        "3",
+        "1"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "direct",
       "numerator": "Count and magnitude/duration by effect subtype, actor, target, and phase.",
@@ -525,19 +1234,48 @@
       "opportunity": "Ability/item ready, actor actionable, and at least one ally satisfies the documented target need/range rule.",
       "time_window": "Cast/impact event; need features over trailing 3 seconds.",
       "space_window": "Actual cast/impact range.",
-      "exclusions": ["self-only effect when metric requires ally", "overheal separated", "unknown target", "passive aura ticks unless separately defined"],
-      "raw_inputs": ["cast/target/impact", "heal", "modifier/dispel", "health/status", "cooldowns", "positions"],
+      "exclusions": [
+        "self-only effect when metric requires ally",
+        "overheal separated",
+        "unknown target",
+        "passive aura ticks unless separately defined"
+      ],
+      "raw_inputs": [
+        "cast/target/impact",
+        "heal",
+        "modifier/dispel",
+        "health/status",
+        "cooldowns",
+        "positions"
+      ],
       "algorithm": "Emit atomic effect facts; opportunity-normalized rate is a separate derived view.",
       "confidence": "Direct for verified cast/effect; opportunity rate is derived. No prevented-death claim.",
-      "known_biases": ["Effect magnitude may not equal strategic value", "ally mistakes create more opportunities"],
-      "test_case": "Manual supportive casts in each probe."
+      "known_biases": [
+        "Effect magnitude may not equal strategic value",
+        "ally mistakes create more opportunities"
+      ],
+      "test_case": "Manual supportive casts in each probe.",
+      "capability_level": "V1",
+      "radar_axis": "fight",
+      "official_score_eligible": false,
+      "experimental_score_eligible": false,
+      "score_direction": "context_only"
     },
     {
       "id": "initiation_and_counterinitiation_participation",
       "name": "Initiation and counter-initiation participation",
       "business_meaning": "Evidence-backed ordering of who starts or responds to a fight.",
-      "roles": ["2", "3", "4", "5", "1"],
-      "phases": ["midgame", "decisive_round"],
+      "roles": [
+        "2",
+        "3",
+        "4",
+        "5",
+        "1"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Fight opportunities classified as initiator, co-initiator, counter-initiator, follow-up, or not involved.",
@@ -545,19 +1283,47 @@
       "opportunity": "Fight onset with complete first damage/control/mobility/contact evidence.",
       "time_window": "10 seconds before onset through 8 seconds after onset.",
       "space_window": "Fight component plus cast/reach paths.",
-      "exclusions": ["poke that does not enter fight", "unknown actor", "global effect without intent evidence", "player not reachable"],
-      "raw_inputs": ["positions", "casts", "damage/control", "fight intervals", "cooldowns/status"],
+      "exclusions": [
+        "poke that does not enter fight",
+        "unknown actor",
+        "global effect without intent evidence",
+        "player not reachable"
+      ],
+      "raw_inputs": [
+        "positions",
+        "casts",
+        "damage/control",
+        "fight intervals",
+        "cooldowns/status"
+      ],
       "algorithm": "Feature-based sequence classifier that outputs role probability and evidence events.",
       "confidence": "Modelled; low-confidence cases remain unclassified.",
-      "known_biases": ["Team intent/comms unknown", "bait and counterplay blur first action"],
-      "test_case": "Adjudicated onset roles for every major fight in 8768555805."
+      "known_biases": [
+        "Team intent/comms unknown",
+        "bait and counterplay blur first action"
+      ],
+      "test_case": "Adjudicated onset evidence for every major fight in 8943477775.",
+      "capability_level": "V3",
+      "radar_axis": "fight",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "key_ability_window_conversion",
       "name": "Key ability window conversion",
       "business_meaning": "Observable team/player outcomes while a declared high-impact ability/item window is available or committed.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["midgame", "decisive_round"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Typed outcomes following a verified key cast or ready-window opportunity.",
@@ -565,19 +1331,47 @@
       "opportunity": "Declared ability/item ready, actor actionable, and versioned opportunity predicate true.",
       "time_window": "Per ready window; cast outcomes at 10/30/60 seconds by subtype.",
       "space_window": "Ability/item reach or global scope.",
-      "exclusions": ["no valid target", "fight already decided", "cooldown state gap", "patch ability definition mismatch"],
-      "raw_inputs": ["ability/item definitions", "cooldowns", "casts/targets/hits", "positions", "fight/objective outcomes"],
+      "exclusions": [
+        "no valid target",
+        "fight already decided",
+        "cooldown state gap",
+        "patch ability definition mismatch"
+      ],
+      "raw_inputs": [
+        "ability/item definitions",
+        "cooldowns",
+        "casts/targets/hits",
+        "positions",
+        "fight/objective outcomes"
+      ],
       "algorithm": "Create opportunity records before observing outcomes and join fixed-window atomic results.",
       "confidence": "Derived association; strategic correctness remains modelled/unavailable.",
-      "known_biases": ["Holding cooldown can be valuable", "outcomes are team-dependent"],
-      "test_case": "Select two declared key abilities per lineup in each probe before evaluation."
+      "known_biases": [
+        "Holding cooldown can be valuable",
+        "outcomes are team-dependent"
+      ],
+      "test_case": "Select two declared key abilities per lineup in each probe before evaluation.",
+      "capability_level": "V2",
+      "radar_axis": "tempo",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "death_without_buyback_exposure",
       "name": "Death without buyback exposure",
       "business_meaning": "Player-seconds a team is unavailable because a dead player lacks verified buyback during meaningful threat.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["midgame", "decisive_round"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Dead seconds with buyback unavailable during verified objective/fight threat.",
@@ -585,19 +1379,45 @@
       "opportunity": "Death interval with complete respawn and buyback state plus a threat interval.",
       "time_window": "Death to respawn/buyback; threat intersection.",
       "space_window": "Global round resource; threat has objective/fight region.",
-      "exclusions": ["buyback field missing", "game already ended", "no meaningful threat", "right-censored replay"],
-      "raw_inputs": ["death/respawn", "buyback availability/cooldown/cost", "phase/threat", "game end"],
+      "exclusions": [
+        "buyback field missing",
+        "game already ended",
+        "no meaningful threat",
+        "right-censored replay"
+      ],
+      "raw_inputs": [
+        "death/respawn",
+        "buyback availability/cooldown/cost",
+        "phase/threat",
+        "game end"
+      ],
       "algorithm": "Intersect verified death/resource intervals with threat intervals and sum seconds.",
       "confidence": "Derived only from complete round-resource state.",
-      "known_biases": ["Not having buyback may reflect earlier team resource allocation", "exposure does not equal mistake"],
-      "test_case": "All 12 buyback-event context windows in 8768555805."
+      "known_biases": [
+        "Not having buyback may reflect earlier team resource allocation",
+        "exposure does not equal mistake"
+      ],
+      "test_case": "All replay-derived buyback context windows in 8943477775.",
+      "capability_level": "V2",
+      "radar_axis": "endgame",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "lower_better"
     },
     {
       "id": "buyback_round_participation",
       "name": "Buyback round participation and outcome",
       "business_meaning": "What a player did after using buyback within a decisive round, without scoring the decision as correct.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["decisive_round", "reset"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Post-buyback participation facts: return time, damage/heal/control, deaths, objective/fight outcomes.",
@@ -605,19 +1425,45 @@
       "opportunity": "Buyback event with actor, cost/availability, position, and round identity.",
       "time_window": "Use through round end; also fixed 30/60/120-second views.",
       "space_window": "Return path and fight/objective region.",
-      "exclusions": ["unknown actor", "round boundary unavailable", "game end before participation reported as censor"],
-      "raw_inputs": ["buyback", "positions", "combat/support effects", "objectives", "phase rounds"],
+      "exclusions": [
+        "unknown actor",
+        "round boundary unavailable",
+        "game end before participation reported as censor"
+      ],
+      "raw_inputs": [
+        "buyback",
+        "positions",
+        "combat/support effects",
+        "objectives",
+        "phase rounds"
+      ],
       "algorithm": "Join each use to its round and publish an outcome vector with no scalar quality score.",
       "confidence": "Derived outcomes; decision quality remains modelled and out of default scope.",
-      "known_biases": ["Team context dominates outcome", "late buyback may be deliberate"],
-      "test_case": "8768555805 long multi-round candidate."
+      "known_biases": [
+        "Team context dominates outcome",
+        "late buyback may be deliberate"
+      ],
+      "test_case": "8943477775 long multi-round candidate.",
+      "capability_level": "V2",
+      "radar_axis": "endgame",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "highground_building_conversion",
       "name": "High-ground building conversion",
       "business_meaning": "Verified structural damage/deaths following a high-ground siege opportunity.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["decisive_round"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "derived",
       "numerator": "Real tier-3/rax/ancient damage and deaths attributed to the team/player within the siege interval.",
@@ -625,39 +1471,96 @@
       "opportunity": "Team shape `siege` with complete real-building and position state.",
       "time_window": "Siege entry to disengage/reset, with 20-second gap merge.",
       "space_window": "Versioned enemy high-ground/tier-3/rax polygons.",
-      "exclusions": ["temporary/summoned structures", "backdoor-protected no-op separated", "unknown building identity", "poke shorter than 10 seconds"],
-      "raw_inputs": ["positions", "real building entities/health", "damage", "team shape", "phase"],
+      "exclusions": [
+        "temporary/summoned structures",
+        "backdoor-protected no-op separated",
+        "unknown building identity",
+        "poke shorter than 10 seconds"
+      ],
+      "raw_inputs": [
+        "positions",
+        "real building entities/health",
+        "damage",
+        "team shape",
+        "phase"
+      ],
       "algorithm": "Create siege opportunities and sum typed building outcomes; retain team and player contribution separately.",
       "confidence": "Derived after temporary-structure adversarial tests.",
-      "known_biases": ["Zoning contribution may not deal damage", "building damage can be strategically traded"],
-      "test_case": "High-ground rounds in 8768555805; Underlord portal regression from 8741845584."
+      "known_biases": [
+        "Zoning contribution may not deal damage",
+        "building damage can be strategically traded"
+      ],
+      "test_case": "High-ground rounds in 8943477775; retain the existing Underlord temporary-structure unit regression.",
+      "capability_level": "V2",
+      "radar_axis": "objectives",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     },
     {
       "id": "reset_discipline",
       "name": "Reset execution evidence",
       "business_meaning": "Observable disengage, regroup, resource refresh, and re-entry behavior after a decisive round.",
-      "roles": ["1", "2", "3", "4", "5"],
-      "phases": ["reset"],
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "midgame"
+      ],
       "current_class": "unavailable",
       "target_class": "modelled",
       "numerator": "Reset episodes with survival, separation, resource refresh, and no avoidable re-contact under the published evidence rules.",
       "denominator": "Verified reset opportunities after decisive rounds.",
-      "opportunity": "State machine enters reset with complete positions, combat, health/mana, buyback, and objective state.",
-      "time_window": "Reset interval until midgame return or decisive re-entry.",
+      "opportunity": "A reset behavior episode begins after decisive-to-midgame transition with complete positions, combat, health/mana, buyback, and objective state.",
+      "time_window": "Reset behavior episode until ordinary exchange is established or decisive re-entry.",
       "space_window": "Conflict centroid separation, base/shop/objective regions.",
-      "exclusions": ["forced chase", "missing positions", "game end", "objective trade already active"],
-      "raw_inputs": ["phase rounds", "positions", "combat gaps", "resources", "items", "objectives"],
+      "exclusions": [
+        "forced chase",
+        "missing positions",
+        "game end",
+        "objective trade already active"
+      ],
+      "raw_inputs": [
+        "phase rounds",
+        "positions",
+        "combat gaps",
+        "resources",
+        "items",
+        "objectives"
+      ],
       "algorithm": "Publish component evidence and a calibrated episode class; do not emit an opaque discipline score.",
       "confidence": "Modelled; strategic intent and opponent threat remain uncertain.",
-      "known_biases": ["Aggressive re-entry can be correct", "communications are unknown"],
-      "test_case": "At least two reset/re-entry cycles in 8768555805."
+      "known_biases": [
+        "Aggressive re-entry can be correct",
+        "communications are unknown"
+      ],
+      "test_case": "At least two reset/re-entry cycles in 8943477775.",
+      "capability_level": "V3",
+      "radar_axis": "endgame",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "death_prevented_by_save",
       "name": "Death prevented by a save",
       "business_meaning": "Research estimate that an allied save changed a death outcome.",
-      "roles": ["4", "5", "2", "3", "1"],
-      "phases": ["laning", "midgame", "decisive_round"],
+      "roles": [
+        "4",
+        "5",
+        "2",
+        "3",
+        "1"
+      ],
+      "phases": [
+        "laning",
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "counterfactual",
       "numerator": "Modelled probability mass of death avoided after a verified save effect.",
@@ -665,19 +1568,47 @@
       "opportunity": "Direct save cast/effect on an ally in lethal-threat context.",
       "time_window": "5 seconds before through 10 seconds after effect, with longer effect-specific windows declared.",
       "space_window": "Fight/contact region or global ability scope.",
-      "exclusions": ["no direct save effect", "insufficient health/damage/cooldown state", "model outside calibration domain"],
-      "raw_inputs": ["save cast/effect", "health/damage/control", "positions", "enemy cooldowns", "survival outcome"],
+      "exclusions": [
+        "no direct save effect",
+        "insufficient health/damage/cooldown state",
+        "model outside calibration domain"
+      ],
+      "raw_inputs": [
+        "save cast/effect",
+        "health/damage/control",
+        "positions",
+        "enemy cooldowns",
+        "survival outcome"
+      ],
       "algorithm": "Compare explicit alternative simulations/models and publish probability range plus assumptions only in research output.",
       "confidence": "Counterfactual; never a factual count and never in the default player report.",
-      "known_biases": ["Unobserved future actions", "model specification dominates result", "team responses are endogenous"],
-      "test_case": "Qualitative adjudication of save episodes; no three-game release claim."
+      "known_biases": [
+        "Unobserved future actions",
+        "model specification dominates result",
+        "team responses are endogenous"
+      ],
+      "test_case": "Qualitative adjudication of save episodes; no three-game release claim.",
+      "capability_level": "V3",
+      "radar_axis": "fight",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
     },
     {
       "id": "beneficial_smoke_break_sacrifice",
       "name": "Beneficial smoke-break sacrifice",
       "business_meaning": "Research estimate that one player's smoke contact/death prevented a worse team outcome.",
-      "roles": ["4", "5", "3", "2", "1"],
-      "phases": ["midgame", "decisive_round", "reset"],
+      "roles": [
+        "4",
+        "5",
+        "3",
+        "2",
+        "1"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
       "current_class": "unavailable",
       "target_class": "counterfactual",
       "numerator": "Modelled reduction in expected team loss versus declared alternative contact paths.",
@@ -685,12 +1616,82 @@
       "opportunity": "Verified smoke break/contact with team positions, resources, visibility assumptions, and ensuing outcome.",
       "time_window": "Break through 120 seconds, with pre-break state at 10 seconds.",
       "space_window": "Break region and alternative reachable team paths.",
-      "exclusions": ["unknown breaker", "natural expiry", "incomplete team state", "no defensible alternative model"],
-      "raw_inputs": ["smoke lifecycle", "positions", "combat/objectives", "round resources", "visibility assumptions"],
+      "exclusions": [
+        "unknown breaker",
+        "natural expiry",
+        "incomplete team state",
+        "no defensible alternative model"
+      ],
+      "raw_inputs": [
+        "smoke lifecycle",
+        "positions",
+        "combat/objectives",
+        "round resources",
+        "visibility assumptions"
+      ],
       "algorithm": "Research-only alternative-outcome analysis; publish assumptions and uncertainty, never a binary positive contribution.",
       "confidence": "Counterfactual and excluded from default reports regardless of confidence.",
-      "known_biases": ["Alternative paths and team choices are unobserved", "survivorship and narrative bias"],
-      "test_case": "Manual narrative review of smoke contacts only; no automatic acceptance."
+      "known_biases": [
+        "Alternative paths and team choices are unobserved",
+        "survivorship and narrative bias"
+      ],
+      "test_case": "Manual narrative review of smoke contacts only; no automatic acceptance.",
+      "capability_level": "V3",
+      "radar_axis": "vision",
+      "official_score_eligible": false,
+      "experimental_score_eligible": true,
+      "score_direction": "higher_better"
+    },
+    {
+      "id": "observed_map_exchange_outcome_rate",
+      "name": "Observed map-exchange outcome rate",
+      "business_meaning": "Observed objective or resource outcomes during verified side-lane, split-map, siege-response, or cross-map pressure opportunities without claiming causal intent.",
+      "roles": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "phases": [
+        "midgame",
+        "decisive"
+      ],
+      "current_class": "unavailable",
+      "target_class": "derived",
+      "numerator": "Eligible map-exchange opportunities followed within the declared window by a verified tower/Roshan/Tormentor/barracks outcome or positive directly observed resource exchange for the player's team.",
+      "denominator": "Verified map-exchange opportunities in which the player is a participant in pressure, response, or opposite-side conversion.",
+      "opportunity": "A versioned side-lane, split-map, grouped-objective, siege-response, or cross-map objective episode with complete positions, participant bindings, objective state, and economy deltas.",
+      "time_window": "Episode duration plus a fixed 60-second outcome window; overlapping opportunities are deterministically merged.",
+      "space_window": "Versioned lane, jungle, objective, base, and high-ground regions.",
+      "exclusions": [
+        "missing position or economy coverage",
+        "ambiguous participant set",
+        "already-secured objective before opportunity",
+        "game-end censoring",
+        "modelled territory without direct outcome"
+      ],
+      "raw_inputs": [
+        "positions",
+        "team shapes",
+        "behavior episodes",
+        "objective events",
+        "economy deltas",
+        "participant bindings",
+        "game clock"
+      ],
+      "algorithm": "Build deterministic map-exchange opportunities, attach only directly observed outcomes inside the fixed window, and publish numerator, denominator, raw outcomes, and evidence links.",
+      "confidence": "Derived only after opportunity agreement and event precision/recall pass V2 gates; otherwise unavailable.",
+      "known_biases": [
+        "Observed exchange is not proof the pressure caused it",
+        "some strategically correct pressure produces no immediate measurable outcome"
+      ],
+      "test_case": "All verified split-map and cross-map exchange episodes in 8944475884 and 8943477775.",
+      "capability_level": "V2",
+      "radar_axis": "map",
+      "official_score_eligible": true,
+      "experimental_score_eligible": false,
+      "score_direction": "higher_better"
     }
   ]
 }
