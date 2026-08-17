@@ -2,13 +2,13 @@
 
 Date: 2026-08-12
 
-Amended: 2026-08-17
+Amended: 2026-08-18
 
 Decision owner: Paul
 
-Status: M0-M3 and the M4 functional/harness candidates accepted; public-match
-rehearsal extraction is pending independent review while P4 authority remains
-blocked
+Status: M0-M3 and the M4 functional/harness candidates accepted; the
+public-match rehearsal contract has an evidence-invalidated production-audit
+correction pending independent review while P4 authority remains blocked
 
 ## Objective
 
@@ -1470,10 +1470,12 @@ authority contracts. Its permitted production surface is closed to purpose/
 class and authority validation, embedded-root binding and bounded retrieval;
 purpose-specific readiness/evidence/root/terminal schemas and verifiers;
 value-free coverage normalization/delta; directly required typed-unavailable
-suppression/audit adapters; candidate/spec/root/preflight binding; dependent
-goldens/tests; and command/operator/runbook wording. It changes no unrelated
-insight calculations, thresholds, queues, capture, projection, delivery,
-rendering, OBS behavior, or persistence. Preserve all accepted process,
+suppression/audit production wiring; candidate/spec/root/preflight binding;
+truthful source fingerprints plus content-addressed lineage/release/evidence
+migration; dependent successor goldens/tests; and command/operator/runbook
+wording. It changes no visible insight semantics, thresholds, queues, capture,
+projection, delivery, rendering, OBS behavior, or persistence. Preserve all
+accepted process,
 timing, evidence, privacy, fault, resource, recovery, and cleanup semantics,
 and pass full independent exact-SHA review. The only acceptance pairs are
 `p4_acceptance + ti` and `p4_acceptance + public_tournament`; every other pair
@@ -1542,11 +1544,17 @@ ordering contract.
 
 The non-acceptance rehearsal may be extracted into a separately reviewed
 exact-parent successor before public-tournament authority is available. That
-package preserves the accepted TI-only P4 implementation and
-`AcceptedP4Spec` identity unchanged, adds no `public_tournament` acceptance path
-or authority root, cannot emit `ARMED`, and cannot update `DOT-64`, `DOT-62`,
-or `DOT-70`. Its only purpose is pre-TI operational rehearsal and value-free
-field-coverage measurement. The exact extraction contract is
+package preserves the accepted TI-only P4 purpose, authority, terminal behavior,
+and `AcceptedP4Spec`, adds no `public_tournament` acceptance path or authority
+root, cannot emit `ARMED`, and cannot update `DOT-64`, `DOT-62`, or `DOT-70`.
+Evidence from rejected rehearsal candidate `bf0de1d6...` proved that genuine
+eight-family suppression evidence requires a pure audit-capable ordinary
+production evaluator and therefore a truthful engine/lineage/release identity
+rotation. The focused contract defines a closed migration: old golden bytes stay
+immutable, successor differences are limited to transitively derived identity
+fields, and visible candidate/policy/P4 semantics remain unchanged. Its only
+purpose is pre-TI operational rehearsal and value-free field-coverage
+measurement. The exact extraction contract is
 `docs/specs/2026-08-17-m4-public-match-rehearsal-extraction.md`; its pass is not
 M4/P4 acceptance, and a later qualifying match still requires a fresh reviewed
 P4 candidate and readiness cycle.
