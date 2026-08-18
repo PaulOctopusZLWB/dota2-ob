@@ -735,33 +735,61 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 	case "fight_participation_count":
 		v = c.countValue(fightParticipation[acct], m)
 	case "opportunity_duration_seconds":
+		// Registry: numerator = seconds where every required field and
+		// opportunity predicate is valid; denominator = candidate seconds
+		// before exclusions; opportunity = per official phase. We count only
+		// distinct calibrated second bins that fall within the eligible phase
+		// window ([0, eligible_seconds)); a bin beyond the eligible phase
+		// coverage is excluded, never counted. Without a validated phase
+		// denominator the metric fails closed (unavailable).
 		bins := c.heroStateSecs[acct]
 		if len(bins) == 0 {
 			v.UnavailableReason = "position_state_missing"
+		} else if phaseDuration == nil || *phaseDuration <= 0 {
+			v.UnavailableReason = "eligible_phase_denominator_missing"
 		} else {
-			n := int64(len(bins))
-			v = c.countValue(n, m)
-			if phaseDuration != nil {
-				v.Denominator = phaseDuration
+			eligible := int64(*phaseDuration)
+			valid := int64(0)
+			for bin := range bins {
+				if bin >= 0 && bin < eligible {
+					valid++
+				}
 			}
-			v.EvidenceCount = int64(len(c.evidenceFor(acct, "opportunity_duration_seconds")))
+			// Invariant: opportunity seconds can never exceed the eligible
+			// phase denominator. If the count would exceed it, the field gate
+			// failed — fail closed rather than publish an invalid value.
+			if valid > eligible {
+				v.UnavailableReason = "opportunity_seconds_exceed_eligible_phase"
+			} else {
+				v = c.countValue(valid, m)
+				v.Denominator = phaseDuration
+				v.ExcludedCount = int64(len(bins)) - valid
+				v.EvidenceCount = int64(len(c.evidenceFor(acct, "opportunity_duration_seconds")))
+			}
 		}
 	case "hero_damage_total":
 		v = c.floatValue(c.heroDamage[acct], m)
 	case "hero_healing_total":
 		v = c.floatValue(c.heroHealing[acct], m)
 	case "heal_dispel_save_casts":
-		if c.healCasts[acct] == 0 && len(c.evidenceFor(acct, "heal_dispel_save_casts")) == 0 {
-			v.UnavailableReason = "heal_cast_events_missing"
-		} else {
-			v = c.countValue(c.healCasts[acct], m)
-		}
+		// Registry: opportunity-normalized save/dispel casts keyed on ready
+		// ability/item sources with a valid ally target (heal, dispel,
+		// health/status, cooldown, position evidence). The accepted adapter
+		// only emits raw heal facts (including regen ticks) with no ready-
+		// source / cooldown / target-need evidence, so the registry numerator
+		// and opportunity denominator cannot be resolved. Publishing raw heal
+		// counts as "save casts" would violate the definition, so this metric
+		// is explicitly unavailable at its exact field gate.
+		v.UnavailableReason = "save_cast_opportunity_gate_not_met:requires_ready_source_cooldown_target_need_evidence_not_in_accepted_adapter"
 	case "smoke_activation_participation":
-		if c.smokeParticles[acct] == 0 && len(c.evidenceFor(acct, "smoke_activation_participation")) == 0 {
-			v.UnavailableReason = "smoke_modifier_events_missing"
-		} else {
-			v = c.countValue(c.smokeParticles[acct], m)
-		}
+		// Registry: ratio_0_1 = typed smoke events/participations (numerator)
+		// over verified smoke charges available to the team and eligible alive
+		// team members (denominator), joined to the consumed charge and
+		// modifier lifecycle. The accepted adapter emits smoke modifier
+		// applications but no charge inventory or eligible-member denominator,
+		// so the registry ratio cannot be resolved; a raw modifier count is
+		// not the defined ratio. Explicitly unavailable at its exact gate.
+		v.UnavailableReason = "smoke_charge_opportunity_gate_not_met:requires_smoke_charge_inventory_and_eligible_member_denominator_not_in_accepted_adapter"
 	case "control_duration_seconds":
 		v.UnavailableReason = "control_modifier_registry_not_in_accepted_adapter"
 	case "phase_duration_seconds":

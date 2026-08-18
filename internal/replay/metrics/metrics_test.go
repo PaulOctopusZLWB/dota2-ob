@@ -313,10 +313,12 @@ func TestOpportunityDurationCountsSecondsNotSamples(t *testing.T) {
 		return &facts.Fact{Family: facts.FamilyHeroState, GameSecond: sec, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.HeroStateSample{AccountID: "a1", PosX: &x, PosY: &y})}
 	}
 	// Two samples at 0.0, one at 0.5, one at 1.0 → only seconds 0 and 1.
+	// The sample at the exclusive phase end is outside the eligible window.
 	calc.Feed(pos(0.0, 1))
 	calc.Feed(pos(0.4, 2))
 	calc.Feed(pos(0.6, 3))
 	calc.Feed(pos(1.0, 4))
+	calc.Feed(pos(2.0, 5))
 	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 2}}}
 	out := calc.Result(nil, ph)
 	var v *Value
@@ -331,6 +333,32 @@ func TestOpportunityDurationCountsSecondsNotSamples(t *testing.T) {
 	if *v.Value != 2 {
 		t.Fatalf("opportunity_duration_seconds=%v want 2 distinct eligible seconds", *v.Value)
 	}
+	if v.Denominator == nil || *v.Denominator != 2 {
+		t.Fatalf("opportunity_duration_seconds denominator=%v want 2", v.Denominator)
+	}
+	if *v.Value > *v.Denominator {
+		t.Fatalf("opportunity_duration_seconds value=%v exceeds denominator=%v", *v.Value, *v.Denominator)
+	}
+	if v.ExcludedCount != 1 {
+		t.Fatalf("opportunity_duration_seconds excluded=%d want 1 out-of-window bin", v.ExcludedCount)
+	}
+
+	// Position samples without a validated official-phase denominator fail
+	// closed instead of publishing sample-derived opportunity seconds.
+	noPhase := NewCalculator("m2", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	noPhase.SetRegistry(reg)
+	noPhase.SetRoles(map[string]string{"a1": "1"})
+	noPhase.Feed(pos(0.0, 6))
+	noPhaseOut := noPhase.Result(nil, nil)
+	for _, u := range noPhaseOut.Unavailable {
+		if u.AccountID == "a1" && u.MetricID == "opportunity_duration_seconds" {
+			if u.UnavailableReason != "eligible_phase_denominator_missing" {
+				t.Fatalf("opportunity_duration_seconds unavailable reason=%q", u.UnavailableReason)
+			}
+			return
+		}
+	}
+	t.Fatal("opportunity_duration_seconds did not fail closed without phase denominator")
 }
 
 // TestPublishedEvidenceLineageNonEmpty proves every published value carries a
@@ -426,9 +454,9 @@ func TestRateMetricsDenominatorReconciliation(t *testing.T) {
 	}
 }
 
-// TestAdditionalV1Metrics proves heal_dispel_save_casts, smoke participation,
-// and buyback round participation publish from the accepted facts, and economy
-// attribution resolves from GOLD/XP target heroes.
+// TestAdditionalV1Metrics proves raw heal ticks and smoke modifier additions do
+// not publish the registry's opportunity-normalized cast/ratio metrics, while
+// buyback round participation still publishes from accepted facts.
 func TestAdditionalV1Metrics(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
@@ -437,9 +465,10 @@ func TestAdditionalV1Metrics(t *testing.T) {
 	calc.SetFactsCoverage([]string{"combat_event", "modifier_event", "death_respawn_buyback_event"})
 	h := int64(100)
 	d := int64(50)
-	// heal cast
+	// A raw heal fact may be a regen tick; it does not prove a ready-source cast.
 	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 10, Seq: 1, SourceSeq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "heal", ActorAccount: "a1", TargetAccount: "b1", Value: &h})})
-	// smoke modifier add on a1 and b1
+	// Smoke modifier additions do not provide the charge/member denominator
+	// required by the registry's ratio definition.
 	m := "modifier_smoke_of_deceit"
 	calc.Feed(&facts.Fact{Family: facts.FamilyModifier, GameSecond: 20, Seq: 2, SourceSeq: 2, Payload: mustJSON(&facts.ModifierFact{Kind: "add", Modifier: m, AccountID: "a1"})})
 	calc.Feed(&facts.Fact{Family: facts.FamilyModifier, GameSecond: 20, Seq: 3, SourceSeq: 3, Payload: mustJSON(&facts.ModifierFact{Kind: "add", Modifier: m, AccountID: "b1"})})
@@ -454,14 +483,26 @@ func TestAdditionalV1Metrics(t *testing.T) {
 		}
 		got[v.AccountID][v.MetricID] = v
 	}
-	if got["a1"]["heal_dispel_save_casts"].IntValue == nil || *got["a1"]["heal_dispel_save_casts"].IntValue != 1 {
-		t.Fatalf("heal_dispel_save_casts a1=%+v want 1", got["a1"]["heal_dispel_save_casts"])
+	unavailable := map[string]map[string]Value{}
+	for _, u := range out.Unavailable {
+		if unavailable[u.AccountID] == nil {
+			unavailable[u.AccountID] = map[string]Value{}
+		}
+		unavailable[u.AccountID][u.MetricID] = u
 	}
-	if got["a1"]["smoke_activation_participation"].IntValue == nil || *got["a1"]["smoke_activation_participation"].IntValue != 1 {
-		t.Fatalf("smoke_activation_participation a1=%+v want 1", got["a1"]["smoke_activation_participation"])
+	if v, ok := got["a1"]["heal_dispel_save_casts"]; ok {
+		t.Fatalf("raw heal fact published as heal_dispel_save_casts: %+v", v)
 	}
-	if got["b1"]["smoke_activation_participation"].IntValue == nil || *got["b1"]["smoke_activation_participation"].IntValue != 1 {
-		t.Fatalf("smoke_activation_participation b1=%+v want 1", got["b1"]["smoke_activation_participation"])
+	if u := unavailable["a1"]["heal_dispel_save_casts"]; u.UnavailableReason != "save_cast_opportunity_gate_not_met:requires_ready_source_cooldown_target_need_evidence_not_in_accepted_adapter" {
+		t.Fatalf("heal_dispel_save_casts unavailable=%+v", u)
+	}
+	for _, acct := range []string{"a1", "b1"} {
+		if v, ok := got[acct]["smoke_activation_participation"]; ok {
+			t.Fatalf("raw smoke modifier published as ratio for %s: %+v", acct, v)
+		}
+		if u := unavailable[acct]["smoke_activation_participation"]; u.UnavailableReason != "smoke_charge_opportunity_gate_not_met:requires_smoke_charge_inventory_and_eligible_member_denominator_not_in_accepted_adapter" {
+			t.Fatalf("smoke_activation_participation unavailable for %s=%+v", acct, u)
+		}
 	}
 	bb := got["a1"]["buyback_round_participation"]
 	if bb.Value == nil || *bb.Value != 1.0 {
