@@ -28,6 +28,7 @@ const (
 var rehearsalCheckRegistry = [...]string{
 	"accepted_ancestry", "candidate_commit", "candidate_parent", "captured_schedule", "clean_tree",
 	"draft_pr_head", "exclusive_listener", "remote_branch_head", "rehearsal_identity", "toolchain",
+	"gsi_arm",
 }
 
 var rehearsalSuccessorV3Sources = []string{
@@ -90,7 +91,42 @@ type RehearsalPreflightV1 struct {
 	AcceptanceEligible bool               `json:"acceptance_eligible"`
 	AcceptanceGate     string             `json:"acceptance_gate"`
 	RootOwnerSHA256    string             `json:"root_owner_sha256"`
+	ArmSHA256          string             `json:"arm_sha256,omitempty"`
+	GoExecutable       string             `json:"go_executable,omitempty"`
+	GoExecutableSHA256 string             `json:"go_executable_sha256,omitempty"`
 	PreflightSHA256    string             `json:"preflight_sha256,omitempty"`
+}
+
+type RehearsalArmV1 struct {
+	SchemaVersion    string `json:"schema_version"`
+	Purpose          string `json:"purpose"`
+	SessionID        string `json:"session_id"`
+	CandidateCommit  string `json:"candidate_commit"`
+	RootOwnerSHA256  string `json:"root_owner_sha256"`
+	ConfigSourcePath string `json:"config_source_path"`
+	ConfigTargetPath string `json:"config_target_path"`
+	ConfigSHA256     string `json:"config_sha256"`
+	ConfigBytes      int64  `json:"config_bytes"`
+	ConfigDevice     uint64 `json:"config_device"`
+	ConfigInode      uint64 `json:"config_inode"`
+	ArmToken         string `json:"arm_token,omitempty"`
+}
+
+type RehearsalArmRecoveryV1 struct {
+	SchemaVersion        string         `json:"schema_version"`
+	Purpose              string         `json:"purpose"`
+	State                string         `json:"state"`
+	Arm                  RehearsalArmV1 `json:"arm"`
+	QuarantinePath       string         `json:"quarantine_path,omitempty"`
+	QuarantineSHA256     string         `json:"quarantine_sha256,omitempty"`
+	QuarantineBytes      int64          `json:"quarantine_bytes,omitempty"`
+	QuarantineDevice     uint64         `json:"quarantine_device,omitempty"`
+	QuarantineInode      uint64         `json:"quarantine_inode,omitempty"`
+	OccupiedTargetSHA256 string         `json:"occupied_target_sha256,omitempty"`
+	OccupiedTargetBytes  int64          `json:"occupied_target_bytes,omitempty"`
+	OccupiedTargetDevice uint64         `json:"occupied_target_device,omitempty"`
+	OccupiedTargetInode  uint64         `json:"occupied_target_inode,omitempty"`
+	RecoverySHA256       string         `json:"recovery_sha256"`
 }
 
 type RehearsalRootOwnerV1 struct {
@@ -182,30 +218,37 @@ type RehearsalProducerArtifactV1 struct {
 }
 
 type RehearsalProducerEvidenceV1 struct {
-	SchemaVersion      string                               `json:"schema_version"`
-	Purpose            string                               `json:"purpose"`
-	SessionID          string                               `json:"session_id"`
-	PreflightSHA256    string                               `json:"preflight_sha256"`
-	RootOwnerSHA256    string                               `json:"root_owner_sha256"`
-	RunID              string                               `json:"run_id"`
-	SourceMode         string                               `json:"source_mode"`
-	Steps              []RehearsalProducerStepV1            `json:"steps"`
-	Artifacts          []RehearsalProducerArtifactV1        `json:"artifacts"`
-	ProductPID         int                                  `json:"product_pid"`
-	OBSPID             int                                  `json:"obs_pid"`
-	RecoveryPID        int                                  `json:"recovery_pid"`
-	DotaContinuity     []RehearsalProcessObservationV1      `json:"dota_continuity"`
-	RecoveryProcess    []RehearsalOwnedProcessObservationV1 `json:"recovery_process"`
-	OperatorActions    []string                             `json:"operator_actions"`
-	ResourceSamples    uint64                               `json:"resource_samples"`
-	VisibilitySamples  uint64                               `json:"visibility_samples"`
-	RawRecords         uint64                               `json:"raw_records"`
-	RecordingFinalized bool                                 `json:"recording_finalized"`
-	Reconciled         bool                                 `json:"reconciled"`
-	RecoveryByteEqual  bool                                 `json:"recovery_byte_equal"`
-	CleanShutdown      bool                                 `json:"clean_shutdown"`
-	PhysicalMatch      bool                                 `json:"physical_match"`
-	ContentSHA256      string                               `json:"content_sha256,omitempty"`
+	SchemaVersion          string                               `json:"schema_version"`
+	Purpose                string                               `json:"purpose"`
+	SessionID              string                               `json:"session_id"`
+	PreflightSHA256        string                               `json:"preflight_sha256"`
+	RootOwnerSHA256        string                               `json:"root_owner_sha256"`
+	RunID                  string                               `json:"run_id"`
+	SourceMode             string                               `json:"source_mode"`
+	Steps                  []RehearsalProducerStepV1            `json:"steps"`
+	Artifacts              []RehearsalProducerArtifactV1        `json:"artifacts"`
+	ProductPID             int                                  `json:"product_pid"`
+	OBSPID                 int                                  `json:"obs_pid"`
+	OBSLauncherPID         int                                  `json:"obs_flatpak_launcher_pid,omitempty"`
+	OBSSandboxPID          int                                  `json:"obs_flatpak_sandbox_pid,omitempty"`
+	OBSInstanceID          string                               `json:"obs_flatpak_instance_id,omitempty"`
+	OBSExecutable          RehearsalOwnedProcessIdentityV1      `json:"obs_executable_identity,omitempty"`
+	OBSProcesses           []RehearsalOwnedProcessIdentityV1    `json:"obs_process_population,omitempty"`
+	OBSStartCorrelation    string                               `json:"obs_start_correlation_sha256,omitempty"`
+	OBSTerminalCorrelation string                               `json:"obs_terminal_correlation_sha256,omitempty"`
+	RecoveryPID            int                                  `json:"recovery_pid"`
+	DotaContinuity         []RehearsalProcessObservationV1      `json:"dota_continuity"`
+	RecoveryProcess        []RehearsalOwnedProcessObservationV1 `json:"recovery_process"`
+	OperatorActions        []string                             `json:"operator_actions"`
+	ResourceSamples        uint64                               `json:"resource_samples"`
+	VisibilitySamples      uint64                               `json:"visibility_samples"`
+	RawRecords             uint64                               `json:"raw_records"`
+	RecordingFinalized     bool                                 `json:"recording_finalized"`
+	Reconciled             bool                                 `json:"reconciled"`
+	RecoveryByteEqual      bool                                 `json:"recovery_byte_equal"`
+	CleanShutdown          bool                                 `json:"clean_shutdown"`
+	PhysicalMatch          bool                                 `json:"physical_match"`
+	ContentSHA256          string                               `json:"content_sha256,omitempty"`
 }
 
 type RehearsalTerminalV1 struct {
@@ -246,10 +289,11 @@ type RehearsalPreflightConfig struct {
 }
 
 type RehearsalAttemptConfig struct {
-	DataRoot string
-	RepoRoot string
-	identity func() (RehearsalDotaIdentityV1, error)
-	producer rehearsalLifecycleDriver
+	DataRoot     string
+	RepoRoot     string
+	OBSOnlySmoke bool
+	identity     func() (RehearsalDotaIdentityV1, error)
+	producer     rehearsalLifecycleDriver
 }
 
 type rehearsalClock func() time.Time

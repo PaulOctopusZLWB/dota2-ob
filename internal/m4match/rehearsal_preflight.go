@@ -12,10 +12,11 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-const requiredRehearsalParent = "abb4210257f26364c2a539de90e386f411f3229a"
+const requiredRehearsalParent = "86a91b827e861703908843d0ccff4a8ef46a316e"
 
 type rehearsalPreflightProbe struct {
 	commit, parent, branch, remoteHead, prHead             string
+	goExecutable, goExecutableSHA256                       string
 	clean, ancestry, fixture, listener, toolchain, draftPR bool
 }
 
@@ -47,21 +48,13 @@ func RehearsalPreflight(ctx context.Context, config RehearsalPreflightConfig) (R
 		"remote_branch_head": {ID: "remote_branch_head", Passed: probe.remoteHead == probe.commit, Code: passCode(probe.remoteHead == probe.commit, "remote_branch_head_mismatch")},
 		"rehearsal_identity": {ID: "rehearsal_identity", Passed: AcceptedRehearsalSpec == "1d793bc3d1d38b3ce3fd9e97005a5d4e45e928b2" && AcceptedP4Spec == "271cc47d503828528b7c69212deb4d22683cb715", Code: "ok"},
 		"toolchain":          {ID: "toolchain", Passed: probe.toolchain, Code: passCode(probe.toolchain, "toolchain_unavailable")},
+		"gsi_arm":            {ID: "gsi_arm", Passed: false, Code: "preflight_checks_failed_before_arm"},
 	}
 	preflight := RehearsalPreflightV1{
 		SchemaVersion: RehearsalPreflightSchemaV1, Purpose: RehearsalPurpose, MatchClass: RehearsalMatchClass,
 		AcceptedSpec: AcceptedRehearsalSpec, AcceptedP4Spec: AcceptedP4Spec, CandidateCommit: probe.commit, CandidateParent: probe.parent,
 		SessionID: sessionID, ConsoleState: RehearsalReady, ClaimsP4: false, QualifyingMatch: false, AcceptanceEligible: false, AcceptanceGate: "none",
-	}
-	for _, id := range rehearsalCheckRegistry {
-		check := checksByID[id]
-		preflight.Checks = append(preflight.Checks, check)
-		if !check.Passed {
-			preflight.ConsoleState = RehearsalRefused
-		}
-	}
-	if preflight.ConsoleState == RehearsalReady {
-		preflight.HumanInstruction = RehearsalInstruction
+		GoExecutable: probe.goExecutable, GoExecutableSHA256: probe.goExecutableSHA256,
 	}
 	for _, dir := range []string{"rehearsal", filepath.Join("data", "sessions", sessionID)} {
 		if err := rootMkdirAll(filepath.Join(lease.abs, dir), 0o700); err != nil {
@@ -95,15 +88,79 @@ func RehearsalPreflight(ctx context.Context, config RehearsalPreflightConfig) (R
 	if err := writeJSON(filepath.Join(lease.abs, "rehearsal", "owner.json"), owner, 0o600); err != nil {
 		return RehearsalPreflightV1{}, err
 	}
+	if _, err := Prepare(lease.abs, 1920, 1080); err != nil {
+		return RehearsalPreflightV1{}, err
+	}
+	readyForArm := true
+	var armed *RehearsalArmV1
+	rollback := func(primary error) (RehearsalPreflightV1, error) {
+		if armed == nil {
+			return RehearsalPreflightV1{}, primary
+		}
+		return preflight, errors.Join(primary, rollbackArmedGSI(lease.abs, *armed))
+	}
+	for id, check := range checksByID {
+		if id != "gsi_arm" {
+			readyForArm = readyForArm && check.Passed
+		}
+	}
+	if readyForArm {
+		arm, armErr := armRehearsalGSI(lease.abs, preflight)
+		if armErr == nil {
+			armed = &arm
+			preflight.ArmSHA256, armErr = rehearsalArmBindingID(arm)
+			if armErr != nil {
+				return rollback(armErr)
+			}
+		}
+		if armErr == nil {
+			checksByID["gsi_arm"] = RehearsalCheckV1{ID: "gsi_arm", Passed: true, Code: "ok"}
+		} else {
+			checksByID["gsi_arm"] = RehearsalCheckV1{ID: "gsi_arm", Passed: false, Code: boundedFailure(armErr)}
+		}
+	}
+	for _, id := range rehearsalCheckRegistry {
+		check := checksByID[id]
+		preflight.Checks = append(preflight.Checks, check)
+		if !check.Passed {
+			preflight.ConsoleState = RehearsalRefused
+		}
+	}
+	if preflight.ConsoleState == RehearsalReady {
+		preflight.HumanInstruction = RehearsalInstruction
+	}
+	if armed != nil {
+		if err := rehearsalArmFault("preflight_after_arm"); err != nil {
+			return rollback(err)
+		}
+		if err := rehearsalArmFault("preflight_content_id"); err != nil {
+			return rollback(err)
+		}
+	}
 	preflight.PreflightSHA256, err = rehearsalPreflightContentID(preflight)
 	if err != nil {
-		return RehearsalPreflightV1{}, err
+		return rollback(err)
+	}
+	if armed != nil {
+		if err := rehearsalArmFault("preflight_json"); err != nil {
+			return rollback(err)
+		}
 	}
 	if err := writeJSON(filepath.Join(lease.abs, "rehearsal", "preflight.json"), preflight, 0o600); err != nil {
-		return RehearsalPreflightV1{}, err
+		return rollback(err)
+	}
+	if armed != nil {
+		if err := rehearsalArmFault("preflight_seal"); err != nil {
+			return rollback(err)
+		}
 	}
 	if err := writePrivate(filepath.Join(lease.abs, "rehearsal", "preflight.sha256"), []byte(preflight.PreflightSHA256+"\n")); err != nil {
-		return RehearsalPreflightV1{}, err
+		return rollback(err)
+	}
+	if armed != nil {
+		if err := commitArmedGSI(lease.abs, *armed); err != nil {
+			return rollback(err)
+		}
 	}
 	return preflight, nil
 }
@@ -135,7 +192,7 @@ func inspectRehearsalPreflight(ctx context.Context, repo string) rehearsalPrefli
 			Title string `json:"title"`
 		}
 		if json.Unmarshal([]byte(prJSON), &pr) == nil {
-			p.prHead, p.draftPR = pr.Head, pr.Draft && pr.State == "OPEN" && strings.Contains(pr.Title, "DOT-84")
+			p.prHead, p.draftPR = pr.Head, pr.Draft && pr.State == "OPEN" && strings.Contains(pr.Title, "DOT-87")
 		}
 	}
 	listener, listenErr := net.Listen("tcp", CaptureAddress)
@@ -143,8 +200,11 @@ func inspectRehearsalPreflight(ctx context.Context, repo string) rehearsalPrefli
 		p.listener = true
 		_ = listener.Close()
 	}
-	_, toolErr := runText(ctx, repo, "go", "version")
-	p.toolchain = toolErr == nil
+	p.goExecutable, p.goExecutableSHA256, _ = resolveRehearsalGo()
+	if p.goExecutable != "" {
+		_, toolErr := runText(ctx, repo, p.goExecutable, "version")
+		p.toolchain = toolErr == nil
+	}
 	return p
 }
 
@@ -201,7 +261,7 @@ func readRehearsalPreflight(root string) (RehearsalPreflightV1, error) {
 
 func validateRehearsalPreflight(value RehearsalPreflightV1) error {
 	if value.SchemaVersion != RehearsalPreflightSchemaV1 || value.Purpose != RehearsalPurpose || value.MatchClass != RehearsalMatchClass ||
-		value.AcceptedSpec != AcceptedRehearsalSpec || value.AcceptedP4Spec != AcceptedP4Spec || value.ClaimsP4 || value.QualifyingMatch || value.AcceptanceEligible || value.AcceptanceGate != "none" || !validLowerSHA256(value.RootOwnerSHA256) || len(value.Checks) != len(rehearsalCheckRegistry) {
+		value.AcceptedSpec != AcceptedRehearsalSpec || value.AcceptedP4Spec != AcceptedP4Spec || value.ClaimsP4 || value.QualifyingMatch || value.AcceptanceEligible || value.AcceptanceGate != "none" || !validLowerSHA256(value.RootOwnerSHA256) || len(value.Checks) != len(rehearsalCheckRegistry) || (value.GoExecutable != "" && (!filepath.IsAbs(value.GoExecutable) || !validLowerSHA256(value.GoExecutableSHA256))) {
 		return errors.New("rehearsal preflight contract mismatch")
 	}
 	ready := true
@@ -213,6 +273,9 @@ func validateRehearsalPreflight(value RehearsalPreflightV1) error {
 	}
 	if ready && (value.ConsoleState != RehearsalReady || value.HumanInstruction != RehearsalInstruction) {
 		return errors.New("ready rehearsal preflight state mismatch")
+	}
+	if ready && (!validLowerSHA256(value.ArmSHA256) || value.GoExecutable == "" || !validLowerSHA256(value.GoExecutableSHA256)) {
+		return errors.New("ready rehearsal startup binding absent")
 	}
 	if !ready && (value.ConsoleState != RehearsalRefused || value.HumanInstruction != "") {
 		return errors.New("refused rehearsal preflight state mismatch")

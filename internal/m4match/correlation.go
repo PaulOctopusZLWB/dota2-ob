@@ -276,11 +276,13 @@ func readProcessCorrelationIdentity(procRoot string, pid int) (processCorrelatio
 	if err != nil {
 		return processCorrelationIdentity{}, err
 	}
-	executable, err := os.Readlink(filepath.Join(base, "exe"))
-	if err != nil {
+	if _, err := os.Readlink(filepath.Join(base, "exe")); err != nil {
 		return processCorrelationIdentity{}, err
 	}
-	executableHash, _, err := fileSHA(executable)
+	// Hash through the process descriptor. A Flatpak executable may be named
+	// /app/bin/obs inside its mount namespace and have no corresponding host
+	// path, while /proc/<pid>/exe remains an exact opened executable identity.
+	executableHash, _, err := fileSHA(filepath.Join(base, "exe"))
 	if err != nil {
 		return processCorrelationIdentity{}, err
 	}

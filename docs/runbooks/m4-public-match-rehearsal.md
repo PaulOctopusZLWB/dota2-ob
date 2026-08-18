@@ -4,15 +4,21 @@ This harness is evidence collection only. It does not authorize or select a matc
 
 The compiled rehearsal contract is `1d793bc3d1d38b3ce3fd9e97005a5d4e45e928b2`. The P4 contract remains `271cc47d503828528b7c69212deb4d22683cb715`. Rehearsal and P4 roots reject each other in both directions.
 
-### Commands
+### ARM -> human launch -> ATTEMPT/JOIN
 
-Run preflight from the exact pushed candidate and retain its printed root and cleanup token:
+Before Dota is launched, arm from the exact pushed candidate. `rehearsal-arm` creates the owned root, binds the exact Go executable, installs the exact root-owned GSI bytes with no-overwrite semantics, and seals a deterministic `arm_sha256` binding in the receipt. The physical cleanup token is retained as `arm_token` in `rehearsal/arm.json`:
 
 ```sh
-m4-match rehearsal-preflight --data-root /var/tmp/<fresh-DOT-84-root> --repo-root <exact-candidate-checkout>
+m4-match rehearsal-arm --data-root /var/tmp/<fresh-DOT-87-root> --repo-root <exact-candidate-checkout>
 ```
 
-Only after a `REHEARSAL_READY` receipt may an operator manually start Dota 2 and join the selected public match. The attempt consumes only the harness-owned root and its fixed raw path; it accepts no caller paths, hashes, counters, booleans, or success assertions. It builds and starts the exact product, starts isolated OBS recording, owns capture/readiness/sampling/finalization/shutdown handles, retains the operator-input journal, and performs raw-only no-cache recovery before sealing:
+ARM is transactional: after the installed GSI's physical identity and token are known, a synced and verified `rehearsal/arm-recovery.json` intent is created before any later arm/preflight hashing, JSON, or sealing step. A successful ready seal removes that provisional intent. Any intervening failure quarantines and validates the owned inode before removal; if rollback cannot complete, the pre-provisioned record retains the token, target, and deterministic quarantine path for `rehearsal-disarm`. Recovery-persistence failures are reported and must end with successful owned-entry rollback.
+
+The GSI file is first created as an unnamed inode in the target directory. ARM binds its descriptor identity, copies and verifies its content, syncs the inode, and durably pre-provisions recovery before atomically linking that exact inode at the configured path with no-overwrite semantics. A descriptor `Stat` failure or missing physical `Stat_t` therefore closes an unlinked inode and leaves the configured path absent; an unrelated entry that races into the final name is preserved and ARM refuses publication.
+
+Cleanup first atomically moves the configured pathname aside. It deletes the quarantine only after positively matching the owned physical identity. If the quarantined entry is unrelated and another unrelated entry already occupies the configured pathname, neither entry is deleted: the quarantine is retained and `rehearsal/arm-cleanup-recovery.json` records both physical identities and hashes as a token-gated, machine-checkable recovery result. `rehearsal-disarm` preserves both while the target remains occupied and can restore the retained entry only after the target is absent and the recorded quarantine identity still matches. Zero identity is never accepted for deletion.
+
+Only after a `REHEARSAL_READY` receipt may the human launch Dota 2, then manually join the selected public match. Do not launch Dota before ARM. The attempt consumes and revalidates the retained arm record; it does not restage GSI. It builds with the bound Go executable, starts the exact product, and starts a new Flatpak OBS instance whose real instance ID/PID and root-local HOME/config/data/cache/recording paths are verified:
 
 ```sh
 m4-match rehearsal-attempt --data-root <harness-root> --repo-root <exact-candidate-checkout>
@@ -20,7 +26,15 @@ m4-match rehearsal-verify --data-root <harness-root> --repo-root <exact-candidat
 m4-match rehearsal-cleanup --data-root <harness-root> --repo-root <exact-candidate-checkout> --confirm-terminal-sha256 <cleanup-token>
 ```
 
-`rehearsal-attempt` exits zero only when its `rehearsal_completed` receipt passes the independent verifier. Every refusal, failed or partial attempt, unavailable or drifting Dota identity, evidence mismatch, and verifier failure prints its canonical receipt and exits nonzero. Cleanup is verifier- and token-gated; a wrong token preserves the root.
+For cancellation before ATTEMPT, remove only the exact still-owned GSI file with its arm token. A wrong token, changed inode, changed bytes, symlink, or substituted path is refused:
+
+```sh
+m4-match rehearsal-disarm --data-root <harness-root> --repo-root <exact-candidate-checkout> --confirm-arm-sha256 "$(jq -r .arm_token <harness-root>/rehearsal/arm.json)"
+```
+
+Recovery after interruption is fail-closed: first inspect `flatpak ps --columns=instance,pid,child-pid,application`; never use global `pkill`, `killall`, or an application-wide stop. The harness records the `--instance-id-fd` value before process discovery and uses that exact ID on every pre-bind failure, then waits for the launcher, sandbox, discovered helpers, and real OBS identity to exit before closing logs. If producer evidence names an owned instance still present, stop only that exact ID with `flatpak kill <instance-id>`, wait for its process population to disappear, then run the token-gated cleanup command. Never stop a pre-existing or unrecorded OBS instance.
+
+`rehearsal-attempt` exits zero only when its `rehearsal_completed` receipt passes the independent verifier. Every refusal, zero-frame abort, failed or partial attempt, unavailable or drifting Dota identity, evidence mismatch, and verifier failure prints a canonical failed receipt and exits nonzero. All terminal paths stop the exact owned OBS instance and close its recording/logs before hashing and sealing. Cleanup is verifier- and token-gated; a wrong token preserves the root.
 
 The producer seal cross-links process step receipts and content-addressed product, raw, operator, resource, visibility, recording, final-plane, recovery, and reconciliation artifacts. Its capture loop observes the acquired Dota identity before admitting each new raw sequence, binds the exact RawRecordV3 SHA-256 to that observation, and checks separate capture-terminal and producer-terminal boundaries. A later replay of the file cannot replace these producer-time receipts.
 

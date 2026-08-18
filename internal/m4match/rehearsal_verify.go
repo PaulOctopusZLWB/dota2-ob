@@ -225,7 +225,7 @@ func verifyProducerEvidenceFromRetainedInputs(ctx context.Context, root, repo st
 	if sourceErr != nil || recoveryErr != nil || sourceRaw != recoveryRaw {
 		return errors.New("producer recovery input is not byte-equal to retained raw")
 	}
-	expectedBinary, expectedExecutableSHA256, removeExpectedBuild, buildErr := buildExactCandidateExecutable(ctx, repo, preflight.CandidateCommit)
+	expectedBinary, expectedExecutableSHA256, removeExpectedBuild, buildErr := buildExactCandidateExecutable(ctx, repo, preflight.CandidateCommit, preflight.GoExecutable, preflight.GoExecutableSHA256)
 	if buildErr != nil {
 		return errors.New("independent exact-candidate executable build failed")
 	}
@@ -248,9 +248,19 @@ func verifyProducerEvidenceFromRetainedInputs(ctx context.Context, root, repo st
 	return nil
 }
 
-func buildExactCandidateExecutable(ctx context.Context, repo, candidateCommit string) (string, string, func(), error) {
+func buildExactCandidateExecutable(ctx context.Context, repo, candidateCommit string, toolchain ...string) (string, string, func(), error) {
 	if !validLowerSHA1(candidateCommit) {
 		return "", "", func() {}, errors.New("candidate commit identity invalid")
+	}
+	goExecutable, goExecutableSHA256 := "", ""
+	if len(toolchain) == 2 {
+		goExecutable, goExecutableSHA256 = toolchain[0], toolchain[1]
+	} else {
+		goExecutable, goExecutableSHA256, _ = resolveRehearsalGo()
+	}
+	goHash, _, goErr := fileSHA(goExecutable)
+	if goErr != nil || goHash != goExecutableSHA256 {
+		return "", "", func() {}, errors.New("bound Go executable identity changed")
 	}
 	root, err := os.MkdirTemp(isolatedBase, "dot84-candidate-build-")
 	if err != nil {
@@ -275,7 +285,7 @@ func buildExactCandidateExecutable(ctx context.Context, repo, candidateCommit st
 		return "", "", func() {}, err
 	}
 	binary := filepath.Join(root, "dota2-ob")
-	buildCommand := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/dota2-ob")
+	buildCommand := exec.CommandContext(ctx, goExecutable, "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/dota2-ob")
 	buildCommand.Dir = source
 	if err := buildCommand.Run(); err != nil {
 		cleanup()
