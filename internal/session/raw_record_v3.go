@@ -17,6 +17,21 @@ const maxEncodedRecordBytes = 4*((maxRawBodyBytes+2)/3) + 4096
 
 func MaxEncodedRecordBytes() int { return maxEncodedRecordBytes }
 
+// RecordV3SHA256 returns the digest of the exact canonical JSONL frame,
+// including its required LF terminator. It uses the same encoder as capture so
+// production evaluation and replay bind the retained raw record, not merely
+// the decoded GSI payload.
+func RecordV3SHA256(record *Record) (string, error) {
+	if record == nil || record.SchemaVersion != 3 || record.Sequence == 0 {
+		return "", errors.New("invalid V3 record identity")
+	}
+	hash := sha256.New()
+	if err := writeRawRecordV3(hash, record); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 // DecodeRecordV3 validates one complete, newline-free V3 frame and returns
 // owned exact request bytes. Callers must release the record after processing.
 func DecodeRecordV3(line []byte, sessionID string, sequence uint64) (*Record, error) {

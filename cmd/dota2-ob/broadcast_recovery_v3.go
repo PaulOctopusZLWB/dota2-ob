@@ -12,31 +12,33 @@ import (
 )
 
 type liveOnlyObservationResolver struct {
-	raw      *observationResolver
-	history  contracts.HistoryAvailabilityBindingV1
-	lineage  contracts.PolicyLineageManifestV3
-	previous *contracts.LiveObservationV1
-	evaluate func(insight.LiveOnlyInput, insight.Config) []contracts.InsightCandidateV1
+	raw          *observationResolver
+	history      contracts.HistoryAvailabilityBindingV1
+	lineage      contracts.PolicyLineageManifestV3
+	availability insight.LiveOnlyAvailabilityV1
+	previous     *contracts.LiveObservationV1
+	evaluate     func(insight.LiveOnlyInputV2, insight.Config) insight.LiveOnlyEvaluationV2
 }
 
-func newLiveOnlyObservationResolver(rawPath, sessionID string, artifacts liveOnlyPolicyArtifacts, mapObservation func(*session.Record) (contracts.LiveObservationV1, error), evaluate func(insight.LiveOnlyInput, insight.Config) []contracts.InsightCandidateV1) *liveOnlyObservationResolver {
+func newLiveOnlyObservationResolver(rawPath, sessionID string, artifacts liveOnlyPolicyArtifacts, mapObservation func(*session.Record) (contracts.LiveObservationV1, error), evaluate func(insight.LiveOnlyInputV2, insight.Config) insight.LiveOnlyEvaluationV2) *liveOnlyObservationResolver {
 	raw := newObservationResolver(rawPath, sessionID, contracts.PolicyLineageManifestV2{})
 	if mapObservation != nil {
 		raw.mapObservation = mapObservation
 	}
 	if evaluate == nil {
-		evaluate = insight.EvaluateLiveOnly
+		evaluate = insight.EvaluateLiveOnlyV2
 	}
+	availability, _ := insight.ProductLiveOnlyAvailabilityV1(artifacts.History)
 	return &liveOnlyObservationResolver{
 		raw:     raw,
-		history: artifacts.History, lineage: artifacts.Lineage, evaluate: evaluate,
+		history: artifacts.History, lineage: artifacts.Lineage, availability: availability, evaluate: evaluate,
 	}
 }
 
 func (r *liveOnlyObservationResolver) Close() error { return r.raw.Close() }
 
 func (r *liveOnlyObservationResolver) resolve(commit contracts.PolicyCommitV3) ([]contracts.InsightCandidateV1, error) {
-	observation, err := r.raw.readCommittedObservation(commit.ObservationSequence)
+	observation, rawRecordSHA256, err := r.raw.readCommittedObservationWithRecordSHA(commit.ObservationSequence)
 	if err != nil {
 		return nil, err
 	}
@@ -52,13 +54,17 @@ func (r *liveOnlyObservationResolver) resolve(commit contracts.PolicyCommitV3) (
 	if len(commit.AuditEvents) > 0 {
 		policyTimeMS = commit.AuditEvents[0].PolicyTimeMS
 	}
-	candidates := r.evaluate(insight.LiveOnlyInput{
+	input := insight.LiveOnlyInputV2{
 		Observation: *observation, Previous: r.previous, History: r.history,
-		Lineage: r.lineage, PolicyTimeMS: policyTimeMS,
-	}, insight.DefaultConfig())
+		Lineage: r.lineage, Availability: r.availability, RawRecordSHA256: rawRecordSHA256, PolicyTimeMS: policyTimeMS,
+	}
+	result := r.evaluate(input, insight.DefaultConfig())
+	if err := insight.ValidateLiveOnlyEvaluationV2(result, input); err != nil {
+		return nil, err
+	}
 	copyObservation := *observation
 	r.previous = &copyObservation
-	return candidates, nil
+	return result.Candidates, nil
 }
 
 func newProductionReplayVerifierV3(resolver *liveOnlyObservationResolver, sessionID string, config policy.Config) commitlog.ReplayVerifierV3 {

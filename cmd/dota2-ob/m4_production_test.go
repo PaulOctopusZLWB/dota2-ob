@@ -115,7 +115,7 @@ func TestM4CapturedGSIUsesProductionCompositionTwiceAndRestarts(t *testing.T) {
 	if !bytes.Equal(a, b) {
 		t.Fatal("two clean production-composition executions differ")
 	}
-	goldenPath := filepath.Join("..", "..", "internal", "integration", "m4", "testdata", "replay_output.golden.json")
+	goldenPath := filepath.Join("..", "..", "internal", "integration", "m4", "testdata", "replay_output.rehearsal-successor.golden.json")
 	if os.Getenv("UPDATE_M4_GOLDEN") == "1" {
 		if err := os.WriteFile(goldenPath, a, 0o644); err != nil {
 			t.Fatal(err)
@@ -318,8 +318,9 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 				lastOverlayBytes = len(mustCanonicalTest(t, state))
 				return state, nil
 			}
-			config.EvaluateLiveOnly = func(input insight.LiveOnlyInput, cfg insight.Config) []contracts.InsightCandidateV1 {
-				candidates := insight.EvaluateLiveOnly(input, cfg)
+			config.EvaluateLiveOnlyV2 = func(input insight.LiveOnlyInputV2, cfg insight.Config) insight.LiveOnlyEvaluationV2 {
+				result := insight.EvaluateLiveOnlyV2(input, cfg)
+				candidates := result.Candidates
 				faultMu.Lock()
 				defer faultMu.Unlock()
 				target := candidateTargets[input.Observation.Evidence.Sequence]
@@ -328,11 +329,12 @@ func runM4Production(t *testing.T, fixture m4Schedule) m4ProductionOutput {
 					candidateTargets[input.Observation.Evidence.Sequence] = target
 				}
 				if target == 0 || len(candidates) == 0 {
-					return candidates
+					return result
 				}
 				candidates[0] = exactM4Candidate(t, candidates[0], target)
 				lastCandidateBytes = len(mustCanonicalTest(t, candidates[0]))
-				return candidates
+				result.Candidates = candidates
+				return result
 			}
 			config.StoreOptions = append(config.StoreOptions, commitlog.WithV3Hooks(commitlog.Hooks{SyncFile: func(file *os.File) error {
 				faultMu.Lock()
@@ -927,7 +929,7 @@ func exerciseM4ProjectionAndSaturation(t *testing.T, paired *pairedHTTPServer, a
 
 func collectM4OrderedEvidence(t *testing.T, active *broadcastRuntimeV3, raw *session.Store, fixture m4Schedule, root string, output *m4ProductionOutput) {
 	t.Helper()
-	resolver := newLiveOnlyObservationResolver(filepath.Join(root, fixture.SessionID, "raw.jsonl"), fixture.SessionID, active.artifacts, active.mapObservation, active.evaluateLiveOnly)
+	resolver := newLiveOnlyObservationResolver(filepath.Join(root, fixture.SessionID, "raw.jsonl"), fixture.SessionID, active.artifacts, active.mapObservation, active.evaluateLiveOnlyV2)
 	defer resolver.Close()
 	if err := active.store.VisitAll(func(value commitlog.CommittedV3) error {
 		output.Commits = append(output.Commits, value.Commit)
