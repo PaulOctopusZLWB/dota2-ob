@@ -624,6 +624,9 @@ func (s *Server) matchScoresFor(matchID string) *scoring.MatchScores {
 	if err := s.Store.ReadJSON(matchID, store.ArtifactScores, &ms); err != nil {
 		return nil
 	}
+	if ms.SchemaVersion != version.ScoreSchema || ms.RuleVersion != version.ScoreRuleVersion {
+		return nil
+	}
 	return &ms
 }
 

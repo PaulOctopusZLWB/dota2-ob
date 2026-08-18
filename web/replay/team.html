@@ -173,7 +173,7 @@ function teamComponentDrilldown(ts) {
       const st = c.published ? `<span class="badge ok">已发布</span>` : `<span class="badge warn">不可用</span>`;
       const reason = c.unavailable_reason ? ` · ${esc(c.unavailable_reason)}` : "";
       const opp = agg ? `机会 ${esc(agg.cohort_size)}` : "";
-      rows += `<tr><td>${esc(a)}</td><td>${esc(mid)}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td class="hint">${opp}</td><td>${st}${reason}</td></tr>`;
+      rows += `<tr data-team-score-metric="${esc(mid)}" data-metric-version="${esc(c.metric_version || (agg && agg.metric_version) || "-")}"><td>${esc(a)}</td><td>${esc(mid)}</td><td>${esc(c.metric_version || (agg && agg.metric_version) || "-")}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td class="hint">${opp}</td><td>${st}${reason}</td></tr>`;
     }
   }
   return rows;
@@ -218,7 +218,7 @@ async function load() {
     // Experimental axis table (always visible, suppressed as suppressed).
     s += `<h3 style="margin-top:14px">实验轴分解（虚线层）</h3><table><thead><tr><th>轴</th><th>值</th><th>覆盖</th><th>说明</th><th>机会</th></tr></thead><tbody>${teamAxisRows(ts, "experimental")}</tbody></table>`;
     // Exact component decomposition.
-    s += `<h3 style="margin-top:14px">指标分解（可复现显示值）</h3><table><thead><tr><th>轴</th><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>机会/样本</th><th>状态</th></tr></thead><tbody>${teamComponentDrilldown(ts) || `<tr><td colspan="7" class="hint">无</td></tr>`}</tbody></table>`;
+    s += `<h3 style="margin-top:14px">指标分解（可复现显示值）</h3><table><thead><tr><th>轴</th><th>指标</th><th>指标版本</th><th>原始值</th><th>百分位</th><th>权重</th><th>机会/样本</th><th>状态</th></tr></thead><tbody>${teamComponentDrilldown(ts) || `<tr><td colspan="8" class="hint">无</td></tr>`}</tbody></table>`;
     s += `</div>`;
     c.insertAdjacentHTML("beforeend", s);
 

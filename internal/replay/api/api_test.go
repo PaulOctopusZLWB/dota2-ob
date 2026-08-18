@@ -21,6 +21,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
 
 // testContracts loads the frozen metric registry and scoring contract.
@@ -102,8 +103,9 @@ func testStore(t *testing.T) *store.Store {
 		"unavailable": []interface{}{map[string]interface{}{"kind": "lane_segment", "reason": "no_geometry"}},
 	})
 	st.WriteJSON("m1", store.ArtifactMetrics, map[string]interface{}{
-		"values":      []interface{}{map[string]interface{}{"metric_id": "kills", "account_id": "1000", "value": 3}},
-		"unavailable": []interface{}{map[string]interface{}{"metric_id": "wards_placed", "account_id": "1000", "unavailable_reason": "no_observations"}},
+		"schema_version": version.MetricsSchema, "rule_version": version.MetricsRuleVersion, "match_id": "m1",
+		"values":      []interface{}{map[string]interface{}{"metric_id": "hero_damage_total", "metric_version": "1.0.0", "account_id": "1000", "value": 3}},
+		"unavailable": []interface{}{},
 	})
 	st.WriteJSON("m1", store.ArtifactInput, map[string]interface{}{"category": "test"})
 	st.WriteJSON("m1", store.ArtifactCanonical, map[string]interface{}{
@@ -1035,13 +1037,13 @@ func TestNavigableTypedLineageRoutes(t *testing.T) {
 			Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "metric_observation", ID: "phase_duration_seconds:match", RuleVersion: "1.0.0"}},
 		},
 	}})
-	aggID := "aggregation:player_tournament:1000:1:hero_damage_total:ti2026.scoring.v2"
+	aggID := "aggregation:player_tournament:1000:1:hero_damage_total:1.0.0:" + version.ScoreRuleVersion
 	st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{
-		SchemaVersion: "replay.score.v2", RuleVersion: "ti2026.scoring.v2",
+		SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion,
 		Players: []*scoring.PlayerScore{{AccountID: "1000", NominalRole: "1", AggregatedMetrics: map[string]scoring.AggregatedMetric{
-			"hero_damage_total": {MetricID: "hero_damage_total", Value: 500, EligibleMatches: 1, Lineage: []scoring.EvidenceRef{
+			"hero_damage_total": {MetricID: "hero_damage_total", MetricVersion: "1.0.0", Value: 500, EligibleMatches: 1, Lineage: []scoring.EvidenceRef{
 				{MatchID: "m1", Kind: "fact", ID: "fact:7", RuleVersion: "replay.facts.v2"},
-				{Kind: "aggregation", ID: aggID, RuleVersion: "ti2026.scoring.v2"},
+				{Kind: "aggregation", ID: aggID, RuleVersion: version.ScoreRuleVersion},
 			}},
 		}}}, Matches: map[string]*scoring.MatchScores{},
 	})
@@ -1347,10 +1349,13 @@ func testFrozenOverrideStore(t *testing.T, roleReg *roles.Registry) *store.Store
 	// Give every player a published metric so scores/corpus/percentiles build.
 	vals := []interface{}{}
 	for _, a := range accounts {
-		vals = append(vals, map[string]interface{}{"metric_id": "hero_damage_total", "account_id": a.acct, "value": 1000, "unit": "damage", "report_level": "player"})
-		vals = append(vals, map[string]interface{}{"metric_id": "kill_count", "account_id": a.acct, "value": 5, "unit": "count", "report_level": "player"})
+		vals = append(vals, map[string]interface{}{"metric_id": "hero_damage_total", "metric_version": "1.0.0", "account_id": a.acct, "value": 1000, "unit": "damage", "report_level": "player"})
+		vals = append(vals, map[string]interface{}{"metric_id": "kill_count", "metric_version": "1.0.0", "account_id": a.acct, "value": 5, "unit": "count", "report_level": "player"})
 	}
-	if err := st.WriteJSON("8944521919", store.ArtifactMetrics, map[string]interface{}{"values": vals, "unavailable": []interface{}{}}); err != nil {
+	if err := st.WriteJSON("8944521919", store.ArtifactMetrics, map[string]interface{}{
+		"schema_version": version.MetricsSchema, "rule_version": version.MetricsRuleVersion, "match_id": "8944521919",
+		"values": vals, "unavailable": []interface{}{},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.WriteJSON("8944521919", store.ArtifactInput, map[string]interface{}{"category": "probe"}); err != nil {
@@ -1790,6 +1795,63 @@ func TestRoleOverrideNegativeAndAtomicity(t *testing.T) {
 	}
 }
 
+func TestRoleOverrideRecomputeRejectsStaleMetricsArtifact(t *testing.T) {
+	roleReg := frozenRoleRegistry()
+	st := testFrozenOverrideStore(t, roleReg)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var met metrics.Output
+	if err := st.ReadJSON("8944521919", store.ArtifactMetrics, &met); err != nil {
+		t.Fatal(err)
+	}
+	met.SchemaVersion = "replay.metrics.v4"
+	if err := st.WriteJSON("8944521919", store.ArtifactMetrics, &met); err != nil {
+		t.Fatal(err)
+	}
+	beforeScores, err := os.ReadFile(filepath.Join(st.Root, "scores-corpus.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, roleReg).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	if code := overrideRole(t, ts.URL, "8944521919", "111114687", "1", "reviewer", "stale metrics gate"); code != http.StatusInternalServerError {
+		t.Fatalf("stale recompute status=%d want 500", code)
+	}
+	afterScores, err := os.ReadFile(filepath.Join(st.Root, "scores-corpus.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeScores, afterScores) {
+		t.Fatal("stale role-override recompute mutated the current score corpus")
+	}
+}
+
+func TestStaleScoreWireShapeIsNotServedAsCurrent(t *testing.T) {
+	st := testStore(t)
+	if err := st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{SchemaVersion: "replay.score.v4", RuleVersion: "ti2026.scoring.v4"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("m1", store.ArtifactScores, &scoring.MatchScores{SchemaVersion: "replay.score.v4", RuleVersion: "ti2026.scoring.v4", MatchID: "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, testRoleRegistry(t))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	for _, path := range []string{Version + "/scores/corpus", Version + "/matches/m1/scores"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("stale score path %s status=%d want 404", path, resp.StatusCode)
+		}
+	}
+}
+
 // TestTeamAPIStableSchema proves the /teams/{id} endpoint returns the stable
 // TeamScore shape with separately named official and experimental layers, and
 // that an absent team returns the same shape (both layers suppressed) rather
@@ -1862,8 +1924,8 @@ func TestTeamScoreCorpusPersistsBothLayers(t *testing.T) {
 	cor := scoring.NewCorpusWithTeam(sc, tc, mreg, players)
 	// Persist through the corpus catalog path used by the API.
 	cs := &scoring.CorpusScores{
-		SchemaVersion:        "replay.score.v2",
-		RuleVersion:          "ti2026.scoring.v2",
+		SchemaVersion:        version.ScoreSchema,
+		RuleVersion:          version.ScoreRuleVersion,
 		ContractVersion:      sc.SchemaVersion,
 		TeamScoringVersion:   tc.SchemaVersion,
 		ComparisonPopulation: tc.ComparisonPopulation,

@@ -93,7 +93,10 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 		_ = haveReport
 		var met metrics.Output
 		if err := st.ReadJSON(row.MatchID, store.ArtifactMetrics, &met); err != nil {
-			continue
+			return nil, fmt.Errorf("scoring: metrics artifact match=%s path=%s: %w", row.MatchID, st.ArtifactPath(row.MatchID, store.ArtifactMetrics), err)
+		}
+		if err := validateMetricsArtifact(row.MatchID, st.ArtifactPath(row.MatchID, store.ArtifactMetrics), &met, mreg); err != nil {
+			return nil, err
 		}
 		teamByAcct := map[string]string{}
 		for _, p := range part {
@@ -136,7 +139,7 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 				byAcct[v.AccountID] = map[string]MetricValue{}
 			}
 			mv := MetricValue{
-				MetricID: v.MetricID, Value: *v.Value,
+				MetricID: v.MetricID, MetricVersion: v.MetricVersion, Value: *v.Value,
 				Direction:            Direction(v.Direction),
 				OfficialEligible:     v.OfficialScoreEligible,
 				ExperimentalEligible: v.ExperimentalScoreEligible,
@@ -175,6 +178,51 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 		return players[i].AccountID < players[j].AccountID
 	})
 	return NewCorpusWithTeam(c, tc, mreg, players), nil
+}
+
+func printableVersion(v string) string {
+	if v == "" {
+		return "<missing>"
+	}
+	return v
+}
+
+// validateMetricsArtifact is the scoring migration boundary. Verified catalog
+// membership is not sufficient: every selected artifact and observation must
+// match the current schema/rule and the loaded registry's metric version.
+func validateMetricsArtifact(matchID, path string, met *metrics.Output, reg *metrics.Registry) error {
+	if met == nil {
+		return fmt.Errorf("scoring: stale metrics artifact match=%s path=%s field=document expected=present actual=nil", matchID, path)
+	}
+	if met.SchemaVersion != version.MetricsSchema {
+		return fmt.Errorf("scoring: stale metrics artifact match=%s path=%s field=schema_version expected=%s actual=%s", matchID, path, version.MetricsSchema, printableVersion(met.SchemaVersion))
+	}
+	if met.RuleVersion != version.MetricsRuleVersion {
+		return fmt.Errorf("scoring: stale metrics artifact match=%s path=%s field=rule_version expected=%s actual=%s", matchID, path, version.MetricsRuleVersion, printableVersion(met.RuleVersion))
+	}
+	if met.MatchID != "" && met.MatchID != matchID {
+		return fmt.Errorf("scoring: stale metrics artifact match=%s path=%s field=match_id expected=%s actual=%s", matchID, path, matchID, met.MatchID)
+	}
+	if reg == nil {
+		return fmt.Errorf("scoring: metrics registry unavailable match=%s path=%s", matchID, path)
+	}
+	check := func(kind string, values []metrics.Value) error {
+		for i := range values {
+			v := &values[i]
+			def := reg.Find(v.MetricID)
+			if def == nil {
+				return fmt.Errorf("scoring: stale metrics artifact match=%s path=%s field=%s[%d].metric_id expected=registered actual=%s", matchID, path, kind, i, printableVersion(v.MetricID))
+			}
+			if v.MetricVersion != def.MetricVersion {
+				return fmt.Errorf("scoring: stale metrics artifact match=%s path=%s metric=%s field=%s[%d].metric_version expected=%s actual=%s", matchID, path, v.MetricID, kind, i, def.MetricVersion, printableVersion(v.MetricVersion))
+			}
+		}
+		return nil
+	}
+	if err := check("values", met.Values); err != nil {
+		return err
+	}
+	return check("unavailable", met.Unavailable)
 }
 
 // metricsToEvidenceRefs converts typed metric-boundary evidence refs to the

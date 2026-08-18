@@ -419,6 +419,7 @@ type EvidenceRef struct {
 // typed lineage references that produced it.
 type MetricValue struct {
 	MetricID             string        `json:"metric_id"`
+	MetricVersion        string        `json:"metric_version"`
 	Value                float64       `json:"value"`
 	Numerator            *float64      `json:"numerator,omitempty"`
 	Denominator          *float64      `json:"denominator,omitempty"`
@@ -433,6 +434,7 @@ type MetricValue struct {
 // using its declared rule, retaining the merged typed lineage.
 type AggregatedMetric struct {
 	MetricID             string        `json:"metric_id"`
+	MetricVersion        string        `json:"metric_version"`
 	Value                float64       `json:"value"`
 	Numerator            float64       `json:"numerator,omitempty"`
 	Denominator          float64       `json:"denominator,omitempty"`
@@ -511,6 +513,7 @@ type AxisResult struct {
 // ComponentResult is one metric component within an axis.
 type ComponentResult struct {
 	MetricID          string   `json:"metric_id"`
+	MetricVersion     string   `json:"metric_version,omitempty"`
 	RawValue          *float64 `json:"raw_value,omitempty"`
 	Percentile        *float64 `json:"percentile,omitempty"`
 	Weight            float64  `json:"weight"`
@@ -563,6 +566,7 @@ type PlayerScore struct {
 // PercentileResult is one metric's normalized value with provenance.
 type PercentileResult struct {
 	MetricID             string    `json:"metric_id"`
+	MetricVersion        string    `json:"metric_version"`
 	RawValue             float64   `json:"raw_value"`
 	Percentile           float64   `json:"percentile"`
 	Direction            Direction `json:"direction"`
@@ -632,6 +636,22 @@ func NewCorpus(c *Contract, mreg *metrics.Registry, players []*PlayerMatch) *Cor
 // NewCorpusWithTeam builds a corpus with an optional frozen team scoring
 // registry. When tc is nil, team scoring fails closed (no team axes publish).
 func NewCorpusWithTeam(c *Contract, tc *TeamContract, mreg *metrics.Registry, players []*PlayerMatch) *Corpus {
+	// Programmatic callers/tests may construct current observations directly;
+	// normalize an omitted version from the loaded registry before aggregation.
+	// Persisted artifacts never take this path unchecked: BuildCorpusFromStore
+	// rejects missing or stale versions first.
+	if mreg != nil {
+		for _, p := range players {
+			for mid, mv := range p.Metrics {
+				if mv.MetricVersion == "" {
+					if def := mreg.Find(mid); def != nil {
+						mv.MetricVersion = def.MetricVersion
+						p.Metrics[mid] = mv
+					}
+				}
+			}
+		}
+	}
 	cor := &Corpus{
 		Contract: c, TeamC: tc, MetricReg: mreg,
 		Matches:     map[string][]*PlayerMatch{},
@@ -671,7 +691,16 @@ func (c *Corpus) aggregateValues(mid string, vals []MetricValue) (AggregatedMetr
 		return AggregatedMetric{}, false
 	}
 	rule := c.AggregateRuleOf(mid)
-	agg := AggregatedMetric{MetricID: mid, Direction: vals[0].Direction, OfficialEligible: vals[0].OfficialEligible, ExperimentalEligible: vals[0].ExperimentalEligible}
+	metricVersion := vals[0].MetricVersion
+	if metricVersion == "" {
+		return AggregatedMetric{}, false
+	}
+	for _, v := range vals[1:] {
+		if v.MetricID != mid || v.MetricVersion != metricVersion {
+			return AggregatedMetric{}, false
+		}
+	}
+	agg := AggregatedMetric{MetricID: mid, MetricVersion: metricVersion, Direction: vals[0].Direction, OfficialEligible: vals[0].OfficialEligible, ExperimentalEligible: vals[0].ExperimentalEligible}
 	var num, den float64
 	var numOK, denOK bool
 	maxV := math.Inf(-1)
@@ -830,7 +859,7 @@ func (c *Corpus) buildTeams() {
 					agg = withAggregationRef(agg, "team_match", tid, "", c.teamRuleVersion())
 					tm.Metrics[mid] = agg
 					teamAgg[mid] = append(teamAgg[mid], MetricValue{
-						MetricID: mid, Value: agg.Value,
+						MetricID: mid, MetricVersion: agg.MetricVersion, Value: agg.Value,
 						Numerator: &agg.Numerator, Denominator: &agg.Denominator,
 						OpportunityCount: agg.OpportunityCount,
 						Direction:        agg.Direction, OfficialEligible: agg.OfficialEligible,
@@ -863,9 +892,10 @@ func (c *Corpus) teamRuleVersion() string {
 
 // withAggregationRef appends the canonical aggregation entity ref to an
 // aggregated metric's lineage. The id is scope/subject/role/metric/algorithm-
-// version qualified so each aggregation entity is stable and match/scope
-// distinct; child refs are retained underneath. When the team registry is
-// absent, ruleVersion falls back to the player scoring version.
+// metric-version and rule-version qualified so each aggregation entity is
+// stable and match/scope distinct; child refs are retained underneath. When
+// the team registry is absent, ruleVersion falls back to the player scoring
+// version.
 func withAggregationRef(agg AggregatedMetric, scope, subject, role, ruleVersion string) AggregatedMetric {
 	if ruleVersion == "" {
 		ruleVersion = "ti2026.scoring.v2"
@@ -873,7 +903,7 @@ func withAggregationRef(agg AggregatedMetric, scope, subject, role, ruleVersion 
 	agg.Lineage = append(agg.Lineage, EvidenceRef{
 		MatchID:     "", // aggregation is corpus/scope-qualified, not match-scoped
 		Kind:        "aggregation",
-		ID:          fmt.Sprintf("aggregation:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, ruleVersion),
+		ID:          fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, agg.MetricVersion, ruleVersion),
 		RuleVersion: ruleVersion,
 	})
 	return agg
@@ -956,7 +986,7 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 			pct = Invert(pct)
 		}
 		ps.MetricPercentiles[mid] = PercentileResult{
-			MetricID: mid, RawValue: am.Value, Percentile: pct, Direction: am.Direction,
+			MetricID: mid, MetricVersion: am.MetricVersion, RawValue: am.Value, Percentile: pct, Direction: am.Direction,
 			OfficialEligible: am.OfficialEligible, ExperimentalEligible: am.ExperimentalEligible,
 			CohortSize: len(cohort),
 		}
@@ -1031,7 +1061,7 @@ func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 			pct = Invert(pct)
 		}
 		ts.MetricPercentiles[mid] = PercentileResult{
-			MetricID: mid, RawValue: am.Value, Percentile: pct, Direction: am.Direction,
+			MetricID: mid, MetricVersion: am.MetricVersion, RawValue: am.Value, Percentile: pct, Direction: am.Direction,
 			OfficialEligible: am.OfficialEligible, ExperimentalEligible: am.ExperimentalEligible,
 			CohortSize: len(cohort),
 		}
@@ -1087,6 +1117,7 @@ func (c *Corpus) computeOfficialAxes(pt *PlayerTournament, pcts map[string]Perce
 		for mid, w := range cm {
 			cr := ComponentResult{MetricID: mid, Weight: w}
 			pr, ok := pt.Metrics[mid]
+			cr.MetricVersion = pr.MetricVersion
 			pct, ok2 := pcts[mid]
 			if !ok || !pr.OfficialEligible || !ok2 {
 				cr.UnavailableReason = c.missingReason(pt, mid, pr, ok, ok2, "official")
@@ -1140,6 +1171,7 @@ func (c *Corpus) computeTeamAxes(tt *TeamTournament, pcts map[string]PercentileR
 		for mid, w := range cm {
 			cr := ComponentResult{MetricID: mid, Weight: w}
 			am, ok := tt.Metrics[mid]
+			cr.MetricVersion = am.MetricVersion
 			pct, ok2 := pcts[mid]
 			if !ok || !am.OfficialEligible || !ok2 {
 				cr.UnavailableReason = c.missingReason(tt, mid, am, ok, ok2, "official")
@@ -1379,7 +1411,7 @@ func (c *Corpus) computeExperimentalAxes(ps *PlayerScore) map[string]AxisResult 
 		for _, mid := range v3Comps {
 			if pr, ok := ps.MetricPercentiles[mid]; ok && pr.ExperimentalEligible {
 				v3Pcts = append(v3Pcts, pr.Percentile)
-				cr := ComponentResult{MetricID: mid, Published: true, Percentile: &pr.Percentile, Weight: 0.25}
+				cr := ComponentResult{MetricID: mid, MetricVersion: pr.MetricVersion, Published: true, Percentile: &pr.Percentile, Weight: 0.25}
 				ar.Components[mid] = cr
 			} else {
 				ar.Components[mid] = ComponentResult{MetricID: mid, UnavailableReason: "v3_component_not_published"}

@@ -78,6 +78,19 @@ type LifeInterval struct {
 	BoundaryFacts       []EvidenceRef `json:"boundary_facts"`
 }
 
+// LivenessGap is a typed null-liveness marker inside an otherwise open bound
+// real-hero life. Markers use the same half-open official-window semantics as
+// facts: a marker at a phase boundary belongs to the phase beginning there.
+type LivenessGap struct {
+	ID                 string      `json:"id"`
+	AccountID          string      `json:"account_id"`
+	HeroName           string      `json:"hero_name"`
+	GameSecond         float64     `json:"game_second"`
+	ParticipantBinding EvidenceRef `json:"participant_binding"`
+	LifeStartFact      EvidenceRef `json:"life_start_fact"`
+	SourceFact         EvidenceRef `json:"source_fact"`
+}
+
 // Evidence ref kinds.
 const (
 	EvidenceFact              = "fact"
@@ -116,6 +129,7 @@ type Value struct {
 	EvidenceCount             int64          `json:"evidence_count"`
 	Evidence                  []EvidenceRef  `json:"evidence,omitempty"`
 	LifeIntervals             []LifeInterval `json:"life_intervals,omitempty"`
+	LivenessGaps              []LivenessGap  `json:"liveness_gaps,omitempty"`
 	UnavailableReason         string         `json:"unavailable_reason,omitempty"`
 	Confidence                float64        `json:"confidence"`
 	Direction                 string         `json:"direction"`
@@ -622,7 +636,7 @@ func (c *Calculator) addLifeEvent(account, hero, kind string, alive *bool, f *fa
 // provenLifeIntervals pairs typed liveness boundaries for one bound real
 // hero. Null samples inside an open interval invalidate it: they are an
 // explicit coverage gap, not evidence that the prior state continued.
-func (c *Calculator) provenLifeIntervals(account string) ([]LifeInterval, int64) {
+func (c *Calculator) provenLifeIntervals(account string) ([]LifeInterval, []LivenessGap) {
 	events := append([]lifeEvent(nil), c.lifeEvents[account]...)
 	sort.SliceStable(events, func(i, j int) bool {
 		if events[i].GameSecond != events[j].GameSecond {
@@ -631,16 +645,21 @@ func (c *Calculator) provenLifeIntervals(account string) ([]LifeInterval, int64)
 		return events[i].Fact.SourceFactSeq < events[j].Fact.SourceFactSeq
 	})
 	var out []LifeInterval
+	var gapMarkers []LivenessGap
 	var start *lifeEvent
-	var gaps int64
 	openGap := false
 	lastState := "unknown"
 	for i := range events {
 		e := &events[i]
 		if e.Kind == "liveness" && e.Alive == nil {
-			if start != nil {
+			binding, bound := c.participantEvidence[account]
+			if start != nil && bound && c.participantHero[account] == e.HeroName && e.HeroName == start.HeroName {
 				openGap = true
-				gaps++
+				gapMarkers = append(gapMarkers, LivenessGap{
+					ID:        fmt.Sprintf("liveness-gap:%s:%d", account, e.Fact.SourceFactSeq),
+					AccountID: account, HeroName: e.HeroName, GameSecond: e.GameSecond,
+					ParticipantBinding: binding, LifeStartFact: start.Fact, SourceFact: e.Fact,
+				})
 			}
 			continue
 		}
@@ -678,7 +697,7 @@ func (c *Calculator) provenLifeIntervals(account string) ([]LifeInterval, int64)
 		openGap = false
 		lastState = "dead"
 	}
-	return out, gaps
+	return out, gapMarkers
 }
 
 // officialPhaseAt returns the single official causal phase containing sec.
@@ -1006,9 +1025,10 @@ func phaseEvidence(matchID, phaseName string, ph *phase.Output) []EvidenceRef {
 	return out
 }
 
-func (c *Calculator) lifeIntersections(account, phaseName string, ph *phase.Output) ([]LifeInterval, float64, int64) {
+func (c *Calculator) lifeIntersections(account, phaseName string, ph *phase.Output) ([]LifeInterval, []LivenessGap, float64) {
 	intervals, gaps := c.provenLifeIntervals(account)
 	var out []LifeInterval
+	var intersectingGaps []LivenessGap
 	var duration float64
 	for _, life := range intervals {
 		for _, piv := range ph.Intervals {
@@ -1027,7 +1047,18 @@ func (c *Calculator) lifeIntersections(account, phaseName string, ph *phase.Outp
 			duration += end - start
 		}
 	}
-	return out, duration, gaps
+	for _, gap := range gaps {
+		for _, piv := range ph.Intervals {
+			if !piv.GlobalPhase.Official() || (phaseName != "whole_match" && string(piv.GlobalPhase) != phaseName) {
+				continue
+			}
+			if gap.GameSecond >= float64(piv.StartGameSecond) && gap.GameSecond < float64(piv.EndGameSecond) {
+				intersectingGaps = append(intersectingGaps, gap)
+				break
+			}
+		}
+	}
+	return out, intersectingGaps, duration
 }
 
 func deathIntervalEvidence(intervals []LifeInterval) []EvidenceRef {
@@ -1035,6 +1066,14 @@ func deathIntervalEvidence(intervals []LifeInterval) []EvidenceRef {
 	for _, iv := range intervals {
 		refs = append(refs, iv.ParticipantBinding)
 		refs = append(refs, iv.BoundaryFacts...)
+	}
+	return dedupeEvidence(refs)
+}
+
+func livenessGapEvidence(gaps []LivenessGap) []EvidenceRef {
+	var refs []EvidenceRef
+	for _, gap := range gaps {
+		refs = append(refs, gap.ParticipantBinding, gap.LifeStartFact, gap.SourceFact)
 	}
 	return dedupeEvidence(refs)
 }
@@ -1082,11 +1121,27 @@ func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role,
 			return v, false, "eligible_opposing_hero_death_opportunity_not_proven"
 		}
 	case "death_count":
-		lifeIntervals, lifeDuration, lifeGaps := calc.lifeIntersections(acct, phaseName, ph)
-		if len(lifeIntervals) == 0 {
-			if lifeGaps > 0 {
-				return v, false, "bound_real_hero_life_interval_liveness_gap"
+		lifeIntervals, lifeGaps, lifeDuration := calc.lifeIntersections(acct, phaseName, ph)
+		if len(lifeGaps) > 0 {
+			v.OfficialPhase = phaseName
+			v.Value, v.IntValue, v.Numerator, v.Denominator = nil, nil, nil, nil
+			v.UnavailableReason = "bound_real_hero_life_interval_liveness_gap_in_subject_window"
+			v.EpistemicClass = ClassUnavailable
+			v.Confidence = 0
+			v.GapCount = int64(len(lifeGaps))
+			v.LifeIntervals = lifeIntervals
+			v.LivenessGaps = lifeGaps
+			if duration > 0 {
+				v.Coverage = lifeDuration / duration
 			}
+			chain := append(deathIntervalEvidence(lifeIntervals), livenessGapEvidence(lifeGaps)...)
+			chain = append(chain, phaseEvidence(calc.matchID, phaseName, ph)...)
+			chain = append(chain, calc.observationRef(v), calc.algorithmRef(m.ID))
+			v.Evidence = dedupeEvidence(chain)
+			v.EvidenceCount = int64(len(v.Evidence))
+			return v, false, v.UnavailableReason
+		}
+		if len(lifeIntervals) == 0 {
 			return v, false, "bound_real_hero_life_interval_not_proven_for_subject_window"
 		}
 		unique := map[string]bool{}
@@ -1107,7 +1162,7 @@ func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role,
 		opportunityEvidence = deathIntervalEvidence(lifeIntervals)
 		duration = lifeDuration
 		v.LifeIntervals = lifeIntervals
-		v.GapCount = lifeGaps
+		v.GapCount = 0
 	case "hero_damage_total", "objective_damage_total":
 		opportunity = samples
 		if opportunity == 0 {
@@ -1193,21 +1248,28 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 				for _, phaseName := range []string{"laning", "midgame", "decisive"} {
 					pc := phaseCalcs[phaseName]
 					pv := pc.computeMetric(m, acct, team, role, nil, nil, nil, nil)
-					if pv, ok, _ := finalizeDirectValue(pc, pv, m, acct, team, role, phaseName, phaseDurations[phaseName], ph, 0); ok {
+					if pv, ok, reason := finalizeDirectValue(pc, pv, m, acct, team, role, phaseName, phaseDurations[phaseName], ph, 0); ok {
 						out.Values = append(out.Values, pv)
 						published = true
+					} else if m.ID == "death_count" && reason == "bound_real_hero_life_interval_liveness_gap_in_subject_window" {
+						out.Unavailable = append(out.Unavailable, pv)
 					}
 				}
 				whole := c.computeMetric(m, acct, team, role, teamNetWorth, fightParticipation, fightDamageShare, phaseDuration)
 				totalDuration := phaseDurations["laning"] + phaseDurations["midgame"] + phaseDurations["decisive"]
 				wholeReason := ""
+				wholeUnavailableAppended := false
 				if wholeValue, ok, reason := finalizeDirectValue(c, whole, m, acct, team, role, "whole_match", totalDuration, ph, c.excluded[c.excludedKey(acct, m.ID)]); ok {
 					out.Values = append(out.Values, wholeValue)
 					published = true
 				} else {
 					wholeReason = reason
+					if m.ID == "death_count" && reason == "bound_real_hero_life_interval_liveness_gap_in_subject_window" {
+						out.Unavailable = append(out.Unavailable, wholeValue)
+						wholeUnavailableAppended = true
+					}
 				}
-				if !published {
+				if !published && !wholeUnavailableAppended {
 					if wholeReason == "" {
 						wholeReason = "declared_opportunity_or_duration_not_proven"
 					}

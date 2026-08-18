@@ -27,12 +27,12 @@ const (
 	// EpisodeSchema is the behavior episode schema version.
 	EpisodeSchema = "replay.episodes.v1"
 	// MetricsSchema is the V1/V2/V3 metric publication schema version.
-	MetricsSchema = "replay.metrics.v5"
+	MetricsSchema = "replay.metrics.v6"
 	// ClosureSchema is the 52-row metric closure contract version.
 	ClosureSchema = "ti2026.metric-closure.v1"
-	// ScoreSchema v4 retains per-match role provenance in match and tournament
-	// score artifacts in addition to the official/experimental layers.
-	ScoreSchema = "replay.score.v4"
+	// ScoreSchema v5 retains metric-definition versions through per-match,
+	// aggregation, percentile, API, and rendered score decomposition objects.
+	ScoreSchema = "replay.score.v5"
 	// CorrectionSchemaV1 is the legacy review/correction overlay schema
 	// version; v1 documents are still readable and are migrated
 	// deterministically to the current version on load.
@@ -53,10 +53,10 @@ const (
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
 	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v11"
-	// ScoreRuleVersion identifies the radar/score computation and complete
-	// structured aggregation-lineage rule set.
-	ScoreRuleVersion = "ti2026.scoring.v4"
+	MetricsRuleVersion = "ti2026.metrics.v12"
+	// ScoreRuleVersion identifies the version-gated radar/score computation and
+	// complete structured aggregation-lineage rule set.
+	ScoreRuleVersion = "ti2026.scoring.v5"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
 	CorrectionRuleVersion = "ti2026.corrections.v3"
 )

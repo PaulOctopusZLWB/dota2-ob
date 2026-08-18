@@ -738,12 +738,96 @@ func TestDeclaredOpportunitiesUsePerAccountLifeIntervals(t *testing.T) {
 	}
 	foundGap := false
 	for _, v := range out.Unavailable {
-		if v.MetricID == "death_count" && v.AccountID == "r4" && v.UnavailableReason == "bound_real_hero_life_interval_liveness_gap" {
+		if v.MetricID == "death_count" && v.AccountID == "r4" && v.UnavailableReason == "bound_real_hero_life_interval_liveness_gap_in_subject_window" {
 			foundGap = true
 		}
 	}
 	if !foundGap {
 		t.Fatal("r4 null-liveness gap did not fail closed")
+	}
+}
+
+func TestReviewerValidIntervalPlusLaterGapFailsClosed(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("mixed", []string{"a1"}, nil, map[string]string{"a1": "T1"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1"})
+	calc.Feed(&facts.Fact{Seq: 1, Family: facts.FamilyParticipant, GameSecond: 0, GameSecondOK: true,
+		Payload: mustJSON(&facts.ParticipantFact{AccountID: "a1", HeroName: "npc_dota_hero_axe"})})
+	alive, dead := true, false
+	for _, sample := range []struct {
+		seq   int64
+		sec   float64
+		alive *bool
+	}{{2, 10, &alive}, {3, 20, &dead}, {4, 30, &alive}, {5, 40, nil}, {6, 50, &dead}} {
+		calc.Feed(&facts.Fact{Seq: sample.seq, Family: facts.FamilyHeroState, GameSecond: sample.sec, GameSecondOK: true,
+			Payload: mustJSON(&facts.HeroStateSample{AccountID: "a1", HeroName: "npc_dota_hero_axe", Alive: sample.alive})})
+	}
+	out := calc.Result(nil, testOfficialPhases(100))
+	for _, v := range out.Values {
+		if v.AccountID == "a1" && v.MetricID == "death_count" {
+			t.Fatalf("mixed valid+gap published numeric death_count: %+v", v)
+		}
+	}
+	for _, v := range out.Unavailable {
+		if v.AccountID == "a1" && v.MetricID == "death_count" && v.OfficialPhase == "whole_match" {
+			if v.UnavailableReason != "bound_real_hero_life_interval_liveness_gap_in_subject_window" || v.GapCount != 1 || len(v.LivenessGaps) != 1 || len(v.LifeIntervals) != 1 || v.Confidence != 0 {
+				t.Fatalf("mixed gap unavailable row=%+v", v)
+			}
+			if v.LivenessGaps[0].SourceFact.SourceFactSeq != 5 || len(v.Evidence) == 0 {
+				t.Fatalf("mixed gap lineage not navigable: %+v", v)
+			}
+			return
+		}
+	}
+	t.Fatal("mixed valid+gap whole-match unavailable decision missing")
+}
+
+func TestLivenessGapsAreScopedToHalfOpenOfficialWindows(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("windowed", []string{"a1"}, nil, map[string]string{"a1": "T1"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1"})
+	calc.Feed(&facts.Fact{Seq: 1, Family: facts.FamilyParticipant, GameSecond: 0, GameSecondOK: true,
+		Payload: mustJSON(&facts.ParticipantFact{AccountID: "a1", HeroName: "npc_dota_hero_axe"})})
+	alive, dead := true, false
+	for _, sample := range []struct {
+		seq   int64
+		sec   float64
+		alive *bool
+	}{{2, 10, &alive}, {3, 20, &dead}, {4, 90, &alive}, {5, 100, nil}, {6, 110, &dead}, {7, 210, &alive}, {8, 230, &dead}} {
+		calc.Feed(&facts.Fact{Seq: sample.seq, Family: facts.FamilyHeroState, GameSecond: sample.sec, GameSecondOK: true,
+			Payload: mustJSON(&facts.HeroStateSample{AccountID: "a1", HeroName: "npc_dota_hero_axe", Alive: sample.alive})})
+	}
+	ph := &phase.Output{EligibleSeconds: 300, Intervals: []phase.Interval{
+		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 100, RuleVersion: "test.phase.v1"},
+		{GlobalPhase: phase.Midgame, StartGameSecond: 100, EndGameSecond: 200, RuleVersion: "test.phase.v1"},
+		{GlobalPhase: phase.Decisive, StartGameSecond: 200, EndGameSecond: 300, RuleVersion: "test.phase.v1"},
+	}}
+	out := calc.Result(nil, ph)
+	published := map[string]Value{}
+	unavailable := map[string]Value{}
+	for _, v := range out.Values {
+		if v.AccountID == "a1" && v.MetricID == "death_count" {
+			published[v.OfficialPhase] = v
+		}
+	}
+	for _, v := range out.Unavailable {
+		if v.AccountID == "a1" && v.MetricID == "death_count" {
+			unavailable[v.OfficialPhase] = v
+		}
+	}
+	if _, ok := published["laning"]; !ok {
+		t.Fatal("gap at exact 100 boundary suppressed preceding [0,100) phase")
+	}
+	if _, ok := published["decisive"]; !ok {
+		t.Fatal("valid interval after gap did not publish in a different phase")
+	}
+	if unavailable["midgame"].GapCount != 1 || unavailable["whole_match"].GapCount != 1 {
+		t.Fatalf("windowed gap decisions mid=%+v whole=%+v", unavailable["midgame"], unavailable["whole_match"])
+	}
+	if _, ok := published["whole_match"]; ok {
+		t.Fatal("whole match published despite intersecting midgame gap")
 	}
 }
 

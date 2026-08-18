@@ -450,12 +450,16 @@ async function main() {
         const matchScore = await api(page, `${base}/api/replay/v1/matches/${player.match_id}/scores`);
         const row = (matchScore.data.players || []).find(p => p.account_id === acct);
         assert.ok(row && row.nominal_role === newRole, "match-score row role after override");
+		assert.ok(Object.values(row.metrics || {}).every(m => m.metric_version), "match-score metric versions missing");
         assert.strictEqual(row.override_author, "browser", "match-score override author");
         assert.ok(row.role_record_version, "match-score role record version");
         assert.ok(row.override_version, "match-score override version");
         const corpus = await api(page, `${base}/api/replay/v1/scores/corpus`);
         const pt = (corpus.data.players || []).find(p => p.account_id === acct);
         assert.ok(pt && pt.nominal_role === newRole, "corpus/tournament player role after override");
+		const aggregated = Object.values(pt.aggregated_metrics || {});
+		assert.ok(aggregated.length > 0 && aggregated.every(m => m.metric_version), "aggregated metric versions missing");
+		assert.ok(aggregated.every(m => (m.lineage || []).filter(r => r.kind === "aggregation").every(r => r.id.includes(`:${m.metric_version}:`))), "aggregation IDs are not metric-version qualified");
         const scoreProv = pt && pt.role_provenance && pt.role_provenance[player.match_id];
         assert.ok(scoreProv, "corpus score role provenance missing");
         assert.strictEqual(scoreProv.override_author, "browser", "corpus score override author");
@@ -464,6 +468,10 @@ async function main() {
         const profileProv = afterOvr.data.score.role_provenance[player.match_id];
         assert.strictEqual(profileProv.override_author, "browser", "player profile score override author");
         assert.ok(profileProv.role_record_version && profileProv.override_version, "player profile score versions missing");
+		await page.goto(`${base}/player.html?id=${acct}`, { waitUntil: "domcontentloaded" });
+		await page.waitForSelector("tr[data-aggregation-metric][data-metric-version]", { timeout: 15000 });
+		const renderedVersions = await page.$$eval("tr[data-aggregation-metric]", rows => rows.map(r => r.dataset.metricVersion));
+		assert.ok(renderedVersions.length > 0 && renderedVersions.every(v => v && v !== "-"), "rendered score decomposition metric versions missing");
       };
       await assertRoleAgreement(restartedBase);
 
@@ -514,7 +522,7 @@ async function main() {
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, metric versions preserved in match/aggregate API and rendered score decomposition, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

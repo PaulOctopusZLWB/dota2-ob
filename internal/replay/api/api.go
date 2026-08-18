@@ -229,9 +229,9 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 
 // handleAggregationDetail serves one corpus/scope-qualified aggregation entity
 // from the persisted score corpus by its canonical aggregation id
-// (aggregation:<scope>:<subject>:<role>:<metric>:<ruleVersion>). The id is
-// stable, subject/scope/algorithm-version qualified, and carries the retained
-// child lineage refs; a stale id renders an explicit 404.
+// (aggregation:<scope>:<subject>:<role>:<metric>:<metricVersion>:<ruleVersion>).
+// The id is stable, subject/scope/metric/algorithm-version qualified, and
+// carries the retained child lineage refs; a stale id renders an explicit 404.
 func (s *Server) handleAggregationDetail(w http.ResponseWriter, matchID string, parts []string) {
 	if len(parts) != 3 {
 		writeErr(w, http.StatusBadRequest, "aggregation_id_required")
@@ -265,7 +265,7 @@ func (s *Server) serveAggregation(w http.ResponseWriter, id string) {
 					}
 					writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: map[string]interface{}{
 						"aggregation_id": id, "scope": scope, "subject": subject,
-						"metric_id": mid, "value": am.Value, "eligible_matches": am.EligibleMatches,
+						"metric_id": mid, "metric_version": am.MetricVersion, "value": am.Value, "eligible_matches": am.EligibleMatches,
 						"rule_version": ref.RuleVersion, "child_refs": children,
 					}})
 					return true
@@ -591,6 +591,9 @@ func (s *Server) tracks(matchID string) tracks {
 func (s *Server) corpusScoresFor() *scoring.CorpusScores {
 	var cs scoring.CorpusScores
 	if err := s.Store.ReadJSONFile(s.Store.Root+"/scores-corpus.json", &cs); err != nil {
+		return nil
+	}
+	if cs.SchemaVersion != version.ScoreSchema || cs.RuleVersion != version.ScoreRuleVersion {
 		return nil
 	}
 	return &cs

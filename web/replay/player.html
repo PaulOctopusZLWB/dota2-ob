@@ -222,7 +222,7 @@ function metricDrilldown(ps) {
       if (agg && agg.lineage && agg.lineage.length) {
         lineage = agg.lineage.map(ref => lineageLink(ref)).join(" ");
       }
-      rows += `<tr><td>${esc(mid)}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td>${st}${reason}</td><td class="hint">${lineage}</td></tr>`;
+      rows += `<tr data-score-metric="${esc(mid)}" data-metric-version="${esc(c.metric_version || (agg && agg.metric_version) || "-")}"><td>${esc(mid)}</td><td>${esc(c.metric_version || (agg && agg.metric_version) || "-")}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td>${st}${reason}</td><td class="hint">${lineage}</td></tr>`;
     }
   }
   return rows;
@@ -242,9 +242,9 @@ function aggregationDrilldown(ps) {
     const aggRefs = (am.lineage || []).filter(r => r.kind === "aggregation");
     const childCount = (am.lineage || []).filter(r => r.kind !== "aggregation").length;
     const links = aggRefs.map(r => lineageLink(r)).join(" ") || `<span class="hint">无聚合引用</span>`;
-    rows += `<tr><td>${esc(mid)}</td><td class="num">${fmt(am.value)}</td><td class="num">${esc(am.eligible_matches)}</td><td class="hint">${esc(childCount)} 个底层引用</td><td>${links}</td></tr>`;
+    rows += `<tr data-aggregation-metric="${esc(mid)}" data-metric-version="${esc(am.metric_version || "-")}"><td>${esc(mid)}</td><td>${esc(am.metric_version || "-")}</td><td class="num">${fmt(am.value)}</td><td class="num">${esc(am.eligible_matches)}</td><td class="hint">${esc(childCount)} 个底层引用</td><td>${links}</td></tr>`;
   }
-  return `<table><thead><tr><th>指标</th><th>聚合值</th><th>合格比赛</th><th>子引用数</th><th>聚合实体链接</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<table><thead><tr><th>指标</th><th>指标版本</th><th>聚合值</th><th>合格比赛</th><th>子引用数</th><th>聚合实体链接</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // totalCard renders the official/experimental total with gates.
@@ -315,7 +315,7 @@ async function load() {
           <h4 style="margin-top:12px">实验轴分解（虚线 V3）</h4>
           <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "experimental")}</tbody></table>
           <h4 style="margin-top:12px">指标分解（原始值 · 同角色百分位 · 权重 · 覆盖 · 证据链）</h4>
-          <table><thead><tr><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th><th>证据链</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
+          <table><thead><tr><th>指标</th><th>指标版本</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th><th>证据链</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
           <h4 style="margin-top:12px">聚合实体（选手锦标赛聚合，含底层证据链）</h4>
           ${aggregationDrilldown(ps)}
         </div>`);
