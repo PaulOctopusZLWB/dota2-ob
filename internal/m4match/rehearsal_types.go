@@ -212,8 +212,11 @@ type RehearsalProducerEvidenceV1 struct {
 	Artifacts              []RehearsalProducerArtifactV1        `json:"artifacts"`
 	ProductPID             int                                  `json:"product_pid"`
 	OBSPID                 int                                  `json:"obs_pid"`
+	OBSLauncherPID         int                                  `json:"obs_flatpak_launcher_pid,omitempty"`
+	OBSSandboxPID          int                                  `json:"obs_flatpak_sandbox_pid,omitempty"`
 	OBSInstanceID          string                               `json:"obs_flatpak_instance_id,omitempty"`
 	OBSExecutable          RehearsalOwnedProcessIdentityV1      `json:"obs_executable_identity,omitempty"`
+	OBSProcesses           []RehearsalOwnedProcessIdentityV1    `json:"obs_process_population,omitempty"`
 	OBSStartCorrelation    string                               `json:"obs_start_correlation_sha256,omitempty"`
 	OBSTerminalCorrelation string                               `json:"obs_terminal_correlation_sha256,omitempty"`
 	RecoveryPID            int                                  `json:"recovery_pid"`

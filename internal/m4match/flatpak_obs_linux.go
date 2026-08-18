@@ -29,13 +29,22 @@ type flatpakOBSInstance struct {
 
 type ownedFlatpakOBS struct {
 	flatpakOBSInstance
-	Root         string
-	Launcher     *exec.Cmd
-	LauncherDone <-chan error
-	Identity     RehearsalOwnedProcessIdentityV1
+	Root           string
+	Launcher       *exec.Cmd
+	LauncherDone   chan error
+	LauncherWaited bool
+	KnownProcesses map[int]RehearsalOwnedProcessIdentityV1
+	Identity       RehearsalOwnedProcessIdentityV1
 }
 
 var flatpakOBSInstanceLister = listFlatpakOBSInstances
+var flatpakOBSDiscoverer = discoverRealOBSProcess
+var flatpakOwnedIdentityReader = readRehearsalOwnedProcessIdentity
+var flatpakDescendants = func(pid int) ([]int, error) { return descendantPIDs("/proc", pid) }
+var flatpakKillBoundInstance = func(ctx context.Context, instanceID string) error {
+	return exec.CommandContext(ctx, "flatpak", "kill", instanceID).Run()
+}
+var flatpakAbortBoundInstance = abortBoundFlatpakOBS
 
 func listFlatpakOBSInstances(ctx context.Context) ([]flatpakOBSInstance, error) {
 	command := exec.CommandContext(ctx, "flatpak", "ps", "--columns=instance,pid,child-pid,application")
@@ -115,50 +124,78 @@ func startOwnedFlatpakOBS(ctx context.Context, root string, output io.Writer) (*
 	select {
 	case result := <-idResult:
 		if result.err != nil || result.id == "" || len(result.id) > 256 {
-			_ = command.Process.Kill()
-			return nil, errors.New("Flatpak instance ID unavailable")
+			return nil, errors.Join(errors.New("Flatpak instance ID unavailable"), abortUnidentifiedLauncher(command, done, 10*time.Second))
 		}
 		instanceID = result.id
 	case <-time.After(10 * time.Second):
-		_ = command.Process.Kill()
-		return nil, errors.New("Flatpak instance ID deadline exceeded")
+		return nil, errors.Join(errors.New("Flatpak instance ID deadline exceeded"), abortUnidentifiedLauncher(command, done, 10*time.Second))
 	}
-	owned := &ownedFlatpakOBS{flatpakOBSInstance: flatpakOBSInstance{InstanceID: instanceID}, Root: root, Launcher: command, LauncherDone: done}
-	deadline := time.Now().Add(20 * time.Second)
+	owned := &ownedFlatpakOBS{flatpakOBSInstance: flatpakOBSInstance{InstanceID: instanceID}, Root: root, Launcher: command, LauncherDone: done, KnownProcesses: map[int]RehearsalOwnedProcessIdentityV1{}}
+	if identity, identityErr := flatpakOwnedIdentityReader(command.Process.Pid); identityErr == nil {
+		owned.KnownProcesses[identity.PID] = identity
+	}
+	return bindLaunchedFlatpakOBS(ctx, owned, 20*time.Second)
+}
+
+func abortUnidentifiedLauncher(command *exec.Cmd, done <-chan error, timeout time.Duration) error {
+	if command == nil || command.Process == nil {
+		return nil
+	}
+	killErr := command.Process.Kill()
+	select {
+	case <-done:
+		return killErr
+	case <-time.After(timeout):
+		return errors.Join(killErr, errors.New("unidentified Flatpak launcher did not exit"))
+	}
+}
+
+func bindLaunchedFlatpakOBS(ctx context.Context, owned *ownedFlatpakOBS, timeout time.Duration) (*ownedFlatpakOBS, error) {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		instances, listErr := flatpakOBSInstanceLister(ctx)
 		if listErr == nil {
 			var match *flatpakOBSInstance
+			unrelated := false
 			for index := range instances {
-				if instances[index].InstanceID == instanceID {
+				if instances[index].InstanceID == owned.InstanceID {
 					copy := instances[index]
 					match = &copy
 				} else {
-					_ = stopOwnedFlatpakOBS(context.Background(), owned, 30*time.Second)
-					return nil, errors.New("unrelated OBS instance appeared during launch")
+					unrelated = true
 				}
 			}
 			if match != nil {
-				realPID, identity, identityErr := discoverRealOBSProcess(match.SandboxPID)
+				rememberFlatpakProcesses(owned, *match)
+			}
+			if unrelated {
+				cleanupErr := flatpakAbortBoundInstance(context.Background(), owned, 30*time.Second)
+				return nil, errors.Join(errors.New("unrelated OBS instance appeared during launch"), cleanupErr)
+			}
+			if match != nil {
+				realPID, identity, identityErr := flatpakOBSDiscoverer(match.SandboxPID)
 				if identityErr == nil {
 					match.OBSPID = realPID
 					owned.flatpakOBSInstance, owned.Identity = *match, identity
-					if envErr := verifyOBSRootEnvironment(realPID, root); envErr != nil {
-						_ = stopOwnedFlatpakOBS(context.Background(), owned, 30*time.Second)
-						return nil, envErr
+					owned.KnownProcesses[realPID] = identity
+					if envErr := verifyOBSRootEnvironment(realPID, owned.Root); envErr != nil {
+						cleanupErr := flatpakAbortBoundInstance(context.Background(), owned, 30*time.Second)
+						return nil, errors.Join(envErr, cleanupErr)
 					}
 					return owned, nil
 				}
 			}
 		}
 		select {
-		case launchErr := <-done:
-			return nil, fmt.Errorf("Flatpak launcher exited before instance binding: %w", launchErr)
+		case launchErr := <-owned.LauncherDone:
+			owned.LauncherWaited = true
+			cleanupErr := flatpakAbortBoundInstance(context.Background(), owned, 30*time.Second)
+			return nil, errors.Join(fmt.Errorf("Flatpak launcher exited before instance binding: %w", launchErr), cleanupErr)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	_ = stopOwnedFlatpakOBS(context.Background(), owned, 30*time.Second)
-	return nil, errors.New("real OBS process identity deadline exceeded")
+	cleanupErr := flatpakAbortBoundInstance(context.Background(), owned, 30*time.Second)
+	return nil, errors.Join(errors.New("real OBS process identity deadline exceeded"), cleanupErr)
 }
 
 func discoverRealOBSProcess(sandboxPID int) (int, RehearsalOwnedProcessIdentityV1, error) {
@@ -212,12 +249,13 @@ func captureOwnedFlatpakCorrelation(ctx context.Context, productPID int, obs *ow
 	if err != nil || len(instances) != 1 || instances[0].InstanceID != obs.InstanceID || instances[0].WrapperPID != obs.WrapperPID || instances[0].SandboxPID != obs.SandboxPID {
 		return processCorrelation{}, errors.New("owned Flatpak OBS instance identity changed")
 	}
-	current, err := readRehearsalOwnedProcessIdentity(obs.OBSPID)
+	rememberFlatpakProcesses(obs, instances[0])
+	current, err := flatpakOwnedIdentityReader(obs.OBSPID)
 	if err != nil || !sameRehearsalOwnedProcessIdentity(current, obs.Identity) {
 		return processCorrelation{}, errors.New("real OBS process identity changed")
 	}
 	all := []int{productPID, obs.WrapperPID, obs.SandboxPID}
-	descendants, err := descendantPIDs("/proc", obs.SandboxPID)
+	descendants, err := flatpakDescendants(obs.SandboxPID)
 	if err != nil {
 		return processCorrelation{}, err
 	}
@@ -242,6 +280,76 @@ func captureOwnedFlatpakCorrelation(ctx context.Context, productPID int, obs *ow
 		return processCorrelation{}, err
 	}
 	return processCorrelation{SHA256: payloadSHA(payload), Processes: len(identities)}, nil
+}
+
+func rememberFlatpakProcesses(obs *ownedFlatpakOBS, instance flatpakOBSInstance) {
+	obs.WrapperPID, obs.SandboxPID = instance.WrapperPID, instance.SandboxPID
+	if obs.KnownProcesses == nil {
+		obs.KnownProcesses = map[int]RehearsalOwnedProcessIdentityV1{}
+	}
+	pids := []int{instance.WrapperPID, instance.SandboxPID}
+	if descendants, err := flatpakDescendants(instance.SandboxPID); err == nil {
+		pids = append(pids, descendants...)
+	}
+	for _, pid := range pids {
+		if pid <= 1 {
+			continue
+		}
+		if identity, err := flatpakOwnedIdentityReader(pid); err == nil {
+			obs.KnownProcesses[pid] = identity
+		}
+	}
+}
+
+func retainedFlatpakProcesses(obs *ownedFlatpakOBS) []RehearsalOwnedProcessIdentityV1 {
+	values := make([]RehearsalOwnedProcessIdentityV1, 0, len(obs.KnownProcesses))
+	for _, identity := range obs.KnownProcesses {
+		values = append(values, identity)
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].PID < values[j].PID })
+	return values
+}
+
+func abortBoundFlatpakOBS(ctx context.Context, obs *ownedFlatpakOBS, timeout time.Duration) error {
+	if obs == nil || obs.InstanceID == "" {
+		return errors.New("FD-bound Flatpak instance identity unavailable")
+	}
+	_ = flatpakKillBoundInstance(ctx, obs.InstanceID)
+	return waitBoundFlatpakExit(obs, timeout)
+}
+
+func waitBoundFlatpakExit(obs *ownedFlatpakOBS, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		instances, listErr := flatpakOBSInstanceLister(context.Background())
+		ownedPresent := false
+		if listErr == nil {
+			for _, instance := range instances {
+				ownedPresent = ownedPresent || instance.InstanceID == obs.InstanceID
+			}
+		}
+		processesGone := true
+		for _, expected := range obs.KnownProcesses {
+			current, err := flatpakOwnedIdentityReader(expected.PID)
+			if err == nil && sameRehearsalOwnedProcessIdentity(current, expected) {
+				processesGone = false
+				break
+			}
+		}
+		if !obs.LauncherWaited && obs.LauncherDone != nil {
+			select {
+			case <-obs.LauncherDone:
+				obs.LauncherWaited = true
+			default:
+			}
+		}
+		launcherGone := obs.LauncherDone == nil || obs.LauncherWaited
+		if listErr == nil && !ownedPresent && processesGone && launcherGone {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("FD-bound Flatpak instance processes did not exit before deadline")
 }
 
 func waitOwnedFlatpakCorrelation(ctx context.Context, productPID int, obs *ownedFlatpakOBS, timeout time.Duration) (processCorrelation, error) {
@@ -293,7 +401,7 @@ func stopOwnedFlatpakOBS(ctx context.Context, obs *ownedFlatpakOBS, timeout time
 	if obs == nil || obs.InstanceID == "" {
 		return nil
 	}
-	current, identityErr := readRehearsalOwnedProcessIdentity(obs.OBSPID)
+	current, identityErr := flatpakOwnedIdentityReader(obs.OBSPID)
 	if identityErr != nil || !sameRehearsalOwnedProcessIdentity(current, obs.Identity) {
 		return errors.New("refusing to signal changed OBS process identity")
 	}
@@ -303,34 +411,14 @@ func stopOwnedFlatpakOBS(ctx context.Context, obs *ownedFlatpakOBS, timeout time
 		return findErr
 	}
 	signalErr := process.Signal(syscall.SIGINT)
-	deadline := time.Now().Add(timeout)
-	graceDeadline := time.Now().Add(timeout * 2 / 3)
-	waitGone := func(until time.Time) bool {
-		for time.Now().Before(until) {
-			instances, listErr := flatpakOBSInstanceLister(context.Background())
-			if listErr != nil {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			present := false
-			for _, instance := range instances {
-				present = present || instance.InstanceID == obs.InstanceID
-			}
-			identity, err := readRehearsalOwnedProcessIdentity(obs.OBSPID)
-			if !present && (err != nil || !sameRehearsalOwnedProcessIdentity(identity, obs.Identity)) {
-				return true
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		return false
-	}
-	if signalErr == nil && waitGone(graceDeadline) {
+	grace := timeout * 2 / 3
+	if signalErr == nil && waitBoundFlatpakExit(obs, grace) == nil {
 		return recordingErr
 	}
-	command := exec.CommandContext(ctx, "flatpak", "kill", obs.InstanceID)
-	killErr := command.Run()
-	if waitGone(deadline) {
-		return errors.Join(recordingErr, signalErr, killErr)
+	killErr := flatpakKillBoundInstance(ctx, obs.InstanceID)
+	if waitErr := waitBoundFlatpakExit(obs, timeout-grace); waitErr == nil {
+		return errors.Join(recordingErr, signalErr)
+	} else {
+		return errors.Join(recordingErr, signalErr, killErr, waitErr)
 	}
-	return errors.Join(recordingErr, signalErr, killErr, errors.New("owned OBS instance did not terminate before deadline"))
 }

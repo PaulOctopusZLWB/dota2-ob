@@ -43,8 +43,11 @@ type rehearsalLifecycleReport struct {
 	steps                  []RehearsalProducerStepV1
 	productPID             int
 	obsPID                 int
+	obsLauncherPID         int
+	obsSandboxPID          int
 	obsInstanceID          string
 	obsExecutable          RehearsalOwnedProcessIdentityV1
+	obsProcesses           []RehearsalOwnedProcessIdentityV1
 	obsStartCorrelation    string
 	obsTerminalCorrelation string
 	recoveryPID            int
@@ -104,7 +107,9 @@ func executeRehearsalProducer(ctx context.Context, root, repo string, preflight 
 		SchemaVersion: rehearsalProducerSchemaV1, Purpose: RehearsalPurpose, SessionID: preflight.SessionID,
 		PreflightSHA256: preflight.PreflightSHA256, RootOwnerSHA256: preflight.RootOwnerSHA256,
 		SourceMode: report.sourceMode, Steps: report.steps, ProductPID: report.productPID, OBSPID: report.obsPID,
+		OBSLauncherPID: report.obsLauncherPID, OBSSandboxPID: report.obsSandboxPID,
 		OBSInstanceID: report.obsInstanceID, OBSExecutable: report.obsExecutable,
+		OBSProcesses:        append([]RehearsalOwnedProcessIdentityV1(nil), report.obsProcesses...),
 		OBSStartCorrelation: report.obsStartCorrelation, OBSTerminalCorrelation: report.obsTerminalCorrelation,
 		RecoveryPID: report.recoveryPID, OperatorActions: append([]string(nil), report.operatorActions...),
 		DotaContinuity:  append([]RehearsalProcessObservationV1(nil), report.dotaContinuity...),
@@ -240,7 +245,7 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 		_ = stopProcess(product, productDone, 15*time.Second)
 		return report, err
 	}
-	report.obsPID, report.obsInstanceID, report.obsExecutable = obs.OBSPID, obs.InstanceID, obs.Identity
+	report.obsPID, report.obsLauncherPID, report.obsSandboxPID, report.obsInstanceID, report.obsExecutable = obs.OBSPID, obs.WrapperPID, obs.SandboxPID, obs.InstanceID, obs.Identity
 	obsStopped := false
 	defer func() {
 		if !obsStopped {
@@ -356,6 +361,7 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 	complete(productShutdown, productStop)
 	obsFinalize := step("finalize_obs")
 	obsStop := stopOwnedFlatpakOBS(context.Background(), obs, 30*time.Second)
+	report.obsProcesses = retainedFlatpakProcesses(obs)
 	obsStopped = true
 	obsStop = errors.Join(terminalCorrelationErr, obsStop, obsLog.Close())
 	complete(obsFinalize, obsStop)
@@ -549,7 +555,7 @@ func validateProducerEvidence(root string, evidence RehearsalProducerEvidenceV1,
 			return errors.New("producer completion artifact missing: " + role)
 		}
 	}
-	if evidence.SourceMode != "physical_public_match" || !evidence.PhysicalMatch || evidence.ProductPID <= 1 || evidence.OBSPID <= 1 || evidence.OBSInstanceID == "" || evidence.OBSExecutable.PID != evidence.OBSPID || !validOwnedProcessIdentity(evidence.OBSExecutable) || !strings.Contains(strings.ToLower(evidence.OBSExecutable.Comm), "obs") || !validLowerSHA256(evidence.OBSStartCorrelation) || !validLowerSHA256(evidence.OBSTerminalCorrelation) || evidence.RawRecords == 0 || evidence.ResourceSamples == 0 || evidence.VisibilitySamples == 0 || !evidence.RecordingFinalized || !evidence.Reconciled || !evidence.RecoveryByteEqual || !evidence.CleanShutdown {
+	if evidence.SourceMode != "physical_public_match" || !evidence.PhysicalMatch || evidence.ProductPID <= 1 || evidence.OBSPID <= 1 || evidence.OBSLauncherPID <= 1 || evidence.OBSSandboxPID <= 1 || evidence.OBSInstanceID == "" || evidence.OBSExecutable.PID != evidence.OBSPID || !validOwnedProcessIdentity(evidence.OBSExecutable) || !strings.Contains(strings.ToLower(evidence.OBSExecutable.Comm), "obs") || !validLowerSHA256(evidence.OBSStartCorrelation) || !validLowerSHA256(evidence.OBSTerminalCorrelation) || !validOBSProcessPopulation(evidence) || evidence.RawRecords == 0 || evidence.ResourceSamples == 0 || evidence.VisibilitySamples == 0 || !evidence.RecordingFinalized || !evidence.Reconciled || !evidence.RecoveryByteEqual || !evidence.CleanShutdown {
 		return errors.New("producer operational completion facts invalid")
 	}
 	rawPath := filepath.Join(root, "data", "sessions", evidence.SessionID, "raw.jsonl")
@@ -564,6 +570,17 @@ func validateProducerEvidence(root string, evidence RehearsalProducerEvidenceV1,
 		return errors.New("producer operator actions invalid")
 	}
 	return nil
+}
+
+func validOBSProcessPopulation(evidence RehearsalProducerEvidenceV1) bool {
+	seen := map[int]bool{}
+	for _, identity := range evidence.OBSProcesses {
+		if seen[identity.PID] || !validOwnedProcessIdentity(identity) {
+			return false
+		}
+		seen[identity.PID] = true
+	}
+	return seen[evidence.OBSLauncherPID] && seen[evidence.OBSSandboxPID] && seen[evidence.OBSPID]
 }
 
 func validateProducerDotaContinuity(observations []RehearsalProcessObservationV1, expected RehearsalDotaIdentityV1, records []session.RawRecordAttestationV1, requireCompletion bool) error {

@@ -109,7 +109,7 @@ func (obsOnlySmokeDriver) Run(ctx context.Context, run rehearsalLifecycleContext
 		_ = obsLog.Close()
 		return report, err
 	}
-	report.obsPID, report.obsInstanceID, report.obsExecutable = obs.OBSPID, obs.InstanceID, obs.Identity
+	report.obsPID, report.obsLauncherPID, report.obsSandboxPID, report.obsInstanceID, report.obsExecutable = obs.OBSPID, obs.WrapperPID, obs.SandboxPID, obs.InstanceID, obs.Identity
 	obsReady := step("obs_ready")
 	startCorrelation, err := waitOwnedFlatpakCorrelation(ctx, product.Process.Pid, obs, 20*time.Second)
 	if err == nil {
@@ -130,6 +130,7 @@ func (obsOnlySmokeDriver) Run(ctx context.Context, run rehearsalLifecycleContext
 	}
 	finalize := step("finalize_obs")
 	obsStop := stopOwnedFlatpakOBS(context.Background(), obs, 30*time.Second)
+	report.obsProcesses = retainedFlatpakProcesses(obs)
 	obsStop = errors.Join(correlationErr, obsStop, obsLog.Close())
 	report.recordingFinalized = obsStop == nil && recordingFinalized(filepath.Join(run.root, "recordings"), filepath.Join(run.root, "evidence/logs/obs-live.log"))
 	obsStop = errors.Join(obsStop, boolError(report.recordingFinalized, "OBS smoke recording did not finalize"))

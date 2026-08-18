@@ -12,7 +12,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-const requiredRehearsalParent = "41079ee6652e1366ca775bf6a4a1ccba6a7304a1"
+const requiredRehearsalParent = "d2d5b569abf56f0412926fd5c100cb254842a215"
 
 type rehearsalPreflightProbe struct {
 	commit, parent, branch, remoteHead, prHead             string
@@ -92,6 +92,13 @@ func RehearsalPreflight(ctx context.Context, config RehearsalPreflightConfig) (R
 		return RehearsalPreflightV1{}, err
 	}
 	readyForArm := true
+	var armed *RehearsalArmV1
+	rollback := func(primary error) (RehearsalPreflightV1, error) {
+		if armed == nil {
+			return RehearsalPreflightV1{}, primary
+		}
+		return preflight, errors.Join(primary, rollbackArmedGSI(lease.abs, *armed))
+	}
 	for id, check := range checksByID {
 		if id != "gsi_arm" {
 			readyForArm = readyForArm && check.Passed
@@ -100,7 +107,13 @@ func RehearsalPreflight(ctx context.Context, config RehearsalPreflightConfig) (R
 	if readyForArm {
 		arm, armErr := armRehearsalGSI(lease.abs, preflight)
 		if armErr == nil {
-			preflight.ArmSHA256 = arm.ArmToken
+			armed = &arm
+			preflight.ArmSHA256, armErr = rehearsalArmBindingID(arm)
+			if armErr != nil {
+				return rollback(armErr)
+			}
+		}
+		if armErr == nil {
 			checksByID["gsi_arm"] = RehearsalCheckV1{ID: "gsi_arm", Passed: true, Code: "ok"}
 		} else {
 			checksByID["gsi_arm"] = RehearsalCheckV1{ID: "gsi_arm", Passed: false, Code: boundedFailure(armErr)}
@@ -116,15 +129,33 @@ func RehearsalPreflight(ctx context.Context, config RehearsalPreflightConfig) (R
 	if preflight.ConsoleState == RehearsalReady {
 		preflight.HumanInstruction = RehearsalInstruction
 	}
+	if armed != nil {
+		if err := rehearsalArmFault("preflight_after_arm"); err != nil {
+			return rollback(err)
+		}
+		if err := rehearsalArmFault("preflight_content_id"); err != nil {
+			return rollback(err)
+		}
+	}
 	preflight.PreflightSHA256, err = rehearsalPreflightContentID(preflight)
 	if err != nil {
-		return RehearsalPreflightV1{}, err
+		return rollback(err)
+	}
+	if armed != nil {
+		if err := rehearsalArmFault("preflight_json"); err != nil {
+			return rollback(err)
+		}
 	}
 	if err := writeJSON(filepath.Join(lease.abs, "rehearsal", "preflight.json"), preflight, 0o600); err != nil {
-		return RehearsalPreflightV1{}, err
+		return rollback(err)
+	}
+	if armed != nil {
+		if err := rehearsalArmFault("preflight_seal"); err != nil {
+			return rollback(err)
+		}
 	}
 	if err := writePrivate(filepath.Join(lease.abs, "rehearsal", "preflight.sha256"), []byte(preflight.PreflightSHA256+"\n")); err != nil {
-		return RehearsalPreflightV1{}, err
+		return rollback(err)
 	}
 	return preflight, nil
 }

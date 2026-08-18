@@ -6,11 +6,13 @@ The compiled rehearsal contract is `1d793bc3d1d38b3ce3fd9e97005a5d4e45e928b2`. T
 
 ### ARM -> human launch -> ATTEMPT/JOIN
 
-Before Dota is launched, arm from the exact pushed candidate. `rehearsal-arm` creates the owned root, binds the exact Go executable, installs the exact root-owned GSI bytes with no-overwrite semantics, and prints an `arm_sha256` token in the receipt:
+Before Dota is launched, arm from the exact pushed candidate. `rehearsal-arm` creates the owned root, binds the exact Go executable, installs the exact root-owned GSI bytes with no-overwrite semantics, and seals a deterministic `arm_sha256` binding in the receipt. The physical cleanup token is retained as `arm_token` in `rehearsal/arm.json`:
 
 ```sh
 m4-match rehearsal-arm --data-root /var/tmp/<fresh-DOT-87-root> --repo-root <exact-candidate-checkout>
 ```
+
+ARM is transactional: any failure after creating the GSI entry and before sealing the ready receipt quarantines and validates the owned inode before removal. If rollback itself cannot complete, `rehearsal/arm-recovery.json` retains the token and exact identity for `rehearsal-disarm`. Cleanup first atomically moves the configured pathname aside; a replacement created at the original pathname is never unlinked.
 
 Only after a `REHEARSAL_READY` receipt may the human launch Dota 2, then manually join the selected public match. Do not launch Dota before ARM. The attempt consumes and revalidates the retained arm record; it does not restage GSI. It builds with the bound Go executable, starts the exact product, and starts a new Flatpak OBS instance whose real instance ID/PID and root-local HOME/config/data/cache/recording paths are verified:
 
@@ -23,10 +25,10 @@ m4-match rehearsal-cleanup --data-root <harness-root> --repo-root <exact-candida
 For cancellation before ATTEMPT, remove only the exact still-owned GSI file with its arm token. A wrong token, changed inode, changed bytes, symlink, or substituted path is refused:
 
 ```sh
-m4-match rehearsal-disarm --data-root <harness-root> --repo-root <exact-candidate-checkout> --confirm-arm-sha256 <arm_sha256>
+m4-match rehearsal-disarm --data-root <harness-root> --repo-root <exact-candidate-checkout> --confirm-arm-sha256 "$(jq -r .arm_token <harness-root>/rehearsal/arm.json)"
 ```
 
-Recovery after interruption is fail-closed: first inspect `flatpak ps --columns=instance,pid,child-pid,application`; never use global `pkill`, `killall`, or an application-wide stop. If producer evidence names an owned instance still present, stop only that exact ID with `flatpak kill <instance-id>`, wait for its real PID to disappear, then run the token-gated cleanup command. Never stop a pre-existing or unrecorded OBS instance.
+Recovery after interruption is fail-closed: first inspect `flatpak ps --columns=instance,pid,child-pid,application`; never use global `pkill`, `killall`, or an application-wide stop. The harness records the `--instance-id-fd` value before process discovery and uses that exact ID on every pre-bind failure, then waits for the launcher, sandbox, discovered helpers, and real OBS identity to exit before closing logs. If producer evidence names an owned instance still present, stop only that exact ID with `flatpak kill <instance-id>`, wait for its process population to disappear, then run the token-gated cleanup command. Never stop a pre-existing or unrecorded OBS instance.
 
 `rehearsal-attempt` exits zero only when its `rehearsal_completed` receipt passes the independent verifier. Every refusal, zero-frame abort, failed or partial attempt, unavailable or drifting Dota identity, evidence mismatch, and verifier failure prints a canonical failed receipt and exits nonzero. All terminal paths stop the exact owned OBS instance and close its recording/logs before hashing and sealing. Cleanup is verifier- and token-gated; a wrong token preserves the root.
 
