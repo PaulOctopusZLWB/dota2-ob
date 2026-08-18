@@ -253,34 +253,47 @@ func (s *Server) serveAggregation(w http.ResponseWriter, id string) {
 		writeErr(w, http.StatusNotFound, "scores_corpus_unavailable")
 		return
 	}
-	searchAggregated := func(subject, scope string, metrics map[string]scoring.AggregatedMetric) bool {
+	writeAggregation := func(subject, scope, matchID string, mid string, am scoring.AggregatedMetric, ref scoring.EvidenceRef) {
+		children := []scoring.EvidenceRef{}
+		for _, child := range am.Lineage {
+			if child.Kind == "aggregation" && child.ID == ref.ID {
+				continue
+			}
+			children = append(children, child)
+		}
+		writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: map[string]interface{}{
+			"aggregation_id": id, "scope": scope, "subject": subject, "match_id": matchID,
+			"metric_id": mid, "metric_version": am.MetricVersion, "value": am.Value,
+			"numerator": am.Numerator, "denominator": am.Denominator, "opportunity_count": am.OpportunityCount,
+			"eligible_matches": am.EligibleMatches, "rule_version": ref.RuleVersion,
+			"contract_version": ref.ContractVersion, "child_refs": children,
+		}})
+	}
+	searchAggregated := func(subject, scope, matchID string, metrics map[string]scoring.AggregatedMetric) bool {
 		for mid, am := range metrics {
 			for _, ref := range am.Lineage {
-				if ref.Kind == "aggregation" && ref.ID == id {
-					children := []scoring.EvidenceRef{}
-					for _, child := range am.Lineage {
-						if child.Kind != "aggregation" {
-							children = append(children, child)
-						}
-					}
-					writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: map[string]interface{}{
-						"aggregation_id": id, "scope": scope, "subject": subject,
-						"metric_id": mid, "metric_version": am.MetricVersion, "value": am.Value, "eligible_matches": am.EligibleMatches,
-						"rule_version": ref.RuleVersion, "child_refs": children,
-					}})
+				if ref.Kind == "aggregation" && ref.ID == id && ref.MatchID == matchID {
+					writeAggregation(subject, scope, matchID, mid, am, ref)
 					return true
 				}
 			}
 		}
 		return false
 	}
+	for teamID, byMatch := range cs.TeamMatches {
+		for matchID, entity := range byMatch {
+			if entity != nil && searchAggregated(teamID, "team_match", matchID, entity.Metrics) {
+				return
+			}
+		}
+	}
 	for _, ps := range cs.Players {
-		if searchAggregated(ps.AccountID, "player_tournament", ps.AggregatedMetrics) {
+		if searchAggregated(ps.AccountID, "player_tournament", "", ps.AggregatedMetrics) {
 			return
 		}
 	}
 	for _, ts := range cs.Teams {
-		if searchAggregated(ts.TeamID, "team_tournament", ts.AggregatedMetrics) {
+		if searchAggregated(ts.TeamID, "team_tournament", "", ts.AggregatedMetrics) {
 			return
 		}
 	}

@@ -98,6 +98,79 @@ async function setToken(page, base) {
   await page.evaluate((t) => localStorage.setItem("dota2ob_session_token", t), TOKEN);
 }
 
+async function assertMultiMatchTeamAggregations(page, base, assertStale) {
+  const teamID = "9823272";
+  const metricID = "hero_damage_total";
+  const expectedMatches = ["8944525313", "8946228107"];
+  const corpus = await api(page, `${base}/api/replay/v1/scores/corpus`);
+  const team = (corpus.data.teams || []).find(t => t.team_id === teamID);
+  assert.ok(team, `team ${teamID} score missing`);
+  const tournament = team.aggregated_metrics && team.aggregated_metrics[metricID];
+  assert.ok(tournament, `${teamID} ${metricID} tournament aggregation missing`);
+  assert.strictEqual(tournament.value, 172402, `${teamID} tournament ${metricID}`);
+  assert.strictEqual(tournament.eligible_matches, 2, `${teamID} eligible matches`);
+  const refs = (tournament.lineage || []).filter(r => r.kind === "aggregation" && r.match_id);
+  assert.deepStrictEqual(refs.map(r => r.match_id).sort(), expectedMatches, "team-match child match set");
+  assert.strictEqual(new Set(refs.map(r => r.id)).size, 2, "team-match child ids collided");
+  for (const ref of refs) {
+    assert.ok(ref.id.includes(`aggregation:team_match:${teamID}:${ref.match_id}:${metricID}:`), `unqualified team-match id ${ref.id}`);
+    assert.ok(ref.id.endsWith(":ti2026.scoring.v5"), `team-match score rule missing ${ref.id}`);
+    assert.strictEqual(ref.rule_version, "ti2026.scoring.v5", `team-match ref rule ${ref.id}`);
+    assert.ok(ref.contract_version, `team-match contract missing ${ref.id}`);
+  }
+  const persisted = corpus.data.team_matches && corpus.data.team_matches[teamID];
+  assert.ok(persisted, `persisted team-match entities missing for ${teamID}`);
+  const localValues = [];
+  for (const ref of refs) {
+    const entity = persisted[ref.match_id];
+    assert.ok(entity && entity.match_id === ref.match_id && entity.team_id === teamID, `wrong persisted team-match entity ${ref.match_id}`);
+    const local = entity.metrics && entity.metrics[metricID];
+    assert.ok(local, `match-local ${metricID} missing for ${ref.match_id}`);
+    assert.ok((local.lineage || []).some(r => r.id === ref.id && r.match_id === ref.match_id), `entity does not own ${ref.id}`);
+    localValues.push(local.value);
+  }
+  assert.strictEqual(localValues.reduce((a, b) => a + b, 0), tournament.value, "team tournament does not reconcile to persisted match-local values");
+
+  await page.goto(`${base}/team.html?id=${teamID}`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("a[data-aggregation-scope='team_match']", { timeout: 15000 });
+  const rendered = await page.$$eval("a[data-aggregation-scope='team_match']", links => links.map(a => ({ id: a.dataset.aggregationId, match: a.dataset.matchId, href: a.getAttribute("href") })));
+  const targetLinks = rendered.filter(x => x.id.includes(`:${metricID}:`));
+  assert.deepStrictEqual(targetLinks.map(x => x.match).sort(), expectedMatches, "rendered team-match link set");
+  for (const target of targetLinks) {
+    await page.goto(`${base}/team.html?id=${teamID}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("a[data-aggregation-scope='team_match']", { timeout: 15000 });
+    const handles = await page.$$("a[data-aggregation-scope='team_match']");
+    let clicked = false;
+    for (const handle of handles) {
+      if (await handle.getAttribute("data-aggregation-id") === target.id) {
+        await handle.click();
+        clicked = true;
+        break;
+      }
+    }
+    assert.ok(clicked, `rendered team-match link missing ${target.id}`);
+    await page.waitForSelector("[data-aggregation-match-id]", { timeout: 15000 });
+    const matchID = await page.$eval("[data-aggregation-match-id]", el => el.dataset.aggregationMatchId);
+    const text = await page.evaluate(() => document.body.innerText);
+    assert.strictEqual(matchID, target.match, `rendered aggregation resolved wrong match for ${target.id}`);
+    assert.ok(text.includes("team_match") && text.includes(String(persisted[target.match].metrics[metricID].value)), `rendered aggregation resolved wrong entity for ${target.id}`);
+  }
+
+  if (assertStale) {
+    await page.goto(`${base}/team.html?id=${teamID}`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("a[data-aggregation-scope='team_match']", { timeout: 15000 });
+    await page.$eval("a[data-aggregation-scope='team_match']", a => {
+      const stale = a.dataset.aggregationId.replace(`:${a.dataset.matchId}:`, ":stale-match:");
+      a.dataset.aggregationId = stale;
+      a.href = `aggregation.html?id=${encodeURIComponent(stale)}`;
+    });
+    await page.click("a[data-aggregation-scope='team_match']");
+    await page.waitForSelector(".panel .hint", { timeout: 15000 });
+    const reason = await page.$eval(".panel .hint", el => el.innerText);
+    assert.ok(reason.includes("aggregation_not_found:aggregation:team_match:9823272:stale-match:"), `stale rendered team-match reason=${reason}`);
+  }
+}
+
 // phaseOp drives the REAL rendered review controls for one typed operation and
 // returns the served review (corrections, effective stream) after the reload.
 async function phaseOp(page, base, spec) {
@@ -299,6 +372,7 @@ async function main() {
       assert.ok(teamText.includes("队伍官方总分"), "team page missing official total label");
       assert.ok(teamText.includes("队伍实验总分"), "team page missing experimental total label");
       assert.ok(teamText.includes("指标分解"), "team page missing decomposition");
+      await assertMultiMatchTeamAggregations(page, base, false);
 
       // ============ Seven typed phase operations via the rendered UI ============
       const ops = [
@@ -499,6 +573,7 @@ async function main() {
       await setToken(page, restartedBase2);
       await assertRoleAgreement(restartedBase2);
 	  await assertFrozenOpportunityAndLineage(page, restartedBase2, true);
+	  await assertMultiMatchTeamAggregations(page, restartedBase2, true);
 
       // ============ Click actual rendered lineage links on the match page ============
       // Follow every canonical evidence kind from the actual rendered anchor;
@@ -541,7 +616,7 @@ async function main() {
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, team 9823272 hero_damage_total=172402 reconciles to two distinct match-qualified team-match entities whose rendered links resolve before/after restart and whose rendered stale link returns the exact 404 reason, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

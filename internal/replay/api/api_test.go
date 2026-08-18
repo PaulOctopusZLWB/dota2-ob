@@ -1001,6 +1001,81 @@ func writeFactLine(t *testing.T, st *store.Store, matchID string, f *facts.Fact)
 	}
 }
 
+func TestTeamMatchAggregationRoutesResolveExactPersistedEntities(t *testing.T) {
+	st := testStore(t)
+	mreg, _ := testContracts(t)
+	metricVersion := mreg.Find("hero_damage_total").MetricVersion
+	const teamID = "9823272"
+	matchIDs := []string{"8944525313", "8946228107"}
+	values := []float64{70000, 102402}
+	teamMatches := map[string]map[string]*scoring.TeamMatch{teamID: {}}
+	tournamentLineage := []scoring.EvidenceRef{}
+	for i, matchID := range matchIDs {
+		id := fmt.Sprintf("aggregation:team_match:%s:%s:hero_damage_total:%s:%s", teamID, matchID, metricVersion, version.ScoreRuleVersion)
+		lineage := []scoring.EvidenceRef{
+			{MatchID: matchID, Kind: "fact", ID: fmt.Sprintf("fact:%d", i+1)},
+			{MatchID: matchID, Kind: "aggregation", ID: id, RuleVersion: version.ScoreRuleVersion, ContractVersion: scoring.TeamSchemaVersion},
+		}
+		teamMatches[teamID][matchID] = &scoring.TeamMatch{
+			MatchID: matchID, TeamID: teamID, RuleVersion: version.ScoreRuleVersion, ContractVersion: scoring.TeamSchemaVersion, PlayerCount: 5,
+			Metrics: map[string]scoring.AggregatedMetric{"hero_damage_total": {MetricID: "hero_damage_total", MetricVersion: metricVersion, Value: values[i], Numerator: values[i], EligibleMatches: 1, Lineage: lineage}},
+		}
+		tournamentLineage = append(tournamentLineage, lineage...)
+	}
+	tournamentID := fmt.Sprintf("aggregation:team_tournament:%s::hero_damage_total:%s:%s", teamID, metricVersion, version.ScoreRuleVersion)
+	tournamentLineage = append(tournamentLineage, scoring.EvidenceRef{Kind: "aggregation", ID: tournamentID, RuleVersion: version.ScoreRuleVersion, ContractVersion: scoring.TeamSchemaVersion})
+	cs := &scoring.CorpusScores{
+		SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion, ContractVersion: scoring.SchemaVersion, TeamScoringVersion: scoring.TeamSchemaVersion,
+		CorpusMatches: 2,
+		Matches: map[string]*scoring.MatchScores{
+			matchIDs[0]: {SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion, MatchID: matchIDs[0], Players: []*scoring.PlayerMatch{}},
+			matchIDs[1]: {SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion, MatchID: matchIDs[1], Players: []*scoring.PlayerMatch{}},
+		},
+		TeamMatches: teamMatches,
+		Teams: []*scoring.TeamScore{{TeamID: teamID, ScoringVersion: scoring.TeamSchemaVersion,
+			SubjectCoverage:   scoring.SubjectCoverage{EligibleMatches: 2, MatchIDs: matchIDs, CorpusMatches: 2},
+			AggregatedMetrics: map[string]scoring.AggregatedMetric{"hero_damage_total": {MetricID: "hero_damage_total", MetricVersion: metricVersion, Value: 172402, Numerator: 172402, EligibleMatches: 2, Lineage: tournamentLineage}},
+		}},
+		Players: []*scoring.PlayerScore{},
+	}
+	if err := scoring.ValidateCorpusScores(cs, mreg); err != nil {
+		t.Fatalf("valid score graph: %v", err)
+	}
+	if err := st.WriteRootJSON("scores-corpus.json", cs); err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, testRoleRegistry(t))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	seenChildren := map[string]bool{}
+	for i, matchID := range matchIDs {
+		id := fmt.Sprintf("aggregation:team_match:%s:%s:hero_damage_total:%s:%s", teamID, matchID, metricVersion, version.ScoreRuleVersion)
+		var env struct {
+			Data struct {
+				Scope     string                `json:"scope"`
+				Subject   string                `json:"subject"`
+				MatchID   string                `json:"match_id"`
+				Value     float64               `json:"value"`
+				ChildRefs []scoring.EvidenceRef `json:"child_refs"`
+			} `json:"data"`
+		}
+		if code := getJSON(t, ts.URL+Version+"/aggregations/"+id, &env); code != http.StatusOK {
+			t.Fatalf("route %s status=%d", id, code)
+		}
+		if env.Data.Scope != "team_match" || env.Data.Subject != teamID || env.Data.MatchID != matchID || env.Data.Value != values[i] || len(env.Data.ChildRefs) != 1 || env.Data.ChildRefs[0].MatchID != matchID {
+			t.Fatalf("route %s returned wrong entity: %+v", id, env.Data)
+		}
+		seenChildren[id] = true
+	}
+	if len(seenChildren) != 2 {
+		t.Fatalf("distinct routes=%d want 2", len(seenChildren))
+	}
+	if code := getJSON(t, ts.URL+Version+"/aggregations/aggregation:team_match:9823272:stale:hero_damage_total:"+metricVersion+":"+version.ScoreRuleVersion, &map[string]interface{}{}); code != http.StatusNotFound {
+		t.Fatalf("stale team-match route status=%d want 404", code)
+	}
+}
+
 // TestNavigableTypedLineageRoutes proves every typed lineage ref resolves to a
 // stable match-qualified detail route (fact, episode, phase, metric
 // observation, algorithm) and that stale/invalid refs render an explicit
@@ -1832,10 +1907,10 @@ func TestRoleOverrideRecomputeRejectsStaleMetricsArtifact(t *testing.T) {
 
 func TestStaleScoreWireShapeIsNotServedAsCurrent(t *testing.T) {
 	st := testStore(t)
-	if err := st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{SchemaVersion: "replay.score.v4", RuleVersion: "ti2026.scoring.v4"}); err != nil {
+	if err := st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{SchemaVersion: "replay.score.v5", RuleVersion: version.ScoreRuleVersion}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.WriteJSON("m1", store.ArtifactScores, &scoring.MatchScores{SchemaVersion: "replay.score.v4", RuleVersion: "ti2026.scoring.v4", MatchID: "m1"}); err != nil {
+	if err := st.WriteJSON("m1", store.ArtifactScores, &scoring.MatchScores{SchemaVersion: "replay.score.v5", RuleVersion: version.ScoreRuleVersion, MatchID: "m1"}); err != nil {
 		t.Fatal(err)
 	}
 	srv := testServerWithContracts(t, st, testRoleRegistry(t))
@@ -1926,6 +2001,106 @@ func TestCurrentTaggedScoreWithMissingNestedMetricVersionFailsClosedAcrossRestar
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("role override mutated corrupt authoritative score corpus")
+	}
+}
+
+func TestCorruptTeamMatchChildSetsFailClosedAcrossRestartAndOverrideRollback(t *testing.T) {
+	tests := []string{"missing", "duplicate", "extra", "matchless", "wrong_team", "wrong_match", "wrong_metric_version", "wrong_score_rule", "non_resolving"}
+	for _, kind := range tests {
+		t.Run(kind, func(t *testing.T) {
+			roleReg := frozenRoleRegistry()
+			st := testFrozenOverrideStore(t, roleReg)
+			path := filepath.Join(st.Root, "scores-corpus.json")
+			var cs scoring.CorpusScores
+			if err := st.ReadJSONFile(path, &cs); err != nil {
+				t.Fatal(err)
+			}
+			team := cs.Teams[0]
+			var metricID string
+			var agg scoring.AggregatedMetric
+			var childIndex int
+			found := false
+			for mid, candidate := range team.AggregatedMetrics {
+				for i, ref := range candidate.Lineage {
+					if ref.Kind == "aggregation" && ref.MatchID != "" {
+						metricID, agg, childIndex, found = mid, candidate, i, true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if !found {
+				t.Fatal("fixture has no team-match child")
+			}
+			child := agg.Lineage[childIndex]
+			switch kind {
+			case "missing":
+				agg.Lineage = append(agg.Lineage[:childIndex], agg.Lineage[childIndex+1:]...)
+			case "duplicate":
+				agg.Lineage = append(agg.Lineage, child)
+			case "extra":
+				extra := child
+				extra.MatchID = "extra-match"
+				extra.ID = strings.Replace(extra.ID, ":"+child.MatchID+":", ":extra-match:", 1)
+				agg.Lineage = append(agg.Lineage, extra)
+			case "matchless":
+				agg.Lineage[childIndex].MatchID = ""
+			case "wrong_team":
+				agg.Lineage[childIndex].ID = strings.Replace(agg.Lineage[childIndex].ID, ":"+team.TeamID+":", ":wrong-team:", 1)
+			case "wrong_match":
+				agg.Lineage[childIndex].MatchID = "wrong-match"
+			case "wrong_metric_version":
+				agg.Lineage[childIndex].ID = strings.Replace(agg.Lineage[childIndex].ID, ":1.0.0:", ":0.9.0:", 1)
+			case "wrong_score_rule":
+				agg.Lineage[childIndex].RuleVersion = "ti2026.scoring.v4"
+			case "non_resolving":
+				delete(cs.TeamMatches[team.TeamID], child.MatchID)
+			}
+			team.AggregatedMetrics[metricID] = agg
+			if err := st.WriteRootJSON("scores-corpus.json", &cs); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for restart := 0; restart < 2; restart++ {
+				srv := testServerWithContracts(t, st, roleReg)
+				ts := httptest.NewServer(srv.Handler())
+				resp, err := http.Get(ts.URL + Version + "/scores/corpus")
+				if err != nil {
+					ts.Close()
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				ts.Close()
+				if resp.StatusCode == http.StatusOK {
+					t.Fatalf("corruption %s served across restart %d", kind, restart)
+				}
+			}
+
+			rv, err := review.New(st.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := testServerWithContracts(t, st, roleReg).WithReviews(rv).WithSessionToken("tok")
+			ts := httptest.NewServer(srv.Handler())
+			code := overrideRole(t, ts.URL, "8944521919", "111114687", "1", "reviewer", "corrupt team-match rollback")
+			ts.Close()
+			if code != http.StatusInternalServerError {
+				t.Fatalf("corruption %s role override status=%d want 500", kind, code)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("corruption %s mutated authoritative score corpus", kind)
+			}
+		})
 	}
 }
 

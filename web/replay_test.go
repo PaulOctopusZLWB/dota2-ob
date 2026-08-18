@@ -226,6 +226,9 @@ func TestReplayAggregationPage(t *testing.T) {
 		"/api/replay/v1/aggregations/",
 		"聚合实体",
 		"child_refs",
+		"data-aggregation-match-id",
+		"contract_version",
+		"metric_version",
 		"rule_version",
 	} {
 		if !strings.Contains(html, want) {
@@ -256,6 +259,8 @@ func TestReplayTeamPage(t *testing.T) {
 		"官方轴分解",
 		"实验轴分解（虚线层）",
 		"指标分解（可复现显示值）",
+		"队伍聚合实体",
+		"data-aggregation-scope",
 		"player.html?id=",
 		// Suppressed layer stays visible as suppressed, never a zero polygon.
 		"已抑制",

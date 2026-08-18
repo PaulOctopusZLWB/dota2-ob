@@ -2,6 +2,7 @@ package scoring
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,142 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
+
+func twoMatchTeamCorpus(t *testing.T) (*CorpusScores, *metrics.Registry) {
+	t.Helper()
+	reg := testMetricReg(t)
+	p1 := mkPlayerWithLineage("8944525313", "a1", "9823272", "1", "hero_damage_total", 70000, 70000, 1, []EvidenceRef{{MatchID: "8944525313", Kind: "fact", ID: "fact:1"}})
+	p2 := mkPlayerWithLineage("8946228107", "a2", "9823272", "2", "hero_damage_total", 102402, 102402, 1, []EvidenceRef{{MatchID: "8946228107", Kind: "fact", ID: "fact:2"}})
+	cor := NewCorpusWithTeam(testContract(t), testTeamContract(t), reg, []*PlayerMatch{p1, p2})
+	return &CorpusScores{
+		SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion,
+		ContractVersion: SchemaVersion, TeamScoringVersion: TeamSchemaVersion,
+		CorpusMatches: 2,
+		Matches: map[string]*MatchScores{
+			p1.MatchID: {SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion, MatchID: p1.MatchID, Players: []*PlayerMatch{p1}},
+			p2.MatchID: {SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion, MatchID: p2.MatchID, Players: []*PlayerMatch{p2}},
+		},
+		TeamMatches: cor.TeamMatches,
+		Teams:       []*TeamScore{cor.ScoreTeam("9823272")},
+		Players:     []*PlayerScore{},
+	}, reg
+}
+
+func cloneCorpusScores(t *testing.T, in *CorpusScores) *CorpusScores {
+	t.Helper()
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out CorpusScores
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return &out
+}
+
+func TestTeamMatchAggregationsAreMatchQualifiedPersistedAndReconciled(t *testing.T) {
+	cs, reg := twoMatchTeamCorpus(t)
+	if err := ValidateCorpusScores(cs, reg); err != nil {
+		t.Fatal(err)
+	}
+	tournament := cs.Teams[0].AggregatedMetrics["hero_damage_total"]
+	if tournament.Value != 172402 || tournament.EligibleMatches != 2 {
+		t.Fatalf("tournament=%+v want value=172402 eligible=2", tournament)
+	}
+	seen := map[string]bool{}
+	for _, matchID := range []string{"8944525313", "8946228107"} {
+		child := cs.TeamMatches["9823272"][matchID].Metrics["hero_damage_total"]
+		wantID := teamMatchAggregationID("9823272", matchID, "hero_damage_total", reg.Find("hero_damage_total").MetricVersion)
+		found := false
+		for _, ref := range child.Lineage {
+			if ref.Kind == "aggregation" && ref.ID == wantID && ref.MatchID == matchID {
+				found = true
+				seen[ref.ID] = true
+			}
+		}
+		if !found {
+			t.Fatalf("match %s missing canonical ref %s: %+v", matchID, wantID, child.Lineage)
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("distinct team-match refs=%d want 2: %v", len(seen), seen)
+	}
+}
+
+func TestValidateCorpusScoresRejectsTeamMatchChildSetCorruption(t *testing.T) {
+	base, reg := twoMatchTeamCorpus(t)
+	if err := ValidateCorpusScores(base, reg); err != nil {
+		t.Fatalf("valid fixture: %v", err)
+	}
+	childRefs := func(c *CorpusScores) (*AggregatedMetric, []int) {
+		v := c.Teams[0].AggregatedMetrics["hero_damage_total"]
+		idx := []int{}
+		for i, ref := range v.Lineage {
+			if ref.Kind == "aggregation" && strings.HasPrefix(ref.ID, "aggregation:team_match:") {
+				idx = append(idx, i)
+			}
+		}
+		return &v, idx
+	}
+	tests := []struct {
+		name string
+		edit func(*CorpusScores)
+		want string
+	}{
+		{"missing", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage = append(v.Lineage[:ix[0]], v.Lineage[ix[0]+1:]...)
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "team_match_child_count"},
+		{"duplicate", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage = append(v.Lineage, v.Lineage[ix[0]])
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "duplicate="},
+		{"extra", func(c *CorpusScores) {
+			v, _ := childRefs(c)
+			v.Lineage = append(v.Lineage, EvidenceRef{Kind: "aggregation", ID: teamMatchAggregationID("9823272", "extra", v.MetricID, v.MetricVersion), MatchID: "extra", RuleVersion: version.ScoreRuleVersion, ContractVersion: TeamSchemaVersion})
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "unexpected="},
+		{"matchless", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage[ix[0]].MatchID = ""
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "team_match_child.match_id"},
+		{"wrong_team", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage[ix[0]].ID = strings.Replace(v.Lineage[ix[0]].ID, ":9823272:", ":wrong:", 1)
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "unexpected="},
+		{"wrong_match", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage[ix[0]].MatchID = "8946228107"
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "team_match_child.match_id"},
+		{"wrong_metric_version", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage[ix[0]].ID = strings.Replace(v.Lineage[ix[0]].ID, ":1.0.0:", ":0.9.0:", 1)
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "unexpected="},
+		{"wrong_score_rule", func(c *CorpusScores) {
+			v, ix := childRefs(c)
+			v.Lineage[ix[0]].RuleVersion = "ti2026.scoring.v4"
+			c.Teams[0].AggregatedMetrics[v.MetricID] = *v
+		}, "team_match_child.provenance"},
+		{"non_resolving", func(c *CorpusScores) { delete(c.TeamMatches["9823272"], "8944525313") }, "team_match_entity"},
+		{"wrong_entity_team", func(c *CorpusScores) { c.TeamMatches["9823272"]["8944525313"].TeamID = "wrong" }, "field=team_id"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			corrupt := cloneCorpusScores(t, base)
+			tc.edit(corrupt)
+			if err := ValidateCorpusScores(corrupt, reg); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want %q", err, tc.want)
+			}
+		})
+	}
+}
 
 func currentStoredMetric(t *testing.T) (*store.Store, *metrics.Registry, *metrics.Output) {
 	t.Helper()
@@ -201,7 +338,11 @@ func TestValidateCorpusScoresRejectsNestedMetricVersionAndAggregationCorruption(
 		return &CorpusScores{
 			SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion,
 			ContractVersion: SchemaVersion, TeamScoringVersion: TeamSchemaVersion,
-			Players: []*PlayerScore{cor.ScorePlayer("a1", "1")}, Teams: []*TeamScore{cor.ScoreTeam("T1")}, Matches: map[string]*MatchScores{},
+			Players: []*PlayerScore{cor.ScorePlayer("a1", "1")}, Teams: []*TeamScore{cor.ScoreTeam("T1")},
+			Matches: map[string]*MatchScores{
+				"m1": {SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion, MatchID: "m1", Players: cor.Matches["m1"]},
+			},
+			TeamMatches: cor.TeamMatches,
 		}
 	}
 	cs := base()

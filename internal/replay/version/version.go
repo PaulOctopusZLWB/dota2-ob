@@ -30,9 +30,9 @@ const (
 	MetricsSchema = "replay.metrics.v6"
 	// ClosureSchema is the 52-row metric closure contract version.
 	ClosureSchema = "ti2026.metric-closure.v1"
-	// ScoreSchema v5 retains metric-definition versions through per-match,
-	// aggregation, percentile, API, and rendered score decomposition objects.
-	ScoreSchema = "replay.score.v5"
+	// ScoreSchema v6 persists match-qualified team-match aggregation entities
+	// so every tournament child is independently resolvable and validated.
+	ScoreSchema = "replay.score.v6"
 	// CorrectionSchemaV1 is the legacy review/correction overlay schema
 	// version; v1 documents are still readable and are migrated
 	// deterministically to the current version on load.

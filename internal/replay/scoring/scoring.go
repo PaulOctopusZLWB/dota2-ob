@@ -499,10 +499,12 @@ type PlayerTournament struct {
 
 // TeamMatch is one team's metrics pooled across its five players in one match.
 type TeamMatch struct {
-	MatchID     string                      `json:"match_id"`
-	TeamID      string                      `json:"team_id"`
-	Metrics     map[string]AggregatedMetric `json:"metrics"`
-	PlayerCount int                         `json:"player_count"`
+	MatchID         string                      `json:"match_id"`
+	TeamID          string                      `json:"team_id"`
+	RuleVersion     string                      `json:"rule_version"`
+	ContractVersion string                      `json:"contract_version"`
+	Metrics         map[string]AggregatedMetric `json:"metrics"`
+	PlayerCount     int                         `json:"player_count"`
 }
 
 // TeamTournament is one team's metrics aggregated across its eligible matches.
@@ -831,7 +833,7 @@ func (c *Corpus) buildTournaments() {
 		}
 		for mid, vals := range byMetric {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
-				pt.Metrics[mid] = withAggregationRef(agg, "player_tournament", pt.AccountID, pt.NominalRole, c.Contract.SchemaVersion)
+				pt.Metrics[mid] = withAggregationRef(agg, "player_tournament", pt.AccountID, pt.NominalRole, "", c.Contract.SchemaVersion)
 				delete(pt.UnavailableMetrics, mid)
 			}
 		}
@@ -871,7 +873,7 @@ func (c *Corpus) buildTeams() {
 		for _, matchID := range matchIDs {
 			players := byMatch[matchID]
 			sort.Slice(players, func(i, j int) bool { return players[i].AccountID < players[j].AccountID })
-			tm := &TeamMatch{MatchID: matchID, TeamID: tid, Metrics: map[string]AggregatedMetric{}, PlayerCount: len(players)}
+			tm := &TeamMatch{MatchID: matchID, TeamID: tid, RuleVersion: version.ScoreRuleVersion, ContractVersion: c.teamRuleVersion(), Metrics: map[string]AggregatedMetric{}, PlayerCount: len(players)}
 			byMetric := map[string][]MetricValue{}
 			for _, p := range players {
 				for mid, mv := range p.Metrics {
@@ -885,7 +887,7 @@ func (c *Corpus) buildTeams() {
 			}
 			for mid, vals := range byMetric {
 				if agg, ok := c.aggregateValues(mid, vals); ok {
-					agg = withAggregationRef(agg, "team_match", tid, "", c.teamRuleVersion())
+					agg = withAggregationRef(agg, "team_match", tid, "", matchID, c.teamRuleVersion())
 					tm.Metrics[mid] = agg
 					teamAgg[mid] = append(teamAgg[mid], MetricValue{
 						MetricID: mid, MetricVersion: agg.MetricVersion, Value: agg.Value,
@@ -903,7 +905,7 @@ func (c *Corpus) buildTeams() {
 		tt.MatchIDs = append([]string(nil), matchIDs...)
 		for mid, vals := range teamAgg {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
-				tt.Metrics[mid] = withAggregationRef(agg, "team_tournament", tid, "", c.teamRuleVersion())
+				tt.Metrics[mid] = withAggregationRef(agg, "team_tournament", tid, "", "", c.teamRuleVersion())
 				delete(tt.UnavailableMetrics, mid)
 			}
 		}
@@ -925,11 +927,15 @@ func (c *Corpus) teamRuleVersion() string {
 // metric-version and score-rule-version qualified so each aggregation entity
 // is stable and match/scope distinct; child refs are retained underneath. The
 // radar/team contract version remains separate provenance on the reference.
-func withAggregationRef(agg AggregatedMetric, scope, subject, role, contractVersion string) AggregatedMetric {
+func withAggregationRef(agg AggregatedMetric, scope, subject, role, matchID, contractVersion string) AggregatedMetric {
+	id := fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, agg.MetricVersion, version.ScoreRuleVersion)
+	if scope == "team_match" {
+		id = fmt.Sprintf("aggregation:team_match:%s:%s:%s:%s:%s", subject, matchID, agg.MetricID, agg.MetricVersion, version.ScoreRuleVersion)
+	}
 	agg.Lineage = append(agg.Lineage, EvidenceRef{
-		MatchID:         "", // aggregation is corpus/scope-qualified, not match-scoped
+		MatchID:         matchID,
 		Kind:            "aggregation",
-		ID:              fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, agg.MetricVersion, version.ScoreRuleVersion),
+		ID:              id,
 		RuleVersion:     version.ScoreRuleVersion,
 		ContractVersion: contractVersion,
 	})

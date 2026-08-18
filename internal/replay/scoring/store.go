@@ -2,6 +2,7 @@ package scoring
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -26,15 +27,16 @@ type MatchScores struct {
 // tournament snapshots within fixed roles, team tournament snapshots, and the
 // per-match rows for drilldown.
 type CorpusScores struct {
-	SchemaVersion        string                  `json:"schema_version"`
-	RuleVersion          string                  `json:"rule_version"`
-	ContractVersion      string                  `json:"contract_version"`
-	TeamScoringVersion   string                  `json:"team_scoring_version"`
-	ComparisonPopulation string                  `json:"comparison_population"`
-	CorpusMatches        int                     `json:"corpus_matches"`
-	Players              []*PlayerScore          `json:"players"`
-	Teams                []*TeamScore            `json:"teams"`
-	Matches              map[string]*MatchScores `json:"matches"`
+	SchemaVersion        string                           `json:"schema_version"`
+	RuleVersion          string                           `json:"rule_version"`
+	ContractVersion      string                           `json:"contract_version"`
+	TeamScoringVersion   string                           `json:"team_scoring_version"`
+	ComparisonPopulation string                           `json:"comparison_population"`
+	CorpusMatches        int                              `json:"corpus_matches"`
+	Players              []*PlayerScore                   `json:"players"`
+	Teams                []*TeamScore                     `json:"teams"`
+	Matches              map[string]*MatchScores          `json:"matches"`
+	TeamMatches          map[string]map[string]*TeamMatch `json:"team_matches"`
 }
 
 // BuildCorpusFromStore loads every verified match's report + metrics from the
@@ -287,7 +289,6 @@ func validateAggregatedMap(reg *metrics.Registry, context, scope, subject, role,
 			return err
 		}
 		expectedID := fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, value.MetricID, value.MetricVersion, version.ScoreRuleVersion)
-		teamMatchChildID := fmt.Sprintf("aggregation:team_match:%s::%s:%s:%s", subject, value.MetricID, value.MetricVersion, version.ScoreRuleVersion)
 		found := 0
 		for _, ref := range value.Lineage {
 			if ref.Kind != "aggregation" {
@@ -304,12 +305,176 @@ func validateAggregatedMap(reg *metrics.Registry, context, scope, subject, role,
 			}
 			if ref.ID == expectedID {
 				found++
-			} else if scope != "team_tournament" || ref.ID != teamMatchChildID {
+			} else {
 				return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.id expected=%s actual=%s", itemContext, expectedID, ref.ID)
 			}
 		}
 		if found != 1 {
 			return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref_count expected=1 actual=%d", itemContext, found)
+		}
+	}
+	return nil
+}
+
+func teamMatchAggregationID(teamID, matchID, metricID, metricVersion string) string {
+	return fmt.Sprintf("aggregation:team_match:%s:%s:%s:%s:%s", teamID, matchID, metricID, metricVersion, version.ScoreRuleVersion)
+}
+
+func validateTeamMatchEntities(cs *CorpusScores, reg *metrics.Registry) error {
+	for teamKey, byMatch := range cs.TeamMatches {
+		for matchKey, entity := range byMatch {
+			context := fmt.Sprintf("corpus.team_matches[%s][%s]", teamKey, matchKey)
+			if entity == nil {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=document expected=present actual=nil", context)
+			}
+			if entity.TeamID != teamKey {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_id expected=%s actual=%s", context, teamKey, printableVersion(entity.TeamID))
+			}
+			if entity.MatchID != matchKey {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=match_id expected=%s actual=%s", context, matchKey, printableVersion(entity.MatchID))
+			}
+			if _, ok := cs.Matches[matchKey]; !ok {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=match_id expected=persisted_match actual=%s", context, matchKey)
+			}
+			if entity.RuleVersion != version.ScoreRuleVersion {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=rule_version expected=%s actual=%s", context, version.ScoreRuleVersion, printableVersion(entity.RuleVersion))
+			}
+			if entity.ContractVersion != cs.TeamScoringVersion {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=contract_version expected=%s actual=%s", context, cs.TeamScoringVersion, printableVersion(entity.ContractVersion))
+			}
+			for key, value := range entity.Metrics {
+				itemContext := context + ".metrics[" + key + "]"
+				if err := validateRegistryMetric(reg, itemContext, key, value.MetricID, value.MetricVersion); err != nil {
+					return err
+				}
+				expectedID := teamMatchAggregationID(teamKey, matchKey, value.MetricID, value.MetricVersion)
+				own := 0
+				for _, ref := range value.Lineage {
+					if ref.Kind == "aggregation" {
+						if ref.ID != expectedID {
+							return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.id expected=%s actual=%s", itemContext, expectedID, ref.ID)
+						}
+						if ref.MatchID != matchKey {
+							return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.match_id expected=%s actual=%s", itemContext, matchKey, printableVersion(ref.MatchID))
+						}
+						if ref.RuleVersion != version.ScoreRuleVersion || ref.ContractVersion != cs.TeamScoringVersion {
+							return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.provenance expected=%s/%s actual=%s/%s", itemContext, version.ScoreRuleVersion, cs.TeamScoringVersion, printableVersion(ref.RuleVersion), printableVersion(ref.ContractVersion))
+						}
+						own++
+					} else if ref.MatchID != matchKey {
+						return fmt.Errorf("scoring: corrupt score artifact context=%s field=child_ref.match_id expected=%s actual=%s", itemContext, matchKey, ref.MatchID)
+					}
+				}
+				if own != 1 {
+					return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref_count expected=1 actual=%d", itemContext, own)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateTeamTournamentAggregates(cs *CorpusScores, reg *metrics.Registry) error {
+	cor := &Corpus{MetricReg: reg}
+	seenTeams := map[string]bool{}
+	for i, team := range cs.Teams {
+		if team == nil {
+			continue
+		}
+		context := fmt.Sprintf("corpus.teams[%d]", i)
+		if seenTeams[team.TeamID] {
+			return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_id duplicate=%s", context, team.TeamID)
+		}
+		seenTeams[team.TeamID] = true
+		byMatch := cs.TeamMatches[team.TeamID]
+		allowedMatches := map[string]bool{}
+		for _, matchID := range team.SubjectCoverage.MatchIDs {
+			if allowedMatches[matchID] {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=subject_coverage.match_ids duplicate=%s", context, matchID)
+			}
+			allowedMatches[matchID] = true
+		}
+		if len(allowedMatches) != team.SubjectCoverage.EligibleMatches {
+			return fmt.Errorf("scoring: corrupt score artifact context=%s field=subject_coverage.eligible_matches expected=%d actual=%d", context, len(allowedMatches), team.SubjectCoverage.EligibleMatches)
+		}
+		for matchID := range byMatch {
+			if !allowedMatches[matchID] {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_matches extra_match=%s", context, matchID)
+			}
+		}
+		for matchID := range allowedMatches {
+			if byMatch[matchID] == nil {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_entity match=%s expected=present actual=missing", context, matchID)
+			}
+		}
+		for key, tournament := range team.AggregatedMetrics {
+			itemContext := context + ".aggregated_metrics[" + key + "]"
+			if err := validateRegistryMetric(reg, itemContext, key, tournament.MetricID, tournament.MetricVersion); err != nil {
+				return err
+			}
+			ownID := fmt.Sprintf("aggregation:team_tournament:%s::%s:%s:%s", team.TeamID, tournament.MetricID, tournament.MetricVersion, version.ScoreRuleVersion)
+			expectedChildren := map[string]string{}
+			var childValues []MetricValue
+			for _, matchID := range team.SubjectCoverage.MatchIDs {
+				entity := byMatch[matchID]
+				if entity == nil {
+					return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_entity match=%s expected=present actual=missing", itemContext, matchID)
+				}
+				child, ok := entity.Metrics[key]
+				if !ok {
+					continue
+				}
+				childID := teamMatchAggregationID(team.TeamID, matchID, child.MetricID, child.MetricVersion)
+				expectedChildren[childID] = matchID
+				n, d := child.Numerator, child.Denominator
+				childValues = append(childValues, MetricValue{MetricID: child.MetricID, MetricVersion: child.MetricVersion, Value: child.Value, Numerator: &n, Denominator: &d, OpportunityCount: child.OpportunityCount, Direction: child.Direction, OfficialEligible: child.OfficialEligible, ExperimentalEligible: child.ExperimentalEligible, Lineage: child.Lineage})
+			}
+			if len(expectedChildren) != tournament.EligibleMatches {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=eligible_matches expected=%d actual=%d", itemContext, len(expectedChildren), tournament.EligibleMatches)
+			}
+			seenChildren := map[string]bool{}
+			own := 0
+			for _, ref := range tournament.Lineage {
+				if ref.Kind != "aggregation" {
+					continue
+				}
+				if ref.ID == ownID {
+					if ref.MatchID != "" || ref.RuleVersion != version.ScoreRuleVersion || ref.ContractVersion != cs.TeamScoringVersion {
+						return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.provenance", itemContext)
+					}
+					own++
+					continue
+				}
+				matchID, ok := expectedChildren[ref.ID]
+				if !ok {
+					return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_child unexpected=%s", itemContext, ref.ID)
+				}
+				if ref.MatchID != matchID {
+					return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_child.match_id expected=%s actual=%s", itemContext, matchID, printableVersion(ref.MatchID))
+				}
+				if ref.RuleVersion != version.ScoreRuleVersion || ref.ContractVersion != cs.TeamScoringVersion {
+					return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_child.provenance id=%s", itemContext, ref.ID)
+				}
+				if seenChildren[ref.ID] {
+					return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_child duplicate=%s", itemContext, ref.ID)
+				}
+				seenChildren[ref.ID] = true
+			}
+			if own != 1 {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref_count expected=1 actual=%d", itemContext, own)
+			}
+			if len(seenChildren) != len(expectedChildren) {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=team_match_child_count expected=%d actual=%d", itemContext, len(expectedChildren), len(seenChildren))
+			}
+			reconciled, ok := cor.aggregateValues(key, childValues)
+			if !ok || math.Abs(reconciled.Value-tournament.Value) > 1e-9 || math.Abs(reconciled.Numerator-tournament.Numerator) > 1e-9 || math.Abs(reconciled.Denominator-tournament.Denominator) > 1e-9 || reconciled.OpportunityCount != tournament.OpportunityCount {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=reconciliation expected_value=%v actual_value=%v", itemContext, reconciled.Value, tournament.Value)
+			}
+		}
+	}
+	for teamID := range cs.TeamMatches {
+		if !seenTeams[teamID] {
+			return fmt.Errorf("scoring: corrupt score artifact context=corpus.team_matches field=team_id non_resolving=%s", teamID)
 		}
 	}
 	return nil
@@ -380,6 +545,9 @@ func ValidateCorpusScores(cs *CorpusScores, reg *metrics.Registry) error {
 			return err
 		}
 	}
+	if err := validateTeamMatchEntities(cs, reg); err != nil {
+		return err
+	}
 	for i, player := range cs.Players {
 		if player == nil {
 			return fmt.Errorf("scoring: corrupt score artifact context=corpus.players[%d] expected=present actual=nil", i)
@@ -424,9 +592,6 @@ func ValidateCorpusScores(cs *CorpusScores, reg *metrics.Registry) error {
 				return err
 			}
 		}
-		if err := validateAggregatedMap(reg, context, "team_tournament", team.TeamID, "", cs.TeamScoringVersion, team.AggregatedMetrics); err != nil {
-			return err
-		}
 		for key, unavailable := range team.UnavailableMetrics {
 			if err := validateRegistryMetric(reg, context+".unavailable_metrics["+key+"]", key, unavailable.MetricID, unavailable.MetricVersion); err != nil {
 				return err
@@ -441,6 +606,9 @@ func ValidateCorpusScores(cs *CorpusScores, reg *metrics.Registry) error {
 		if err := validateComponents(reg, context+".experimental_axes", team.ExperimentalAxes); err != nil {
 			return err
 		}
+	}
+	if err := validateTeamTournamentAggregates(cs, reg); err != nil {
+		return err
 	}
 	return nil
 }
@@ -523,6 +691,7 @@ func ComputeAndPersist(st *store.Store, c *Contract, tc *TeamContract, mreg *met
 		ComparisonPopulation: c.ComparisonPopulation,
 		CorpusMatches:        cor.MatchCount(),
 		Matches:              map[string]*MatchScores{},
+		TeamMatches:          cor.TeamMatches,
 		Players:              []*PlayerScore{},
 		Teams:                []*TeamScore{},
 	}
@@ -571,13 +740,19 @@ func ComputeAndPersist(st *store.Store, c *Contract, tc *TeamContract, mreg *met
 		if err := ValidateMatchScores(ms, mreg); err != nil {
 			return nil, err
 		}
-		if err := st.WriteJSON(matchID, store.ArtifactScores, ms); err != nil {
-			return nil, fmt.Errorf("scoring: persist %s: %w", matchID, err)
-		}
 		cs.Matches[matchID] = ms
 	}
 	if err := ValidateCorpusScores(cs, mreg); err != nil {
 		return nil, err
+	}
+	// Validate the complete graph before writing any score artifact. In
+	// particular this proves every tournament child resolves to one persisted
+	// team-match entity, so a corrupt graph cannot partially replace the
+	// authoritative per-match snapshots.
+	for _, matchID := range ids {
+		if err := st.WriteJSON(matchID, store.ArtifactScores, cs.Matches[matchID]); err != nil {
+			return nil, fmt.Errorf("scoring: persist %s: %w", matchID, err)
+		}
 	}
 	// Corpus-level scoring catalog (rebuildable; not part of any match's
 	// canonical tree).
