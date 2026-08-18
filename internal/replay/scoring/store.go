@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -37,6 +39,84 @@ type CorpusScores struct {
 	Teams                []*TeamScore                     `json:"teams"`
 	Matches              map[string]*MatchScores          `json:"matches"`
 	TeamMatches          map[string]map[string]*TeamMatch `json:"team_matches"`
+}
+
+// PreflightPersistedScores validates the complete authoritative score graph
+// already present in a data root without writing anything. A normal re-score
+// is a deterministic recomputation, not an implicit repair or migration: once
+// any score artifact exists, the corpus document and every per-match document
+// must be current, mutually consistent, and satisfy the same graph invariants
+// enforced at API/restart boundaries.
+func PreflightPersistedScores(st *store.Store, reg *metrics.Registry) error {
+	if st == nil {
+		return fmt.Errorf("scoring: persisted score preflight field=store expected=present actual=nil")
+	}
+	matchRoot := filepath.Join(st.Root, "matches")
+	entries, err := os.ReadDir(matchRoot)
+	if err != nil {
+		return fmt.Errorf("scoring: persisted score preflight path=%s: discover: %w", matchRoot, err)
+	}
+
+	perMatch := map[string]*MatchScores{}
+	perMatchPaths := map[string]string{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		matchID := entry.Name()
+		path := st.ArtifactPath(matchID, store.ArtifactScores)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("scoring: persisted score preflight path=%s: stat: %w", path, err)
+		}
+		var scores MatchScores
+		if err := st.ReadJSON(matchID, store.ArtifactScores, &scores); err != nil {
+			return fmt.Errorf("scoring: persisted score preflight path=%s: %w", path, err)
+		}
+		if err := ValidateMatchScores(&scores, reg); err != nil {
+			return fmt.Errorf("scoring: persisted score preflight path=%s: %w", path, err)
+		}
+		perMatch[matchID] = &scores
+		perMatchPaths[matchID] = path
+	}
+
+	corpusPath := filepath.Join(st.Root, "scores-corpus.json")
+	_, corpusStatErr := os.Stat(corpusPath)
+	corpusExists := corpusStatErr == nil
+	if corpusStatErr != nil && !os.IsNotExist(corpusStatErr) {
+		return fmt.Errorf("scoring: persisted score preflight path=%s: stat: %w", corpusPath, corpusStatErr)
+	}
+	if !corpusExists && len(perMatch) == 0 {
+		return nil
+	}
+	if !corpusExists {
+		return fmt.Errorf("scoring: persisted score preflight path=%s field=corpus expected=present actual=missing", corpusPath)
+	}
+
+	var corpus CorpusScores
+	if err := st.ReadJSONFile(corpusPath, &corpus); err != nil {
+		return fmt.Errorf("scoring: persisted score preflight path=%s: %w", corpusPath, err)
+	}
+	if err := ValidateCorpusScores(&corpus, reg); err != nil {
+		return fmt.Errorf("scoring: persisted score preflight path=%s: %w", corpusPath, err)
+	}
+	for matchID, embedded := range corpus.Matches {
+		persisted, ok := perMatch[matchID]
+		if !ok {
+			return fmt.Errorf("scoring: persisted score preflight path=%s field=per_match_score match=%s expected=present actual=missing", st.ArtifactPath(matchID, store.ArtifactScores), matchID)
+		}
+		if !reflect.DeepEqual(persisted, embedded) {
+			return fmt.Errorf("scoring: persisted score preflight path=%s field=corpus_copy match=%s expected=identical_to_%s actual=different", perMatchPaths[matchID], matchID, corpusPath)
+		}
+	}
+	for matchID, path := range perMatchPaths {
+		if _, ok := corpus.Matches[matchID]; !ok {
+			return fmt.Errorf("scoring: persisted score preflight path=%s field=corpus_membership match=%s expected=present actual=missing", path, matchID)
+		}
+	}
+	return nil
 }
 
 // BuildCorpusFromStore loads every verified match's report + metrics from the

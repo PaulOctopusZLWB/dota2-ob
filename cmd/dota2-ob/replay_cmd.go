@@ -481,6 +481,13 @@ func cmdScore(args []string, output io.Writer) int {
 		fmt.Fprintf(output, "role_inputs_failed: %v\n", err)
 		return 1
 	}
+	// A normal score run never doubles as repair/migration. Validate every
+	// already-authoritative score artifact before RebuildCatalog (which writes
+	// catalog.json) or any score promotion, so failure preserves all bytes.
+	if err := scoring.PreflightPersistedScores(st, ri.MetricRegistry); err != nil {
+		fmt.Fprintf(output, "score_preflight_failed: %v\n", err)
+		return 1
+	}
 	if _, err := st.RebuildCatalog(time.Now().UTC().Format(time.RFC3339)); err != nil {
 		fmt.Fprintf(output, "rebuild_catalog_failed: %v\n", err)
 		return 1

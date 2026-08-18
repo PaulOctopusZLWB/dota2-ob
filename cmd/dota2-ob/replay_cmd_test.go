@@ -10,7 +10,11 @@ import (
 	"testing"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/archive"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
 
 func writeTestManifest(t *testing.T, matches []archive.Match) string {
@@ -340,4 +344,257 @@ func TestScoreEmptyCorpusSucceeds(t *testing.T) {
 	if !strings.Contains(out.String(), "score_gate: corpus_matches=0_less_than_minimum_3") {
 		t.Fatalf("expected suppression gate message, output=%s", out.String())
 	}
+}
+
+// seedScoreCommandRoot creates a current two-match authoritative score graph
+// using the same production scoring path exercised by replay score.
+func seedScoreCommandRoot(t *testing.T) (string, string) {
+	t.Helper()
+	manifest := fullProbeManifestDir(t)
+	ri, err := loadRoleInputs(manifest, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	st, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := ri.MetricRegistry.Find("hero_damage_total")
+	for _, rm := range ri.Registry.Matches[:2] {
+		participants := []map[string]interface{}{}
+		values := []metrics.Value{}
+		for _, team := range rm.Teams {
+			for _, participant := range team.Participants {
+				participants = append(participants, map[string]interface{}{
+					"account_id": participant.AccountID, "team_id": team.TeamID, "side": team.Side,
+				})
+				value := float64(1000 + len(values))
+				values = append(values, metrics.Value{
+					MetricID: def.ID, MetricVersion: def.MetricVersion, AccountID: participant.AccountID,
+					OfficialPhase: "whole_match", Value: &value, Numerator: &value,
+					Direction: def.Direction, OfficialScoreEligible: true,
+				})
+			}
+		}
+		if err := st.WriteJSON(rm.MatchID, store.ArtifactReport, map[string]interface{}{"participants": participants}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.WriteJSON(rm.MatchID, store.ArtifactMetrics, &metrics.Output{
+			SchemaVersion: version.MetricsSchema, RuleVersion: version.MetricsRuleVersion,
+			MatchID: rm.MatchID, Values: values, Unavailable: []metrics.Value{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.WriteStatus(rm.MatchID, &store.StatusRecord{
+			SchemaVersion: store.StatusSchema, MatchID: rm.MatchID, Status: store.StatusVerified,
+			Publication: "published", Reason: "all_gates_pass",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.RebuildCatalog("seed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scoring.ComputeAndPersist(st, ri.ScoringContract, ri.TeamContract, ri.MetricRegistry, ri.Registry, ri.Overrides); err != nil {
+		t.Fatal(err)
+	}
+	return manifest, root
+}
+
+func authoritativeScoreBytes(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	paths := []string{filepath.Join(root, "catalog.json"), filepath.Join(root, "scores-corpus.json")}
+	perMatch, err := filepath.Glob(filepath.Join(root, "matches", "*", store.ArtifactScores))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, perMatch...)
+	out := map[string][]byte{}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[path] = b
+	}
+	return out
+}
+
+func assertAuthoritativeScoreBytes(t *testing.T, before map[string][]byte) {
+	t.Helper()
+	for path, want := range before {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s after rejection: %v", path, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("authoritative bytes changed after rejected score: %s", path)
+		}
+	}
+}
+
+func TestScorePreflightRejectsCorruptionWithoutAuthoritativeMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		edit func(*testing.T, string, *scoring.CorpusScores)
+	}{
+		{"stale_v5_corpus", "expected=replay.score.v6 actual=replay.score.v5", func(t *testing.T, _ string, cs *scoring.CorpusScores) { cs.SchemaVersion = "replay.score.v5" }},
+		{"stale_v5_per_match", "expected=replay.score.v6 actual=replay.score.v5", func(t *testing.T, root string, cs *scoring.CorpusScores) {
+			for matchID := range cs.Matches {
+				st, _ := store.New(root)
+				var scores scoring.MatchScores
+				if err := st.ReadJSON(matchID, store.ArtifactScores, &scores); err != nil {
+					t.Fatal(err)
+				}
+				scores.SchemaVersion = "replay.score.v5"
+				if err := st.WriteJSON(matchID, store.ArtifactScores, &scores); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}},
+		{"malformed_corpus", "decode", func(t *testing.T, root string, _ *scoring.CorpusScores) {
+			if err := os.WriteFile(filepath.Join(root, "scores-corpus.json"), []byte(`{"broken"`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"malformed_per_match", "scores.json", func(t *testing.T, root string, cs *scoring.CorpusScores) {
+			for matchID := range cs.Matches {
+				if err := os.WriteFile(filepath.Join(root, "matches", matchID, store.ArtifactScores), []byte(`{"broken"`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}},
+		{"mismatched_per_match", "field=corpus_copy", func(t *testing.T, root string, cs *scoring.CorpusScores) {
+			for matchID := range cs.Matches {
+				st, _ := store.New(root)
+				var scores scoring.MatchScores
+				if err := st.ReadJSON(matchID, store.ArtifactScores, &scores); err != nil {
+					t.Fatal(err)
+				}
+				scores.Players[0].NominalRole = "5"
+				if err := st.WriteJSON(matchID, store.ArtifactScores, &scores); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}},
+		{"missing_per_match", "expected=present actual=missing", func(t *testing.T, root string, cs *scoring.CorpusScores) {
+			for matchID := range cs.Matches {
+				if err := os.Remove(filepath.Join(root, "matches", matchID, store.ArtifactScores)); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}},
+		{"missing", "team_match_child_count", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) { v.Lineage = append(v.Lineage[:i], v.Lineage[i+1:]...) })
+		}},
+		{"duplicate", "duplicate=", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) { v.Lineage = append(v.Lineage, v.Lineage[i]) })
+		}},
+		{"extra", "unexpected=", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) {
+				ref := v.Lineage[i]
+				ref.MatchID = "extra"
+				ref.ID = strings.Replace(ref.ID, ":"+v.Lineage[i].MatchID+":", ":extra:", 1)
+				v.Lineage = append(v.Lineage, ref)
+			})
+		}},
+		{"matchless", "team_match_child.match_id", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) { v.Lineage[i].MatchID = "" })
+		}},
+		{"wrong_team", "unexpected=", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			teamID := cs.Teams[0].TeamID
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) {
+				v.Lineage[i].ID = strings.Replace(v.Lineage[i].ID, ":"+teamID+":", ":wrong-team:", 1)
+			})
+		}},
+		{"wrong_match", "team_match_child.match_id", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) { v.Lineage[i].MatchID = "wrong-match" })
+		}},
+		{"wrong_metric_version", "unexpected=", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) {
+				v.Lineage[i].ID = strings.Replace(v.Lineage[i].ID, ":1.0.0:", ":0.9.0:", 1)
+			})
+		}},
+		{"wrong_score_rule", "team_match_child.provenance", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			mutateTeamChild(t, cs, func(v *scoring.AggregatedMetric, i int) { v.Lineage[i].RuleVersion = "ti2026.scoring.v4" })
+		}},
+		{"non_resolving", "team_match_entity", func(t *testing.T, _ string, cs *scoring.CorpusScores) {
+			teamID, matchID := firstTeamChild(t, cs)
+			delete(cs.TeamMatches[teamID], matchID)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest, root := seedScoreCommandRoot(t)
+			path := filepath.Join(root, "scores-corpus.json")
+			var cs scoring.CorpusScores
+			st, _ := store.New(root)
+			if err := st.ReadJSONFile(path, &cs); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(t, root, &cs)
+			if tc.name != "malformed_corpus" && tc.name != "malformed_per_match" {
+				if err := st.WriteRootJSON("scores-corpus.json", &cs); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := authoritativeScoreBytes(t, root)
+			var out bytes.Buffer
+			if code := run([]string{"replay", "score", "--manifest", manifest, "--data-root", root}, &out); code == 0 {
+				t.Fatalf("corrupt score exited 0: %s", out.String())
+			}
+			if !strings.Contains(out.String(), "score_preflight_failed:") || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("diagnostic=%q want score_preflight_failed and %q", out.String(), tc.want)
+			}
+			assertAuthoritativeScoreBytes(t, before)
+		})
+	}
+}
+
+func firstTeamChild(t *testing.T, cs *scoring.CorpusScores) (string, string) {
+	t.Helper()
+	for _, team := range cs.Teams {
+		for _, value := range team.AggregatedMetrics {
+			for _, ref := range value.Lineage {
+				if ref.Kind == "aggregation" && ref.MatchID != "" {
+					return team.TeamID, ref.MatchID
+				}
+			}
+		}
+	}
+	t.Fatal("score fixture has no team-match child")
+	return "", ""
+}
+
+func mutateTeamChild(t *testing.T, cs *scoring.CorpusScores, mutate func(*scoring.AggregatedMetric, int)) {
+	t.Helper()
+	for _, team := range cs.Teams {
+		for metricID, value := range team.AggregatedMetrics {
+			for i, ref := range value.Lineage {
+				if ref.Kind == "aggregation" && ref.MatchID != "" {
+					mutate(&value, i)
+					team.AggregatedMetrics[metricID] = value
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("score fixture has no team-match child")
+}
+
+func TestScoreCleanRescoreSucceedsDeterministically(t *testing.T) {
+	manifest, root := seedScoreCommandRoot(t)
+	before := authoritativeScoreBytes(t, root)
+	delete(before, filepath.Join(root, "catalog.json")) // catalog carries a rebuild timestamp
+	var out bytes.Buffer
+	if code := run([]string{"replay", "score", "--manifest", manifest, "--data-root", root}, &out); code != 0 {
+		t.Fatalf("clean re-score exit=%d output=%s", code, out.String())
+	}
+	assertAuthoritativeScoreBytes(t, before)
 }
