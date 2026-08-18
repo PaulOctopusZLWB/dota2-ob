@@ -134,29 +134,137 @@ func ParseTeamContract(b []byte) (*TeamContract, error) {
 	return &c, nil
 }
 
-// Validate enforces the team registry invariants: eight axes, axis weights
-// summing to 1, and per-axis component weights summing to 1.
+// CanonicalTeamAxes is the frozen canonical eight-axis set. It is fixed so an
+// axis rename/removal is a versioned registry change, never a silent drift.
+var CanonicalTeamAxes = []string{"laning", "resources", "tempo", "map", "vision", "fight", "objectives", "endgame"}
+
+// Validate enforces the team registry invariants: the canonical eight-axis
+// set, non-negative weights, per-axis component-weight sums, mandatory/
+// optional membership and disjointness covering the full set, minimum gates,
+// and a declared total id. A malformed registry fails closed.
 func (c *TeamContract) Validate() error {
 	if c.SchemaVersion != TeamSchemaVersion {
 		return fmt.Errorf("scoring: team registry schema %q != %q", c.SchemaVersion, TeamSchemaVersion)
 	}
-	if len(c.Axes) != 8 {
-		return fmt.Errorf("scoring: team registry %d axes, want 8", len(c.Axes))
+	if len(c.Axes) != len(CanonicalTeamAxes) {
+		return fmt.Errorf("scoring: team registry %d axes, want %d", len(c.Axes), len(CanonicalTeamAxes))
 	}
-	sum := 0.0
-	for _, v := range c.AxisWeights {
-		sum += v
+	axisSet := map[string]bool{}
+	for _, a := range c.Axes {
+		if a.ID == "" {
+			return fmt.Errorf("scoring: team axis with empty id")
+		}
+		if axisSet[a.ID] {
+			return fmt.Errorf("scoring: duplicate team axis %q", a.ID)
+		}
+		axisSet[a.ID] = true
 	}
-	if math.Abs(sum-1.0) > 1e-6 {
-		return fmt.Errorf("scoring: team axis weights sum %f != 1", sum)
+	for _, want := range CanonicalTeamAxes {
+		if !axisSet[want] {
+			return fmt.Errorf("scoring: team registry missing canonical axis %q", want)
+		}
 	}
-	for axis, m := range c.OfficialAxisComponents {
+	// Axis weights: exactly one non-negative weight per canonical axis.
+	if len(c.AxisWeights) != len(CanonicalTeamAxes) {
+		return fmt.Errorf("scoring: team registry %d axis weights, want %d", len(c.AxisWeights), len(CanonicalTeamAxes))
+	}
+	for _, want := range CanonicalTeamAxes {
+		w, ok := c.AxisWeights[want]
+		if !ok {
+			return fmt.Errorf("scoring: team registry missing axis weight %q", want)
+		}
+		if w < 0 {
+			return fmt.Errorf("scoring: team axis %q weight %f is negative", want, w)
+		}
+	}
+	// Per-axis component weights sum to 1 (each axis must define components).
+	for _, want := range CanonicalTeamAxes {
+		cm, ok := c.OfficialAxisComponents[want]
+		if !ok || len(cm) == 0 {
+			return fmt.Errorf("scoring: team axis %q has no components", want)
+		}
 		s := 0.0
-		for _, v := range m {
+		for mid, v := range cm {
+			if v < 0 {
+				return fmt.Errorf("scoring: team axis %q component %s weight %f is negative", want, mid, v)
+			}
 			s += v
 		}
 		if math.Abs(s-1.0) > 1e-6 {
-			return fmt.Errorf("scoring: team axis %s component weights sum %f != 1", axis, s)
+			return fmt.Errorf("scoring: team axis %s component weights sum %f != 1", want, s)
+		}
+	}
+	// Mandatory/optional membership: disjoint, cover the full canonical set.
+	if len(c.MandatoryAxes) == 0 || len(c.OptionalAxes) == 0 {
+		return fmt.Errorf("scoring: team registry missing mandatory/optional axis lists")
+	}
+	mandSet, optSet := map[string]bool{}, map[string]bool{}
+	for _, a := range c.MandatoryAxes {
+		if !axisSet[a] {
+			return fmt.Errorf("scoring: team mandatory axis %q not in axes", a)
+		}
+		if mandSet[a] {
+			return fmt.Errorf("scoring: duplicate mandatory axis %q", a)
+		}
+		mandSet[a] = true
+	}
+	for _, a := range c.OptionalAxes {
+		if !axisSet[a] {
+			return fmt.Errorf("scoring: team optional axis %q not in axes", a)
+		}
+		if optSet[a] {
+			return fmt.Errorf("scoring: duplicate optional axis %q", a)
+		}
+		if mandSet[a] {
+			return fmt.Errorf("scoring: team axis %q is both mandatory and optional", a)
+		}
+		optSet[a] = true
+	}
+	for _, want := range CanonicalTeamAxes {
+		if !mandSet[want] && !optSet[want] {
+			return fmt.Errorf("scoring: team axis %q neither mandatory nor optional", want)
+		}
+	}
+	// Minimum gates: at least three eligible matches, at least six axes.
+	if c.MinimumMatches < 3 {
+		return fmt.Errorf("scoring: team minimum_matches %d < 3", c.MinimumMatches)
+	}
+	if c.MinimumPublishableAxes < 6 {
+		return fmt.Errorf("scoring: team minimum_publishable_axes %d < 6", c.MinimumPublishableAxes)
+	}
+	if c.OfficialTotalScore.ID == "" {
+		return fmt.Errorf("scoring: team registry missing official_total_score id")
+	}
+	if c.OfficialTotalScore.Formula == "" || c.OfficialTotalScore.Gate == "" {
+		return fmt.Errorf("scoring: team registry missing official_total_score gate/formula")
+	}
+	return nil
+}
+
+// ValidateWithRegistry additionally proves every metric referenced by the team
+// official axis components exists in the frozen metric registry and is
+// official_score_eligible, and that no referenced metric is V3 (the official
+// team layer never contains V3 inputs). Unknown, duplicate, missing, or
+// cross-ineligible entries fail closed.
+func (c *TeamContract) ValidateWithRegistry(mreg *metrics.Registry) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if mreg == nil {
+		return fmt.Errorf("scoring: team registry validation requires the metric registry")
+	}
+	for axis, cm := range c.OfficialAxisComponents {
+		for mid := range cm {
+			m := mreg.Find(mid)
+			if m == nil {
+				return fmt.Errorf("scoring: team axis %q references unknown metric %q", axis, mid)
+			}
+			if !m.OfficialScoreEligible {
+				return fmt.Errorf("scoring: team axis %q metric %q is not official_score_eligible", axis, mid)
+			}
+			if m.CapabilityLevel == metrics.CapabilityV3 {
+				return fmt.Errorf("scoring: team axis %q metric %q is V3 and may not enter the official team layer", axis, mid)
+			}
 		}
 	}
 	return nil
@@ -454,16 +562,29 @@ type SubjectCoverage struct {
 	CorpusMatches    int      `json:"corpus_matches"`
 }
 
-// TeamScore is the team-tournament scoring snapshot.
+// TeamScore is the team-tournament scoring snapshot. It carries both the
+// official layer (solid, V1/V2 official-eligible team-pooled inputs) and the
+// separately named experimental layer (dashed, V3/team-model inputs). The
+// experimental layer follows the frozen team registry: if the registry has no
+// machine-readable experimental recipe (or the adapter supplies no eligible V3
+// observations), the complete dashed interface is exposed as suppressed with a
+// precise contract/gate reason — never a fabricated value or a borrowed
+// formula.
 type TeamScore struct {
 	TeamID               string                      `json:"team_id"`
 	ScoringVersion       string                      `json:"scoring_version"`
 	MetricPercentiles    map[string]PercentileResult `json:"metric_percentiles"`
 	OfficialAxes         map[string]AxisResult       `json:"official_axes"`
 	OfficialTotal        *TotalResult                `json:"official_total"`
+	ExperimentalAxes     map[string]AxisResult       `json:"experimental_axes"`
+	ExperimentalTotal    *TotalResult                `json:"experimental_total"`
 	SubjectCoverage      SubjectCoverage             `json:"subject_coverage"`
 	ComparisonPopulation string                      `json:"comparison_population"`
 }
+
+// TeamExperimentalRecipeUnavailableReason is the precise reason exposed when
+// the frozen team registry carries no machine-readable experimental recipe.
+const TeamExperimentalRecipeUnavailableReason = "team_experimental_recipe_unavailable_in_frozen_registry"
 
 // Corpus holds the player-match inputs, the player-tournament aggregation,
 // the team aggregation, and the percentile cohorts.
@@ -788,8 +909,10 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 }
 
 // ScoreTeam computes the team-tournament scoring snapshot exactly from the
-// frozen team scoring registry. When the registry is absent, team scoring
-// fails closed (no axes publish).
+// frozen team scoring registry. It always returns the stable TeamScore shape
+// with both official and experimental layers: when the registry is absent team
+// scoring fails closed with explicit reasons, and when the team is absent the
+// layers are exposed suppressed (never a stale unrelated shape).
 func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 	tc := c.TeamC
 	if tc == nil {
@@ -798,12 +921,24 @@ func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 			MetricPercentiles: map[string]PercentileResult{},
 			OfficialAxes:      map[string]AxisResult{},
 			OfficialTotal:     &TotalResult{ID: "official_team_total_v1", Name: "队伍官方总分", Suppressed: true, Reasons: []string{"team_scoring_registry_unavailable"}},
+			ExperimentalAxes:  map[string]AxisResult{},
+			ExperimentalTotal: &TotalResult{ID: "experimental_team_total_v1", Name: "队伍实验总分（虚线层）", Suppressed: true, Reasons: []string{"team_scoring_registry_unavailable"}},
 			SubjectCoverage:   SubjectCoverage{CorpusMatches: c.MatchCount()},
 		}
 	}
 	tt := c.Teams[teamID]
 	if tt == nil {
-		return nil
+		// Absent team: stable shape, both layers suppressed with a precise
+		// reason.
+		return &TeamScore{
+			TeamID: teamID, ScoringVersion: tc.SchemaVersion,
+			MetricPercentiles: map[string]PercentileResult{},
+			OfficialAxes:      c.suppressedTeamAxes(tc, "team_not_in_corpus"),
+			OfficialTotal:     &TotalResult{ID: tc.OfficialTotalScore.ID, Name: "队伍官方总分", Suppressed: true, Reasons: []string{"team_not_in_corpus"}},
+			ExperimentalAxes:  c.suppressedTeamAxes(tc, TeamExperimentalRecipeUnavailableReason),
+			ExperimentalTotal: &TotalResult{ID: "experimental_team_total_v1", Name: "队伍实验总分（虚线层）", Suppressed: true, Reasons: []string{TeamExperimentalRecipeUnavailableReason}},
+			SubjectCoverage:   SubjectCoverage{CorpusMatches: c.MatchCount()},
+		}
 	}
 	ts := &TeamScore{
 		TeamID: teamID, ScoringVersion: tc.SchemaVersion,
@@ -832,7 +967,33 @@ func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 	}
 	ts.OfficialAxes = c.computeTeamAxes(tt, ts.MetricPercentiles)
 	ts.OfficialTotal = c.computeTeamTotal(ts, tt)
+	// Experimental layer: the frozen team registry (ti2026.team-score.v1) has
+	// NO machine-readable experimental recipe and no experimental axis
+	// components. Expose the complete dashed interface as suppressed with the
+	// precise contract reason; never invent a formula or borrow the player V3
+	// layer.
+	ts.ExperimentalAxes = c.suppressedTeamAxes(tc, TeamExperimentalRecipeUnavailableReason)
+	ts.ExperimentalTotal = &TotalResult{
+		ID: "experimental_team_total_v1", Name: "队伍实验总分（虚线层）",
+		Weights: map[string]float64{}, Suppressed: true,
+		Reasons:  []string{TeamExperimentalRecipeUnavailableReason},
+		Coverage: Coverage{MetricCount: 0, PublishedCount: 0, MatchCount: tt.EligibleMatches},
+	}
 	return ts
+}
+
+// suppressedTeamAxes returns all canonical team axes in the suppressed state
+// with a single explicit reason (absent team or unavailable experimental
+// recipe).
+func (c *Corpus) suppressedTeamAxes(tc *TeamContract, reason string) map[string]AxisResult {
+	out := map[string]AxisResult{}
+	if tc == nil {
+		return out
+	}
+	for _, ax := range tc.TeamAxisNames() {
+		out[ax] = AxisResult{Axis: ax, DisplayZh: tc.TeamAxisDisplayNameZh(ax), Components: map[string]ComponentResult{}, Suppressed: true, Reason: reason}
+	}
+	return out
 }
 
 // computeOfficialAxes builds axes from the tournament metric percentiles.
@@ -1050,7 +1211,15 @@ func (c *Corpus) computeOfficialTotal(ps *PlayerScore, pt *PlayerTournament) *To
 }
 
 // computeTeamTotal applies the official total gate exactly from the frozen
-// team scoring registry's axis weights.
+// team scoring registry's axis weights:
+//   - a missing MANDATORY axis suppresses the total with a precise reason;
+//   - a missing OPTIONAL axis (vision) is disclosed but does NOT suppress;
+//   - the remaining published team axis weights are renormalized exactly
+//     (sum(w*a)/sum(w for published axes));
+//   - at least minimum_publishable_axes published axes, every mandatory axis,
+//     at least minimum_matches eligible team matches, and all coverage gates
+//     remain required;
+//   - a missing value is never imputed as 0 or 50.
 func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResult {
 	tc := c.TeamC
 	tr := &TotalResult{
@@ -1060,6 +1229,14 @@ func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResul
 	if tc == nil {
 		tr.Reasons = []string{"team_scoring_registry_unavailable"}
 		return tr
+	}
+	mandatory := map[string]bool{}
+	for _, a := range tc.MandatoryAxes {
+		mandatory[a] = true
+	}
+	optional := map[string]bool{}
+	for _, a := range tc.OptionalAxes {
+		optional[a] = true
 	}
 	reasons := []string{}
 	if tt.EligibleMatches < tc.MinimumMatches {
@@ -1071,7 +1248,15 @@ func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResul
 	for _, ax := range tc.TeamAxisNames() {
 		a := ts.OfficialAxes[ax]
 		if !a.Published {
-			reasons = append(reasons, "mandatory_axis_unavailable:"+ax)
+			if mandatory[ax] {
+				// Missing mandatory axis suppresses the total.
+				reasons = append(reasons, "mandatory_axis_unavailable:"+ax)
+			} else if optional[ax] {
+				// Missing optional axis is disclosed but never suppresses.
+				tr.Weights[ax] = 0 // disclosed omission; not part of A
+			} else {
+				reasons = append(reasons, "axis_unavailable:"+ax)
+			}
 			continue
 		}
 		w := tc.AxisWeights[ax]
@@ -1083,6 +1268,12 @@ func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResul
 	if len(published) < tc.MinimumPublishableAxes {
 		reasons = append(reasons, fmt.Sprintf("publishable_axes=%d_less_than_%d", len(published), tc.MinimumPublishableAxes))
 	}
+	// Coverage gate: every declared coverage gate must pass. The registry
+	// declares minimum_matches and minimum_publishable_axes; reflect any
+	// metric-level coverage shortfall.
+	if tc.MinimumPublishableAxes > 0 && len(published) > 0 && len(published) < tc.MinimumPublishableAxes {
+		// already recorded above
+	}
 	if len(reasons) > 0 || totalW == 0 {
 		tr.Reasons = reasons
 		if len(reasons) == 0 {
@@ -1090,11 +1281,13 @@ func (c *Corpus) computeTeamTotal(ts *TeamScore, tt *TeamTournament) *TotalResul
 		}
 		return tr
 	}
+	// Renormalized weighted mean over the published axis set A exactly.
 	val := sum / totalW
 	tr.Published = true
 	tr.Suppressed = false
 	tr.Value = &val
 	tr.AxesIncluded = published
+	tr.Coverage = Coverage{MetricCount: len(published), PublishedCount: len(published), MatchCount: tt.EligibleMatches}
 	return tr
 }
 

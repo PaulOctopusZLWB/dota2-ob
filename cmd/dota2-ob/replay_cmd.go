@@ -190,6 +190,11 @@ func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 		if err != nil {
 			return nil, fmt.Errorf("team_scoring_contract_load_failed (%s): %w", teamFile, err)
 		}
+		// Cross-registry eligibility: every team-referenced metric must exist
+		// in the metric registry and be official-eligible, never V3.
+		if err := tc.ValidateWithRegistry(mreg); err != nil {
+			return nil, fmt.Errorf("team_scoring_contract_metric_mismatch: %w", err)
+		}
 		tcSHA, err = fileSHA256(teamFile)
 		if err != nil {
 			return nil, fmt.Errorf("team_scoring_contract_hash_failed: %w", err)

@@ -599,9 +599,24 @@ func (s *Server) handleTeam(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if _, ok := out["team_score"]; !ok {
-		out["team_score"] = map[string]interface{}{
-			"team_id": teamID, "axes": map[string]interface{}{}, "published": false,
-			"reasons": []string{"team_not_in_persisted_corpus"},
+		// Absent-team fallback uses the same stable TeamScore shape (official
+		// and experimental layers) with explicit reasons — never the unrelated
+		// {axes,published,reasons} shape.
+		out["team_score"] = scoring.TeamScore{
+			TeamID:            teamID,
+			ScoringVersion:    "",
+			MetricPercentiles: map[string]scoring.PercentileResult{},
+			OfficialAxes:      map[string]scoring.AxisResult{},
+			OfficialTotal: &scoring.TotalResult{
+				ID: "official_team_total_v1", Name: "队伍官方总分",
+				Weights: map[string]float64{}, Suppressed: true, Reasons: []string{"team_not_in_persisted_corpus"},
+			},
+			ExperimentalAxes: map[string]scoring.AxisResult{},
+			ExperimentalTotal: &scoring.TotalResult{
+				ID: "experimental_team_total_v1", Name: "队伍实验总分（虚线层）",
+				Weights: map[string]float64{}, Suppressed: true, Reasons: []string{"team_not_in_persisted_corpus"},
+			},
+			SubjectCoverage: scoring.SubjectCoverage{},
 		}
 	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ReportSchema, Data: out})

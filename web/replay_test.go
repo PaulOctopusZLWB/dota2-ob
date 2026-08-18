@@ -203,8 +203,9 @@ func TestReplayPlayerPage(t *testing.T) {
 	}
 }
 
-// TestReplayTeamPage verifies the team profile page renders per-match player
-// totals and suppression reasons.
+// TestReplayTeamPage verifies the team profile page renders the independent
+// team scoring product: official (solid) and experimental (dashed) layers,
+// separately named totals, decomposition, and per-match player rows.
 func TestReplayTeamPage(t *testing.T) {
 	data, err := os.ReadFile("replay/team.html")
 	if err != nil {
@@ -214,8 +215,11 @@ func TestReplayTeamPage(t *testing.T) {
 	for _, want := range []string{
 		`lang="zh-CN"`,
 		"/api/replay/v1/teams/",
-		"队伍总分",
-		"官方总分",
+		"队伍官方总分",
+		"队伍实验总分（V3 虚线层）",
+		"官方轴分解",
+		"实验轴分解（虚线层）",
+		"指标分解（可复现显示值）",
 		"player.html?id=",
 	} {
 		if !strings.Contains(html, want) {

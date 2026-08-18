@@ -1,7 +1,9 @@
 package scoring
 
 import (
+	"fmt"
 	"math"
+	"sort"
 	"testing"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
@@ -481,5 +483,373 @@ func TestLowMatchCountSuppresses(t *testing.T) {
 	}
 	if ps.OfficialTotal != nil && ps.OfficialTotal.Published {
 		t.Fatal("official total must suppress when subject matches < minimum")
+	}
+}
+
+// teamPlayer builds a PlayerMatch row carrying the full official-eligible team
+// metric set for a team, all with the same raw value so the arithmetic is
+// deterministic.
+func teamPlayer(match, acct, team, role string, val float64, mids []string) *PlayerMatch {
+	mv := map[string]MetricValue{}
+	for _, id := range mids {
+		d := HigherBetter
+		if id == "death_without_buyback_exposure" {
+			d = LowerBetter
+		}
+		n := val * 10
+		den := 100.0
+		mv[id] = MetricValue{MetricID: id, Value: val, Direction: d, OfficialEligible: true, ExperimentalEligible: false, Numerator: &n, Denominator: &den}
+	}
+	return &PlayerMatch{MatchID: match, AccountID: acct, TeamID: team, NominalRole: role, Metrics: mv}
+}
+
+// allTeamMetricIDs is the union of every metric referenced by the frozen team
+// official axis components (all V2 official-eligible).
+var allTeamMetricIDs = []string{
+	"lane_pressure_damage_per_contact",
+	"item_timing_opportunity_percentile", "stack_attempt_success_rate",
+	"roam_conversion_rate", "rune_control_contribution", "key_ability_window_conversion",
+	"observed_map_exchange_outcome_rate",
+	"ward_lifetime_share",
+	"fight_damage_share", "control_duration_per_opportunity",
+	"resource_to_objective_conversion", "highground_building_conversion",
+	"death_without_buyback_exposure", "buyback_round_participation",
+}
+
+// mandatoryOnlyTeamMetricIDs is allTeamMetricIDs minus the optional vision
+// metric (ward_lifetime_share).
+func mandatoryOnlyTeamMetricIDs() []string {
+	out := []string{}
+	for _, id := range allTeamMetricIDs {
+		if id == "ward_lifetime_share" {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// buildTeamCorpus builds a corpus with nTeams teams, each playing matches in
+// rounds; each team has per-metric raw value valByTeam. Returns the corpus and
+// a team id list.
+func buildTeamCorpus(t *testing.T, teamVals map[string]float64, matchesPerTeam int, mids []string) *Corpus {
+	t.Helper()
+	c := testContract(t)
+	tc := testTeamContract(t)
+	mreg := testMetricReg(t)
+	teamIDs := make([]string, 0, len(teamVals))
+	for tid := range teamVals {
+		teamIDs = append(teamIDs, tid)
+	}
+	sort.Strings(teamIDs)
+	var players []*PlayerMatch
+	acct := 0
+	for mi := 0; mi < matchesPerTeam; mi++ {
+		matchID := fmt.Sprintf("m%d", mi)
+		for _, tid := range teamIDs {
+			for role := 1; role <= 5; role++ {
+				acct++
+				players = append(players, teamPlayer(matchID, fmt.Sprintf("a%d", acct), tid, fmt.Sprintf("%d", role), teamVals[tid], mids))
+			}
+		}
+	}
+	return NewCorpusWithTeam(c, tc, mreg, players)
+}
+
+// TestTeamContractValidateWithRegistry proves the frozen team registry is
+// valid against the metric registry and that unknown / cross-ineligible /
+// duplicate / malformed variants fail closed.
+func TestTeamContractValidateWithRegistry(t *testing.T) {
+	tc := testTeamContract(t)
+	mreg := testMetricReg(t)
+	if err := tc.ValidateWithRegistry(mreg); err != nil {
+		t.Fatalf("frozen team registry failed cross-registry validation: %v", err)
+	}
+	// Unknown metric fails.
+	bad := *tc
+	bad.OfficialAxisComponents = map[string]map[string]float64{}
+	for k, v := range tc.OfficialAxisComponents {
+		bad.OfficialAxisComponents[k] = v
+	}
+	bad.OfficialAxisComponents["laning"] = map[string]float64{"not_a_metric": 1.0}
+	if err := bad.ValidateWithRegistry(mreg); err == nil {
+		t.Fatal("unknown team metric accepted")
+	}
+	// V3 metric must not enter the official team layer.
+	bad2 := *tc
+	bad2.OfficialAxisComponents = map[string]map[string]float64{}
+	for k, v := range tc.OfficialAxisComponents {
+		bad2.OfficialAxisComponents[k] = v
+	}
+	bad2.OfficialAxisComponents["laning"] = map[string]float64{"core_partner_protection_uptime": 1.0}
+	if err := bad2.ValidateWithRegistry(mreg); err == nil {
+		t.Fatal("V3 metric accepted into official team layer")
+	}
+	// Duplicate axis fails.
+	bad3 := *tc
+	bad3.Axes = append(append([]AxisDef{}, tc.Axes...), AxisDef{ID: "laning"})
+	if err := bad3.Validate(); err == nil {
+		t.Fatal("duplicate axis accepted")
+	}
+	// Axis both mandatory and optional fails.
+	bad4 := *tc
+	bad4.OptionalAxes = append(append([]string{}, tc.OptionalAxes...), "laning")
+	if err := bad4.Validate(); err == nil {
+		t.Fatal("axis both mandatory and optional accepted")
+	}
+	// Missing canonical axis fails.
+	bad5 := *tc
+	bad5.Axes = bad5.Axes[:7]
+	if err := bad5.Validate(); err == nil {
+		t.Fatal("missing canonical axis accepted")
+	}
+}
+
+// TestTeamOfficialTotalPublishesWithRenormalization proves: seven mandatory
+// axes publish, vision (optional) is unavailable, and the official total
+// publishes with the vision omission disclosed and the remaining weights
+// renormalized exactly.
+func TestTeamOfficialTotalPublishesWithRenormalization(t *testing.T) {
+	teamVals := map[string]float64{"TA": 0.3, "TB": 0.5, "TC": 0.7}
+	cor := buildTeamCorpus(t, teamVals, 3, mandatoryOnlyTeamMetricIDs())
+	tc := testTeamContract(t)
+	ts := cor.ScoreTeam("TA")
+	if ts == nil {
+		t.Fatal("team score nil")
+	}
+	// The optional vision axis is unavailable but disclosed.
+	if !ts.OfficialAxes["vision"].Published {
+		t.Logf("vision unavailable reason: %s", ts.OfficialAxes["vision"].Reason)
+	}
+	// Seven mandatory axes publish.
+	mandatory := map[string]bool{}
+	for _, a := range tc.MandatoryAxes {
+		mandatory[a] = true
+	}
+	for ax := range mandatory {
+		if !ts.OfficialAxes[ax].Published {
+			t.Fatalf("mandatory axis %s not published: %s", ax, ts.OfficialAxes[ax].Reason)
+		}
+	}
+	if ts.OfficialTotal == nil || !ts.OfficialTotal.Published {
+		t.Fatalf("official total must publish with all mandatory axes; reasons=%v", ts.OfficialTotal.Reasons)
+	}
+	// Renormalization: total == sum(w*a)/sum(w for published axes), and the
+	// optional vision weight must NOT be in the denominator.
+	sum, wsum := 0.0, 0.0
+	for _, ax := range ts.OfficialTotal.AxesIncluded {
+		w := tc.AxisWeights[ax]
+		sum += w * *ts.OfficialAxes[ax].Value
+		wsum += w
+	}
+	want := sum / wsum
+	if math.Abs(*ts.OfficialTotal.Value-want) > 1e-9 {
+		t.Fatalf("official total=%v want renormalized %v", *ts.OfficialTotal.Value, want)
+	}
+	// Vision must be excluded from AxesIncluded and its weight excluded.
+	for _, ax := range ts.OfficialTotal.AxesIncluded {
+		if ax == "vision" {
+			t.Fatal("optional vision axis wrongly included in total")
+		}
+	}
+	if wsum >= 1.0-1e-9 {
+		t.Fatalf("renormalized denominator must exclude vision; got %v (full weight sum would be 1.0)", wsum)
+	}
+}
+
+// TestTeamOfficialTotalWithVisionUsesOriginalWeight proves available vision
+// uses its original registry weight and changes the denominator exactly.
+func TestTeamOfficialTotalWithVisionUsesOriginalWeight(t *testing.T) {
+	teamVals := map[string]float64{"TA": 0.3, "TB": 0.5, "TC": 0.7}
+	cor := buildTeamCorpus(t, teamVals, 3, allTeamMetricIDs)
+	tc := testTeamContract(t)
+	ts := cor.ScoreTeam("TA")
+	if ts.OfficialTotal == nil || !ts.OfficialTotal.Published {
+		t.Fatalf("official total must publish with all 8 axes; reasons=%v", ts.OfficialTotal.Reasons)
+	}
+	if !ts.OfficialAxes["vision"].Published {
+		t.Fatalf("vision axis should publish with ward_lifetime_share present: %s", ts.OfficialAxes["vision"].Reason)
+	}
+	if got := ts.OfficialTotal.Weights["vision"]; math.Abs(got-tc.AxisWeights["vision"]) > 1e-9 {
+		t.Fatalf("vision weight in total=%v want original %v", got, tc.AxisWeights["vision"])
+	}
+	// Denominator now includes the full weight set (vision weight).
+	sum, wsum := 0.0, 0.0
+	for _, ax := range ts.OfficialTotal.AxesIncluded {
+		w := tc.AxisWeights[ax]
+		sum += w * *ts.OfficialAxes[ax].Value
+		wsum += w
+	}
+	if math.Abs(wsum-1.0) > 1e-9 {
+		t.Fatalf("full weight denominator=%v want 1.0", wsum)
+	}
+	if math.Abs(*ts.OfficialTotal.Value-(sum/wsum)) > 1e-9 {
+		t.Fatalf("official total=%v want %v", *ts.OfficialTotal.Value, sum/wsum)
+	}
+}
+
+// TestTeamOfficialTotalMandatoryAxisSuppresses proves any one missing
+// mandatory axis suppresses the total with a precise reason.
+func TestTeamOfficialTotalMandatoryAxisSuppresses(t *testing.T) {
+	// Omit lane_pressure_damage_per_contact => laning (mandatory) unavailable.
+	partial := []string{}
+	for _, id := range allTeamMetricIDs {
+		if id == "lane_pressure_damage_per_contact" {
+			continue
+		}
+		partial = append(partial, id)
+	}
+	teamVals := map[string]float64{"TA": 0.3, "TB": 0.5, "TC": 0.7}
+	cor := buildTeamCorpus(t, teamVals, 3, partial)
+	ts := cor.ScoreTeam("TA")
+	if ts.OfficialTotal == nil || ts.OfficialTotal.Published {
+		t.Fatal("official total must be suppressed when a mandatory axis is unavailable")
+	}
+	found := false
+	for _, r := range ts.OfficialTotal.Reasons {
+		if r == "mandatory_axis_unavailable:laning" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reasons=%v want mandatory_axis_unavailable:laning", ts.OfficialTotal.Reasons)
+	}
+}
+
+// TestTeamOfficialTotalFewerThanSixAxesSuppresses proves fewer than six
+// published axes suppresses the total.
+func TestTeamOfficialTotalFewerThanSixAxesSuppresses(t *testing.T) {
+	// Only fight + objectives + endgame metrics present => 3 axes.
+	partial := []string{"fight_damage_share", "resource_to_objective_conversion", "buyback_round_participation"}
+	teamVals := map[string]float64{"TA": 0.3, "TB": 0.5, "TC": 0.7}
+	cor := buildTeamCorpus(t, teamVals, 3, partial)
+	ts := cor.ScoreTeam("TA")
+	if ts.OfficialTotal == nil || ts.OfficialTotal.Published {
+		t.Fatal("official total must be suppressed with fewer than six axes")
+	}
+	found := false
+	for _, r := range ts.OfficialTotal.Reasons {
+		if len(r) >= len("publishable_axes=") && r[:len("publishable_axes=")] == "publishable_axes=" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reasons=%v want publishable_axes reason", ts.OfficialTotal.Reasons)
+	}
+}
+
+// TestTeamOfficialTotalFewerThanThreeMatchesSuppresses proves fewer than three
+// eligible team matches suppresses the total.
+func TestTeamOfficialTotalFewerThanThreeMatchesSuppresses(t *testing.T) {
+	teamVals := map[string]float64{"TA": 0.3, "TB": 0.5, "TC": 0.7}
+	cor := buildTeamCorpus(t, teamVals, 2, allTeamMetricIDs)
+	ts := cor.ScoreTeam("TA")
+	if ts.OfficialTotal == nil || ts.OfficialTotal.Published {
+		t.Fatal("official total must be suppressed with fewer than three matches")
+	}
+	found := false
+	for _, r := range ts.OfficialTotal.Reasons {
+		if len(r) >= len("team_matches=") && r[:len("team_matches=")] == "team_matches=" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reasons=%v want team_matches reason", ts.OfficialTotal.Reasons)
+	}
+}
+
+// TestTeamExperimentalLayerSuppressedAndIsolated proves the experimental team
+// layer is exposed suppressed (no machine-readable recipe in the frozen
+// registry), is separately named, and V3-only inputs never change official
+// axes or totals.
+func TestTeamExperimentalLayerSuppressedAndIsolated(t *testing.T) {
+	c := testContract(t)
+	tc := testTeamContract(t)
+	mreg := testMetricReg(t)
+	// Add a V3 experimental-only metric to the players; it must never enter
+	// the official team layer.
+	mv := map[string]MetricValue{}
+	for _, id := range allTeamMetricIDs {
+		n := 5.0
+		mv[id] = MetricValue{MetricID: id, Value: 0.5, Direction: HigherBetter, OfficialEligible: true, ExperimentalEligible: false, Numerator: &n, Denominator: ptrF(10)}
+	}
+	mv["core_partner_protection_uptime"] = MetricValue{MetricID: "core_partner_protection_uptime", Value: 0.9, Direction: HigherBetter, OfficialEligible: false, ExperimentalEligible: true, Numerator: ptrF(9), Denominator: ptrF(10)}
+	var players []*PlayerMatch
+	acct := 0
+	for mi := 0; mi < 3; mi++ {
+		for _, tid := range []string{"TA", "TB", "TC"} {
+			for role := 1; role <= 5; role++ {
+				acct++
+				players = append(players, &PlayerMatch{MatchID: fmt.Sprintf("m%d", mi), AccountID: fmt.Sprintf("a%d", acct), TeamID: tid, NominalRole: fmt.Sprintf("%d", role), Metrics: mv})
+			}
+		}
+	}
+	cor := NewCorpusWithTeam(c, tc, mreg, players)
+	ts := cor.ScoreTeam("TA")
+	if ts == nil {
+		t.Fatal("team score nil")
+	}
+	if ts.ExperimentalAxes == nil || len(ts.ExperimentalAxes) == 0 {
+		t.Fatal("experimental_axes must be present (suppressed interface)")
+	}
+	if ts.ExperimentalTotal == nil || ts.ExperimentalTotal.Published {
+		t.Fatal("experimental team total must be suppressed (no frozen recipe)")
+	}
+	for _, ax := range tc.TeamAxisNames() {
+		if ts.ExperimentalAxes[ax].Published {
+			t.Fatalf("experimental axis %s must be suppressed", ax)
+		}
+	}
+	// The V3 metric never appears in the official team axes or the official
+	// total decomposition.
+	officialVals := ts.OfficialAxes["fight"]
+	for mid := range officialVals.Components {
+		if mid == "core_partner_protection_uptime" {
+			t.Fatal("V3 metric leaked into official team axis components")
+		}
+	}
+	// Official total unaffected (all mandatory + optional present) and has no
+	// V3 inputs.
+	if ts.OfficialTotal == nil || !ts.OfficialTotal.Published {
+		t.Fatalf("official total should publish; reasons=%v", ts.OfficialTotal.Reasons)
+	}
+}
+
+func ptrF(v float64) *float64 { return &v }
+
+// TestTeamAbsentStableShape proves absent-registry and absent-team API
+// fallbacks use the same stable TeamScore shape with both layers.
+func TestTeamAbsentStableShape(t *testing.T) {
+	c := testContract(t)
+	mreg := testMetricReg(t)
+	cor := NewCorpusWithTeam(c, nil, mreg, nil)
+	ts := cor.ScoreTeam("TA")
+	if ts == nil {
+		t.Fatal("absent-registry team score must not be nil")
+	}
+	if ts.OfficialTotal == nil || ts.ExperimentalTotal == nil {
+		t.Fatal("absent-registry shape must include official and experimental totals")
+	}
+	if !ts.OfficialTotal.Suppressed || !ts.ExperimentalTotal.Suppressed {
+		t.Fatal("absent-registry layers must be suppressed")
+	}
+	// Absent team with valid registry.
+	tc := testTeamContract(t)
+	cor2 := NewCorpusWithTeam(c, tc, mreg, nil)
+	ts2 := cor2.ScoreTeam("NO_TEAM")
+	if ts2 == nil {
+		t.Fatal("absent-team score must not be nil")
+	}
+	if ts2.OfficialTotal == nil || ts2.ExperimentalTotal == nil {
+		t.Fatal("absent-team shape must include both layers")
+	}
+	found := false
+	for _, r := range ts2.OfficialTotal.Reasons {
+		if r == "team_not_in_corpus" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("absent-team reasons=%v want team_not_in_corpus", ts2.OfficialTotal.Reasons)
 	}
 }

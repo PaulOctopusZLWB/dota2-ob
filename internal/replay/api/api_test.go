@@ -1662,3 +1662,120 @@ func TestRoleOverrideNegativeAndAtomicity(t *testing.T) {
 		t.Fatalf("corrections=%d want 0 after all failures", len(loaded.Corrections))
 	}
 }
+
+// TestTeamAPIStableSchema proves the /teams/{id} endpoint returns the stable
+// TeamScore shape with separately named official and experimental layers, and
+// that an absent team returns the same shape (both layers suppressed) rather
+// than the unrelated {axes,published,reasons} shape.
+func TestTeamAPIStableSchema(t *testing.T) {
+	st := testStore(t)
+	reg := testRoleRegistry(t)
+	srv := testServerWithContracts(t, st, reg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Absent team: stable shape with official + experimental layers.
+	var absent struct {
+		Data struct {
+			TeamScore struct {
+				OfficialTotal     map[string]interface{} `json:"official_total"`
+				ExperimentalTotal map[string]interface{} `json:"experimental_total"`
+				ExperimentalAxes  map[string]interface{} `json:"experimental_axes"`
+			} `json:"team_score"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/teams/NO_SUCH", &absent); code != 200 {
+		t.Fatalf("absent team status %d", code)
+	}
+	if absent.Data.TeamScore.OfficialTotal == nil || absent.Data.TeamScore.ExperimentalTotal == nil {
+		t.Fatal("absent-team shape missing official/experimental totals")
+	}
+	if absent.Data.TeamScore.ExperimentalAxes == nil {
+		t.Fatal("absent-team shape missing experimental_axes")
+	}
+	if _, hasAxes := absent.Data.TeamScore.OfficialTotal["axes"]; hasAxes {
+		t.Fatal("absent-team fallback still uses unrelated axes shape")
+	}
+}
+
+// TestTeamScoreCorpusPersistsBothLayers proves a persisted team score corpus
+// carries both official and experimental layers for a real team.
+func TestTeamScoreCorpusPersistsBothLayers(t *testing.T) {
+	st := testStore(t)
+	mreg, sc := testContracts(t)
+	tc := testTeamContract(t)
+	// Build a small corpus of 3 matches with two teams carrying the full team
+	// metric set so team scoring persists.
+	acct := 0
+	var players []*scoring.PlayerMatch
+	for mi := 0; mi < 3; mi++ {
+		for _, tid := range []string{"TA", "TB"} {
+			for role := 1; role <= 5; role++ {
+				acct++
+				mv := map[string]scoring.MetricValue{}
+				for _, mid := range []string{
+					"lane_pressure_damage_per_contact", "item_timing_opportunity_percentile", "stack_attempt_success_rate",
+					"roam_conversion_rate", "rune_control_contribution", "key_ability_window_conversion",
+					"observed_map_exchange_outcome_rate", "ward_lifetime_share",
+					"fight_damage_share", "control_duration_per_opportunity",
+					"resource_to_objective_conversion", "highground_building_conversion",
+					"death_without_buyback_exposure", "buyback_round_participation",
+				} {
+					n := 5.0
+					d := scoring.HigherBetter
+					if mid == "death_without_buyback_exposure" {
+						d = scoring.LowerBetter
+					}
+					mv[mid] = scoring.MetricValue{MetricID: mid, Value: 0.5, Direction: d, OfficialEligible: true, Numerator: &n, Denominator: f64ptr(10)}
+				}
+				players = append(players, &scoring.PlayerMatch{MatchID: fmt.Sprintf("m%d", mi), AccountID: fmt.Sprintf("a%d", acct), TeamID: tid, NominalRole: fmt.Sprintf("%d", role), Metrics: mv})
+			}
+		}
+	}
+	cor := scoring.NewCorpusWithTeam(sc, tc, mreg, players)
+	// Persist through the corpus catalog path used by the API.
+	cs := &scoring.CorpusScores{
+		SchemaVersion:        "replay.score.v2",
+		RuleVersion:          "ti2026.scoring.v2",
+		ContractVersion:      sc.SchemaVersion,
+		TeamScoringVersion:   tc.SchemaVersion,
+		ComparisonPopulation: tc.ComparisonPopulation,
+		CorpusMatches:        cor.MatchCount(),
+		Matches:              map[string]*scoring.MatchScores{},
+		Players:              []*scoring.PlayerScore{},
+		Teams:                []*scoring.TeamScore{},
+	}
+	for _, tid := range []string{"TA", "TB"} {
+		if tsv := cor.ScoreTeam(tid); tsv != nil {
+			cs.Teams = append(cs.Teams, tsv)
+		}
+	}
+	if err := st.WriteRootJSON("scores-corpus.json", cs); err != nil {
+		t.Fatal(err)
+	}
+	reg := testRoleRegistry(t)
+	srv := testServerWithContracts(t, st, reg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	var out struct {
+		Data struct {
+			TeamScore struct {
+				OfficialTotal     map[string]interface{} `json:"official_total"`
+				ExperimentalTotal map[string]interface{} `json:"experimental_total"`
+				ExperimentalAxes  map[string]interface{} `json:"experimental_axes"`
+				OfficialAxes      map[string]interface{} `json:"official_axes"`
+			} `json:"team_score"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/teams/TA", &out); code != 200 {
+		t.Fatalf("team status %d", code)
+	}
+	if out.Data.TeamScore.OfficialTotal == nil || out.Data.TeamScore.ExperimentalTotal == nil {
+		t.Fatal("persisted team score missing both layers")
+	}
+	if out.Data.TeamScore.ExperimentalAxes == nil || out.Data.TeamScore.OfficialAxes == nil {
+		t.Fatal("persisted team score missing axis layers")
+	}
+}
+
+func f64ptr(v float64) *float64 { return &v }

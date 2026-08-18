@@ -30,8 +30,10 @@ const (
 	MetricsSchema = "replay.metrics.v3"
 	// ClosureSchema is the 52-row metric closure contract version.
 	ClosureSchema = "ti2026.metric-closure.v1"
-	// ScoreSchema is the radar/score snapshot schema version.
-	ScoreSchema = "replay.score.v2"
+	// ScoreSchema is the radar/score snapshot schema version. v3 adds the
+	// separately named experimental team layer (experimental_axes /
+	// experimental_total) to TeamScore; both layers are always present.
+	ScoreSchema = "replay.score.v3"
 	// CorrectionSchemaV1 is the legacy review/correction overlay schema
 	// version; v1 documents are still readable and are migrated
 	// deterministically to the current version on load.
