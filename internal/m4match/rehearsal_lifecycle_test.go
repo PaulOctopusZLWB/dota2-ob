@@ -142,7 +142,7 @@ func TestExactRehearsalCheckRegistryRejectsDeletionExtraAndReorder(t *testing.T)
 	for _, id := range rehearsalCheckRegistry {
 		checks = append(checks, RehearsalCheckV1{ID: id, Passed: true, Code: "ok"})
 	}
-	base := RehearsalPreflightV1{SchemaVersion: RehearsalPreflightSchemaV1, Purpose: RehearsalPurpose, MatchClass: RehearsalMatchClass, AcceptedSpec: AcceptedRehearsalSpec, AcceptedP4Spec: AcceptedP4Spec, ConsoleState: RehearsalReady, HumanInstruction: RehearsalInstruction, Checks: checks, AcceptanceGate: "none", RootOwnerSHA256: stringsOf('a')}
+	base := RehearsalPreflightV1{SchemaVersion: RehearsalPreflightSchemaV1, Purpose: RehearsalPurpose, MatchClass: RehearsalMatchClass, AcceptedSpec: AcceptedRehearsalSpec, AcceptedP4Spec: AcceptedP4Spec, ConsoleState: RehearsalReady, HumanInstruction: RehearsalInstruction, Checks: checks, AcceptanceGate: "none", RootOwnerSHA256: stringsOf('a'), ArmSHA256: stringsOf('b'), GoExecutable: "/bound/go", GoExecutableSHA256: stringsOf('c')}
 	if err := validateRehearsalPreflight(base); err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,8 @@ func stringsOf(value byte) string { return string(bytes.Repeat([]byte{value}, 64
 func withRehearsalProbe(t *testing.T, repo string, mutate func(*rehearsalPreflightProbe)) {
 	t.Helper()
 	head, _ := runText(context.Background(), repo, "git", "rev-parse", "HEAD")
-	probe := rehearsalPreflightProbe{commit: head, parent: requiredRehearsalParent, branch: "agent/dota2-fullstack-engineer/DOT-84-test", remoteHead: head, prHead: head, clean: true, ancestry: true, fixture: true, listener: true, toolchain: true, draftPR: true}
+	goExecutable, goSHA, _ := resolveRehearsalGo()
+	probe := rehearsalPreflightProbe{commit: head, parent: requiredRehearsalParent, branch: "agent/dota2-fullstack-engineer/DOT-84-test", remoteHead: head, prHead: head, goExecutable: goExecutable, goExecutableSHA256: goSHA, clean: true, ancestry: true, fixture: true, listener: true, toolchain: true, draftPR: true}
 	mutate(&probe)
 	prior := rehearsalPreflightInspector
 	rehearsalPreflightInspector = func(context.Context, string) rehearsalPreflightProbe { return probe }

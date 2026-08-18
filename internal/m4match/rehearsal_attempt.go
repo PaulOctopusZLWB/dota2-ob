@@ -1,6 +1,7 @@
 package m4match
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -42,17 +43,37 @@ func RehearsalAttempt(ctx context.Context, config RehearsalAttemptConfig) (Rehea
 	if preflight.ConsoleState != RehearsalReady {
 		return RehearsalAttemptResultV1{}, errors.New("unknown rehearsal preflight state")
 	}
+	arm, armErr := readRehearsalArm(lease.abs, preflight, true)
+	if armErr != nil {
+		terminal.FailureCode = "arm_revalidation_failed"
+		terminal.Coverage = unavailableCoverage("no_accepted_frames", 0, "")
+		return sealRehearsalTerminal(lease.abs, terminal)
+	}
+	sealAfterDisarm := func(value RehearsalTerminalV1) (RehearsalAttemptResultV1, error) {
+		if err := cleanupRehearsalArm(lease.abs, preflight, arm.ArmToken); err != nil {
+			value.Outcome = "rehearsal_failed"
+			value.FailureCode = "arm_cleanup_failed"
+		}
+		return sealRehearsalTerminal(lease.abs, value)
+	}
 	identity := config.identity
-	if identity == nil {
+	if config.OBSOnlySmoke {
+		identity = func() (RehearsalDotaIdentityV1, error) {
+			return RehearsalDotaIdentityV1{SchemaVersion: "rehearsal_dota_identity.v1", PID: 2, Comm: "dota2", ExecutablePath: "/typed/obs-only-smoke", ExecutablePathSHA256: stringsOfSHA('a'), ExecutableSHA256: stringsOfSHA('b'), ProcessStartTicks: 1, ExecutableDevice: 1, ExecutableInode: 1}, nil
+		}
+	} else if identity == nil {
 		identity = discoverRehearsalDotaIdentity
 	}
 	bound, identityErr := identity()
 	if identityErr != nil {
 		terminal.FailureCode = "dota_identity_unavailable"
 		terminal.Coverage = unavailableCoverage("no_accepted_frames", 0, "")
-		return sealRehearsalTerminal(lease.abs, terminal)
+		return sealAfterDisarm(terminal)
 	}
 	producerDriver := config.producer
+	if config.OBSOnlySmoke {
+		producerDriver = obsOnlySmokeDriver{}
+	}
 	if producerDriver == nil && config.identity != nil {
 		// An injected identity is an unexported package-test seam. It must never
 		// cause the runtime executable to launch physical processes implicitly.
@@ -73,6 +94,9 @@ func RehearsalAttempt(ctx context.Context, config RehearsalAttemptConfig) (Rehea
 	}
 	if admissionErr != nil {
 		terminal.FailureCode = "raw_admission_failed"
+	}
+	if config.OBSOnlySmoke && producerErr != nil {
+		terminal.FailureCode = "obs_only_smoke_failed"
 	}
 
 	suppression, suppressionErr := deriveRehearsalSuppression(preflight.SessionID, attested)
@@ -111,8 +135,10 @@ func RehearsalAttempt(ctx context.Context, config RehearsalAttemptConfig) (Rehea
 			terminal.Outcome = "rehearsal_completed"
 		}
 	}
-	return sealRehearsalTerminal(lease.abs, terminal)
+	return sealAfterDisarm(terminal)
 }
+
+func stringsOfSHA(value byte) string { return string(bytes.Repeat([]byte{value}, 64)) }
 
 func deriveRehearsalSuppression(sessionID string, raw session.AttestedRawV1) ([]RehearsalSuppressionFrameV1, error) {
 	history, lineage, _, err := rehearsalSuccessorArtifacts(sessionID)

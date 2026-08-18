@@ -38,22 +38,26 @@ type rehearsalLifecycleContext struct {
 }
 
 type rehearsalLifecycleReport struct {
-	sourceMode         string
-	physicalMatch      bool
-	steps              []RehearsalProducerStepV1
-	productPID         int
-	obsPID             int
-	recoveryPID        int
-	dotaContinuity     []RehearsalProcessObservationV1
-	recoveryProcess    []RehearsalOwnedProcessObservationV1
-	operatorActions    []string
-	resourceSamples    uint64
-	visibilitySamples  uint64
-	rawRecords         uint64
-	recordingFinalized bool
-	reconciled         bool
-	recoveryByteEqual  bool
-	cleanShutdown      bool
+	sourceMode             string
+	physicalMatch          bool
+	steps                  []RehearsalProducerStepV1
+	productPID             int
+	obsPID                 int
+	obsInstanceID          string
+	obsExecutable          RehearsalOwnedProcessIdentityV1
+	obsStartCorrelation    string
+	obsTerminalCorrelation string
+	recoveryPID            int
+	dotaContinuity         []RehearsalProcessObservationV1
+	recoveryProcess        []RehearsalOwnedProcessObservationV1
+	operatorActions        []string
+	resourceSamples        uint64
+	visibilitySamples      uint64
+	rawRecords             uint64
+	recordingFinalized     bool
+	reconciled             bool
+	recoveryByteEqual      bool
+	cleanShutdown          bool
 }
 
 type rehearsalLifecycleDriver interface {
@@ -100,6 +104,8 @@ func executeRehearsalProducer(ctx context.Context, root, repo string, preflight 
 		SchemaVersion: rehearsalProducerSchemaV1, Purpose: RehearsalPurpose, SessionID: preflight.SessionID,
 		PreflightSHA256: preflight.PreflightSHA256, RootOwnerSHA256: preflight.RootOwnerSHA256,
 		SourceMode: report.sourceMode, Steps: report.steps, ProductPID: report.productPID, OBSPID: report.obsPID,
+		OBSInstanceID: report.obsInstanceID, OBSExecutable: report.obsExecutable,
+		OBSStartCorrelation: report.obsStartCorrelation, OBSTerminalCorrelation: report.obsTerminalCorrelation,
 		RecoveryPID: report.recoveryPID, OperatorActions: append([]string(nil), report.operatorActions...),
 		DotaContinuity:  append([]RehearsalProcessObservationV1(nil), report.dotaContinuity...),
 		RecoveryProcess: append([]RehearsalOwnedProcessObservationV1(nil), report.recoveryProcess...),
@@ -156,12 +162,16 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 		complete(build, err)
 		return report, err
 	}
-	installedConfig, err := installRehearsalGSIConfig(run.root)
-	if err != nil {
+	if err := prepareRehearsalOBSProfile(run.root); err != nil {
 		complete(build, err)
 		return report, err
 	}
-	defer func() { retErr = errors.Join(retErr, os.Remove(installedConfig)) }()
+	goHash, _, err := fileSHA(run.preflight.GoExecutable)
+	if err != nil || goHash != run.preflight.GoExecutableSHA256 {
+		err = errors.New("bound Go executable identity changed")
+		complete(build, err)
+		return report, err
+	}
 	history, lineage, release, err := rehearsalSuccessorArtifacts(run.preflight.SessionID)
 	if err == nil {
 		err = writeJSON(filepath.Join(run.root, "config/policy/history_availability_binding_v1.json"), history, 0o600)
@@ -174,7 +184,7 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 	}
 	binary := filepath.Join(run.root, "application", "dota2-ob")
 	if err == nil {
-		command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/dota2-ob")
+		command := exec.CommandContext(ctx, run.preflight.GoExecutable, "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/dota2-ob")
 		command.Dir = run.repo
 		err = command.Run()
 	}
@@ -224,23 +234,30 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 	}
 	defer obsLog.Close()
 	obsStep := step("start_obs")
-	obs := exec.CommandContext(ctx, "flatpak", "run", "--filesystem="+run.root, "--env=XDG_CONFIG_HOME="+filepath.Join(run.root, "config"), "--env=XDG_DATA_HOME="+filepath.Join(run.root, "data"), "--env=XDG_CACHE_HOME="+filepath.Join(run.root, "cache"), "com.obsproject.Studio", "--profile", "DOT65-P4", "--collection", "DOT65-P4", "--startrecording")
-	obs.Dir, obs.Stdout, obs.Stderr = run.root, obsLog, obsLog
-	err = obs.Start()
+	obs, err := startOwnedFlatpakOBS(ctx, run.root, obsLog)
 	complete(obsStep, err)
 	if err != nil {
 		_ = stopProcess(product, productDone, 15*time.Second)
 		return report, err
 	}
-	report.obsPID = obs.Process.Pid
-	obsDone := make(chan error, 1)
-	go func() { obsDone <- obs.Wait() }()
+	report.obsPID, report.obsInstanceID, report.obsExecutable = obs.OBSPID, obs.InstanceID, obs.Identity
+	obsStopped := false
+	defer func() {
+		if !obsStopped {
+			retErr = errors.Join(retErr, stopOwnedFlatpakOBS(context.Background(), obs, 30*time.Second))
+		}
+	}()
 	obsReady := step("obs_ready")
-	_, err = waitStableProcessCorrelation(ctx, os.Getpid(), product.Process.Pid, obs.Process.Pid, 20*time.Second)
+	correlation, err := waitOwnedFlatpakCorrelation(ctx, product.Process.Pid, obs, 20*time.Second)
+	if err == nil {
+		report.obsStartCorrelation = correlation.SHA256
+		err = waitOBSRecordingStarted(ctx, run.root, 30*time.Second)
+	}
 	complete(obsReady, err)
 	if err != nil {
 		_ = stopProcess(product, productDone, 15*time.Second)
-		_ = stopProcess(obs, obsDone, 30*time.Second)
+		_ = stopOwnedFlatpakOBS(context.Background(), obs, 30*time.Second)
+		obsStopped = true
 		return report, err
 	}
 
@@ -277,12 +294,17 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 			err = errors.New("product exited before terminal: " + boundedFailure(productErr))
 			terminal = true
 		case <-resourceTicker.C:
+			if _, correlationErr := captureOwnedFlatpakCorrelation(ctx, product.Process.Pid, obs); correlationErr != nil {
+				err = correlationErr
+				terminal = true
+				break
+			}
 			admittedRaw, err = admitProducerRawIdentities(rawPath, run.preflight.SessionID, run.boundDota, run.identity, admittedRaw, &report.dotaContinuity)
 			if err != nil {
 				terminal = true
 				break
 			}
-			sample := collectSample(product.Process.Pid, obs.Process.Pid, rawPath, filepath.Join(run.root, "runtime/operator.token"), run.root, run.preflight.SessionID, "")
+			sample := collectSample(product.Process.Pid, obs.OBSPID, rawPath, filepath.Join(run.root, "runtime/operator.token"), run.root, run.preflight.SessionID, "")
 			if encodeErr := json.NewEncoder(samples).Encode(sample); encodeErr != nil {
 				err = encodeErr
 				terminal = true
@@ -325,11 +347,17 @@ func (executableRehearsalDriver) Run(ctx context.Context, run rehearsalLifecycle
 	finalArtifacts, endpointErr := captureFinalEndpoints(run.root, filepath.Join(run.root, "runtime/operator.token"))
 	_ = finalArtifacts
 	complete(operatorStep, endpointErr)
+	terminalCorrelation, terminalCorrelationErr := captureOwnedFlatpakCorrelation(context.Background(), product.Process.Pid, obs)
+	if terminalCorrelationErr == nil {
+		report.obsTerminalCorrelation = terminalCorrelation.SHA256
+	}
 	productShutdown := step("shutdown_product")
 	productStop := stopProcess(product, productDone, 15*time.Second)
 	complete(productShutdown, productStop)
 	obsFinalize := step("finalize_obs")
-	obsStop := stopProcess(obs, obsDone, 30*time.Second)
+	obsStop := stopOwnedFlatpakOBS(context.Background(), obs, 30*time.Second)
+	obsStopped = true
+	obsStop = errors.Join(terminalCorrelationErr, obsStop, obsLog.Close())
 	complete(obsFinalize, obsStop)
 	obsShutdown := step("shutdown_obs")
 	complete(obsShutdown, obsStop)
@@ -387,16 +415,20 @@ func admitProducerRawIdentities(path, sessionID string, bound RehearsalDotaIdent
 	return admitted, nil
 }
 
-func installRehearsalGSIConfig(root string) (string, error) {
-	directory := filepath.Join(os.Getenv("HOME"), ".local/share/Steam/steamapps/common/dota 2 beta/game/dota/cfg/gamestate_integration")
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return "", err
+func prepareRehearsalOBSProfile(root string) error {
+	path := filepath.Join(root, "config/obs-studio/basic/profiles/DOT65-P4/basic.ini")
+	payload, err := rootReadFile(path)
+	if err != nil {
+		return err
 	}
-	target := filepath.Join(directory, "gamestate_integration_dota2_ob_dot84_rehearsal.cfg")
-	if _, err := os.Lstat(target); err == nil || !errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("refusing to overwrite existing DOT-84 rehearsal GSI config")
+	payload = []byte(strings.Replace(string(payload), "RecFilePath=recordings", "RecFilePath="+filepath.Join(root, "recordings"), 1))
+	if err := writePrivate(path, payload); err != nil {
+		return err
 	}
-	return target, copyFile(filepath.Join(root, "config/dota/gamestate_integration_dota2_ob_m4.cfg"), target, 0o600)
+	return writeJSON(filepath.Join(root, "config/obs-studio/plugin_config/obs-websocket/config.json"), map[string]any{
+		"alerts_enabled": false, "auth_required": false, "first_load": false, "server_enabled": true,
+		"server_password": "", "server_port": obsWebSocketPort,
+	}, 0o600)
 }
 
 func rehearsalRawReachedNormalPostgame(path, sessionID string) (bool, error) {
@@ -463,7 +495,7 @@ func producerEvidenceContentID(value RehearsalProducerEvidenceV1) (string, error
 }
 
 func validateProducerEvidence(root string, evidence RehearsalProducerEvidenceV1, requireCompletion bool) error {
-	if evidence.SchemaVersion != rehearsalProducerSchemaV1 || evidence.Purpose != RehearsalPurpose || evidence.SessionID == "" || !validLowerSHA256(evidence.PreflightSHA256) || !validLowerSHA256(evidence.RootOwnerSHA256) || !validLowerSHA256(evidence.RunID) || (evidence.SourceMode != "physical_public_match" && evidence.SourceMode != "hermetic_helper") || len(evidence.Steps) > len(requiredProducerSteps) || len(evidence.Artifacts) > maxProducerArtifacts {
+	if evidence.SchemaVersion != rehearsalProducerSchemaV1 || evidence.Purpose != RehearsalPurpose || evidence.SessionID == "" || !validLowerSHA256(evidence.PreflightSHA256) || !validLowerSHA256(evidence.RootOwnerSHA256) || !validLowerSHA256(evidence.RunID) || (evidence.SourceMode != "physical_public_match" && evidence.SourceMode != "hermetic_helper" && evidence.SourceMode != "obs_only_smoke") || len(evidence.Steps) > len(requiredProducerSteps) || len(evidence.Artifacts) > maxProducerArtifacts {
 		return errors.New("producer evidence envelope invalid")
 	}
 	want, err := producerEvidenceContentID(evidence)
@@ -517,7 +549,7 @@ func validateProducerEvidence(root string, evidence RehearsalProducerEvidenceV1,
 			return errors.New("producer completion artifact missing: " + role)
 		}
 	}
-	if evidence.SourceMode != "physical_public_match" || !evidence.PhysicalMatch || evidence.ProductPID <= 1 || evidence.OBSPID <= 1 || evidence.RawRecords == 0 || evidence.ResourceSamples == 0 || evidence.VisibilitySamples == 0 || !evidence.RecordingFinalized || !evidence.Reconciled || !evidence.RecoveryByteEqual || !evidence.CleanShutdown {
+	if evidence.SourceMode != "physical_public_match" || !evidence.PhysicalMatch || evidence.ProductPID <= 1 || evidence.OBSPID <= 1 || evidence.OBSInstanceID == "" || evidence.OBSExecutable.PID != evidence.OBSPID || !validOwnedProcessIdentity(evidence.OBSExecutable) || !strings.Contains(strings.ToLower(evidence.OBSExecutable.Comm), "obs") || !validLowerSHA256(evidence.OBSStartCorrelation) || !validLowerSHA256(evidence.OBSTerminalCorrelation) || evidence.RawRecords == 0 || evidence.ResourceSamples == 0 || evidence.VisibilitySamples == 0 || !evidence.RecordingFinalized || !evidence.Reconciled || !evidence.RecoveryByteEqual || !evidence.CleanShutdown {
 		return errors.New("producer operational completion facts invalid")
 	}
 	rawPath := filepath.Join(root, "data", "sessions", evidence.SessionID, "raw.jsonl")

@@ -30,7 +30,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	switch args[0] {
-	case "rehearsal-preflight":
+	case "rehearsal-arm", "rehearsal-preflight":
 		flags := flag.NewFlagSet("m4-match rehearsal-preflight", flag.ContinueOnError)
 		root := flags.String("data-root", "", "fresh absolute rehearsal evidence root")
 		repoRoot := flags.String("repo-root", repo, "repository root")
@@ -46,6 +46,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if result.ConsoleState != m4match.RehearsalReady {
 			return 1
 		}
+		return 0
+	case "rehearsal-disarm":
+		flags := flag.NewFlagSet("m4-match rehearsal-disarm", flag.ContinueOnError)
+		root := flags.String("data-root", "", "exact harness-owned rehearsal root")
+		repoRoot := flags.String("repo-root", repo, "repository root")
+		confirm := flags.String("confirm-arm-sha256", "", "required rehearsal arm cleanup token")
+		if flags.Parse(args[1:]) != nil || *root == "" || *confirm == "" {
+			return 2
+		}
+		if err := m4match.DisarmRehearsal(*root, *repoRoot, *confirm); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "disarm_complete")
 		return 0
 	case "rehearsal-attempt":
 		flags := flag.NewFlagSet("m4-match rehearsal-attempt", flag.ContinueOnError)
@@ -66,6 +80,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		verified, verifyErr := runRehearsalVerify(context.Background(), *root, *repoRoot)
 		if verifyErr != nil || verified.TerminalSHA256 != result.TerminalSHA256 {
 			fmt.Fprintln(stderr, "completed rehearsal independent verification failed")
+			return 1
+		}
+		return 0
+	case "rehearsal-obs-smoke":
+		flags := flag.NewFlagSet("m4-match rehearsal-obs-smoke", flag.ContinueOnError)
+		root := flags.String("data-root", "", "exact armed rehearsal root")
+		repoRoot := flags.String("repo-root", repo, "repository root")
+		if flags.Parse(args[1:]) != nil || *root == "" {
+			return 2
+		}
+		result, err := runRehearsalAttempt(context.Background(), m4match.RehearsalAttemptConfig{DataRoot: *root, RepoRoot: *repoRoot, OBSOnlySmoke: true})
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(stdout).Encode(result)
+		if result.FailureCode != "zero_frame_attempt" {
 			return 1
 		}
 		return 0
@@ -173,5 +204,5 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func usage(output io.Writer) {
-	fmt.Fprintln(output, "usage: m4-match {rehearsal-preflight|rehearsal-attempt|rehearsal-verify|rehearsal-cleanup|preflight|live|verify|cleanup} [flags]")
+	fmt.Fprintln(output, "usage: m4-match {rehearsal-arm|rehearsal-disarm|rehearsal-attempt|rehearsal-obs-smoke|rehearsal-verify|rehearsal-cleanup|preflight|live|verify|cleanup} [flags]")
 }
