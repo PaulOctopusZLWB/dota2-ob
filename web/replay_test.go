@@ -117,8 +117,8 @@ func TestReplayMatchPageEscapesUntrustedValues(t *testing.T) {
 		"esc(u)",
 		"esc(url)",
 		"esc(t.team_name)",
-		"esc(name ? name.player_name",
-		"esc(h)",
+		"esc(name.player_name)",
+		"esc(v.metric_id)",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay match page missing escaped usage %q", want)

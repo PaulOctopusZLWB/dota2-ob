@@ -27,13 +27,12 @@ const (
 	// EpisodeSchema is the behavior episode schema version.
 	EpisodeSchema = "replay.episodes.v1"
 	// MetricsSchema is the V1/V2/V3 metric publication schema version.
-	MetricsSchema = "replay.metrics.v3"
+	MetricsSchema = "replay.metrics.v4"
 	// ClosureSchema is the 52-row metric closure contract version.
 	ClosureSchema = "ti2026.metric-closure.v1"
-	// ScoreSchema is the radar/score snapshot schema version. v3 adds the
-	// separately named experimental team layer (experimental_axes /
-	// experimental_total) to TeamScore; both layers are always present.
-	ScoreSchema = "replay.score.v3"
+	// ScoreSchema v4 retains per-match role provenance in match and tournament
+	// score artifacts in addition to the official/experimental layers.
+	ScoreSchema = "replay.score.v4"
 	// CorrectionSchemaV1 is the legacy review/correction overlay schema
 	// version; v1 documents are still readable and are migrated
 	// deterministically to the current version on load.
@@ -42,10 +41,10 @@ const (
 	CorrectionSchema = "replay.corrections.v2"
 	// RoleSchema is the nominal role registry schema version.
 	RoleSchema = "ti2026.roles.v1"
-	// ReportSchema is the match report schema version. v3 adds the immutable
-	// source_nominal_role and override provenance (author/version) fields so a
+	// ReportSchema is the match report schema version. v4 includes the immutable
+	// source_nominal_role and complete override provenance (author/version) so a
 	// report can carry both the public-source role and the effective role.
-	ReportSchema = "replay.report.v3"
+	ReportSchema = "replay.report.v4"
 
 	// PhaseRuleVersion identifies the phase-engine rule set.
 	PhaseRuleVersion = "ti2026.phase.v1"
@@ -54,9 +53,9 @@ const (
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
 	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v6"
+	MetricsRuleVersion = "ti2026.metrics.v9"
 	// ScoreRuleVersion identifies the radar/score computation rule set.
-	ScoreRuleVersion = "ti2026.scoring.v2"
+	ScoreRuleVersion = "ti2026.scoring.v3"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
 	CorrectionRuleVersion = "ti2026.corrections.v2"
 )

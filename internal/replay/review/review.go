@@ -161,8 +161,21 @@ type AuditEntry struct {
 // store root. Reads and writes are serialized by a mutex so loopback review
 // mutations never interleave partial state.
 type Store struct {
-	Root string
-	mu   sync.Mutex
+	Root        string
+	mu          sync.Mutex
+	writeAtomic func(string, []byte) error // test injection; nil uses store.WriteAtomic
+}
+
+type storageError struct{ err error }
+
+func (e *storageError) Error() string { return "review storage: " + e.err.Error() }
+func (e *storageError) Unwrap() error { return e.err }
+
+// IsStorageError reports a persistence failure that the API must expose as a
+// server error rather than a client validation error.
+func IsStorageError(err error) bool {
+	_, ok := err.(*storageError)
+	return ok
 }
 
 // New creates a review store rooted at root.
@@ -260,10 +273,7 @@ func (s *Store) AddAuthoritative(matchID string, c Correction, truth MachineTrut
 	if r.ReviewStatus == "" || r.ReviewStatus == "pending" {
 		r.ReviewStatus = "in_progress"
 	}
-	if err := s.writeJSON(s.Path(matchID), r); err != nil {
-		return nil, err
-	}
-	if err := s.appendAudit(matchID, AuditEntry{
+	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: c.Author, Action: "correction_added", MatchID: matchID,
 		CorrectionID: c.ID, Summary: fmt.Sprintf("%s %s", c.Kind, c.EventRef),
 	}); err != nil {
@@ -348,11 +358,10 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 	// stream AFTER this correction, so every success (including accept)
 	// yields a new revision for the next mutation.
 	r.ReviewRevision = revisionOf(r.PhaseCorrections, r.EffectivePhaseIntervals)
-	// One serialized write: correction + effective stream + revision together.
-	if err := s.writeJSON(s.Path(matchID), r); err != nil {
-		return nil, err
-	}
-	if err := s.appendAudit(matchID, AuditEntry{
+	// Commit correction/effective stream/revision and the immutable audit entry
+	// as one logical transaction. Any failure leaves both authoritative files
+	// at their exact prior bytes.
+	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: req.Author, Action: "phase_correction_v2", MatchID: matchID,
 		CorrectionID: pc.ID, Summary: fmt.Sprintf("%s %s", req.Op, req.EventRef),
 	}); err != nil {
@@ -735,7 +744,66 @@ func (s *Store) writeJSON(path string, v interface{}) error {
 	if err != nil {
 		return fmt.Errorf("review: marshal: %w", err)
 	}
+	return s.writeBytes(path, b)
+}
+
+func (s *Store) writeBytes(path string, b []byte) error {
+	if s.writeAtomic != nil {
+		return s.writeAtomic(path, b)
+	}
 	return store.WriteAtomic(path, b)
+}
+
+// commitReviewAndAudit prepares both complete documents before writing. The
+// audit is promoted first; if the review promotion then fails, the audit is
+// restored byte-for-byte. A corrupt/unreadable audit fails before either file
+// is touched, and an audit write failure cannot advance the review.
+func (s *Store) commitReviewAndAudit(matchID string, r *Review, e AuditEntry) error {
+	reviewBytes, err := json.Marshal(r)
+	if err != nil {
+		return &storageError{fmt.Errorf("marshal review: %w", err)}
+	}
+	var audit Audit
+	auditPath := s.AuditPath()
+	priorAudit, readErr := os.ReadFile(auditPath)
+	priorAuditExists := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return &storageError{fmt.Errorf("read audit: %w", readErr)}
+	}
+	if priorAuditExists {
+		if err := json.Unmarshal(priorAudit, &audit); err != nil {
+			return &storageError{fmt.Errorf("decode audit: %w", err)}
+		}
+	} else {
+		audit = Audit{SchemaVersion: version.CorrectionSchema, Entries: []AuditEntry{}}
+	}
+	e.Seq = int64(len(audit.Entries) + 1)
+	e.AppliedAt = time.Now().UTC()
+	e.MatchID = matchID
+	audit.Entries = append(audit.Entries, e)
+	auditBytes, err := json.Marshal(&audit)
+	if err != nil {
+		return &storageError{fmt.Errorf("marshal audit: %w", err)}
+	}
+	if err := s.writeBytes(auditPath, auditBytes); err != nil {
+		return &storageError{fmt.Errorf("write audit: %w", err)}
+	}
+	if err := s.writeBytes(s.Path(matchID), reviewBytes); err != nil {
+		var restoreErr error
+		if priorAuditExists {
+			restoreErr = store.WriteAtomic(auditPath, priorAudit)
+		} else {
+			restoreErr = os.Remove(auditPath)
+			if os.IsNotExist(restoreErr) {
+				restoreErr = nil
+			}
+		}
+		if restoreErr != nil {
+			return &storageError{fmt.Errorf("write review: %v; restore audit: %w", err, restoreErr)}
+		}
+		return &storageError{fmt.Errorf("write review: %w", err)}
+	}
+	return nil
 }
 
 // appendAudit appends one immutable audit entry.

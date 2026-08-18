@@ -610,6 +610,9 @@ func buildPhases(factsPath string, clk *clock.Clock) (*phase.Output, error) {
 
 // phaseInputsFromFact converts one fact line into phase-engine inputs.
 func phaseInputsFromFact(f *facts.Fact) []phase.Input {
+	if f == nil || !f.GameSecondOK || f.GameSecond < 0 {
+		return nil
+	}
 	switch f.Family {
 	case facts.FamilyDeathRespawn:
 		var drb facts.DeathRespawnBuyback

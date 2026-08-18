@@ -56,7 +56,8 @@ type Participant struct {
 	OverrideAt      *string `json:"override_at,omitempty"`
 	// OverrideAuthor is the review author of the effective override. It never
 	// implies the manual value came from the public source registry.
-	OverrideAuthor *string `json:"override_author,omitempty"`
+	OverrideAuthor  *string `json:"override_author,omitempty"`
+	OverrideVersion *string `json:"override_version,omitempty"`
 }
 
 // Team is the report view of one team.
@@ -118,6 +119,7 @@ func OverlayRoles(r *Report, matchID string, roleReg *roles.Registry, overrides 
 		p.OverrideReason = eff.OverrideReason
 		p.OverrideAt = eff.OverrideAt
 		p.OverrideAuthor = eff.OverrideAuthor
+		p.OverrideVersion = eff.OverrideVersion
 		if eff.OverrideApplied {
 			p.RoleSourceKind = "manual_override"
 		}
@@ -230,6 +232,7 @@ func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *
 				part.OverrideReason = eff.OverrideReason
 				part.OverrideAt = eff.OverrideAt
 				part.OverrideAuthor = eff.OverrideAuthor
+				part.OverrideVersion = eff.OverrideVersion
 				if eff.OverrideApplied {
 					part.RoleSourceKind = "manual_override"
 				}

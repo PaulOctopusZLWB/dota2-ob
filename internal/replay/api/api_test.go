@@ -989,17 +989,24 @@ func TestNavigableTypedLineageRoutes(t *testing.T) {
 	st.WriteJSON("m1", store.ArtifactPhases, &phase.Output{SchemaVersion: "replay.phase.v1", EligibleSeconds: 100, Intervals: []phase.Interval{
 		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 100, EvidenceSeqs: []int64{7}},
 	}})
-	st.WriteJSON("m1", store.ArtifactMetrics, &metrics.Output{SchemaVersion: "replay.metrics.v3", MatchID: "m1", Values: []metrics.Value{{
-		MetricID: "hero_damage_total", Name: "Hero damage", ReportLevel: "player", AccountID: "1000",
-		EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
-		Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}},
-	}}})
+	st.WriteJSON("m1", store.ArtifactMetrics, &metrics.Output{SchemaVersion: "replay.metrics.v3", MatchID: "m1", Values: []metrics.Value{
+		{
+			MetricID: "hero_damage_total", Name: "Hero damage", ReportLevel: "player", AccountID: "1000",
+			EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
+			Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}},
+		},
+		{
+			MetricID: "phase_duration_seconds", Name: "Phase duration", ReportLevel: "match", OfficialPhase: "whole_match",
+			EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
+			Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "metric_observation", ID: "phase_duration_seconds:match", RuleVersion: "1.0.0"}},
+		},
+	}})
 	aggID := "aggregation:player_tournament:1000:1:hero_damage_total:ti2026.scoring.v2"
 	st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{
 		SchemaVersion: "replay.score.v2", RuleVersion: "ti2026.scoring.v2",
 		Players: []*scoring.PlayerScore{{AccountID: "1000", NominalRole: "1", AggregatedMetrics: map[string]scoring.AggregatedMetric{
 			"hero_damage_total": {MetricID: "hero_damage_total", Value: 500, EligibleMatches: 1, Lineage: []scoring.EvidenceRef{
-				{MatchID: "m1", Kind: "fact", ID: "fact:7"},
+				{MatchID: "m1", Kind: "fact", ID: "fact:7", RuleVersion: "replay.facts.v2"},
 				{Kind: "aggregation", ID: aggID, RuleVersion: "ti2026.scoring.v2"},
 			}},
 		}}}, Matches: map[string]*scoring.MatchScores{},
@@ -1016,8 +1023,21 @@ func TestNavigableTypedLineageRoutes(t *testing.T) {
 		{"episode", "m1:fight:90:0", "/matches/m1/episodes/m1:fight:90:0"},
 		{"phase", "interval@0-100", "/matches/m1/phases/interval@0-100"},
 		{"metric_observation", "hero_damage_total:1000", "/matches/m1/metrics/hero_damage_total:1000"},
+		{"metric_observation_match", "phase_duration_seconds:match", "/matches/m1/metrics/phase_duration_seconds:match"},
 		{"algorithm", "ev.hero_damage_total.v1.atomic", "/matches/m1/algorithms/ev.hero_damage_total.v1.atomic"},
 		{"aggregation", aggID, "/aggregations/" + aggID},
+	}
+	var aggEnv struct {
+		Data struct {
+			ChildRefs []scoring.EvidenceRef `json:"child_refs"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/aggregations/"+aggID, &aggEnv); code != 200 || len(aggEnv.Data.ChildRefs) != 1 {
+		t.Fatalf("aggregation structured children status=%d refs=%+v", code, aggEnv.Data.ChildRefs)
+	}
+	child := aggEnv.Data.ChildRefs[0]
+	if child.MatchID != "m1" || child.RuleVersion != "replay.facts.v2" || child.Kind != "fact" || child.ID != "fact:7" {
+		t.Fatalf("aggregation child qualifiers lost: %+v", child)
 	}
 	for _, tc := range canonicalRoutes {
 		t.Run("canonical_"+tc.kind, func(t *testing.T) {
@@ -1416,6 +1436,9 @@ func TestRoleOverrideFrozenSequenceEndToEnd(t *testing.T) {
 					MatchID           string `json:"match_id"`
 					SourceNominalRole string `json:"source_nominal_role"`
 					NominalRole       string `json:"nominal_role"`
+					RoleRecordVersion string `json:"role_record_version"`
+					OverrideAuthor    string `json:"override_author"`
+					OverrideVersion   string `json:"override_version"`
 				} `json:"matches"`
 			} `json:"data"`
 		}
@@ -1432,6 +1455,9 @@ func TestRoleOverrideFrozenSequenceEndToEnd(t *testing.T) {
 				if m.SourceNominalRole != "5" {
 					t.Fatalf("step %d player match row source=%s want 5", step, m.SourceNominalRole)
 				}
+				if m.RoleRecordVersion == "" || (wantEffective != "5" && (m.OverrideAuthor == "" || m.OverrideVersion == "")) {
+					t.Fatalf("step %v player provenance incomplete: %+v", step, m)
+				}
 			}
 		}
 		if !found {
@@ -1441,8 +1467,11 @@ func TestRoleOverrideFrozenSequenceEndToEnd(t *testing.T) {
 		var ms struct {
 			Data struct {
 				Players []struct {
-					AccountID   string `json:"account_id"`
-					NominalRole string `json:"nominal_role"`
+					AccountID         string `json:"account_id"`
+					NominalRole       string `json:"nominal_role"`
+					RoleRecordVersion string `json:"role_record_version"`
+					OverrideAuthor    string `json:"override_author"`
+					OverrideVersion   string `json:"override_version"`
 				} `json:"players"`
 			} `json:"data"`
 		}
@@ -1450,16 +1479,22 @@ func TestRoleOverrideFrozenSequenceEndToEnd(t *testing.T) {
 			t.Fatalf("scores status %d", code)
 		}
 		for _, p := range ms.Data.Players {
-			if p.AccountID == ACCT && p.NominalRole != wantEffective {
-				t.Fatalf("step %d match scores effective=%s want %s", step, p.NominalRole, wantEffective)
+			if p.AccountID == ACCT {
+				if p.NominalRole != wantEffective {
+					t.Fatalf("step %v match scores effective=%s want %s", step, p.NominalRole, wantEffective)
+				}
+				if p.RoleRecordVersion == "" || (wantEffective != "5" && (p.OverrideAuthor == "" || p.OverrideVersion == "")) {
+					t.Fatalf("step %v match score provenance incomplete: %+v", step, p)
+				}
 			}
 		}
 		// Corpus / player tournament score agrees and cohort is recomputed.
 		var cs struct {
 			Data struct {
 				Players []struct {
-					AccountID   string `json:"account_id"`
-					NominalRole string `json:"nominal_role"`
+					AccountID      string                            `json:"account_id"`
+					NominalRole    string                            `json:"nominal_role"`
+					RoleProvenance map[string]scoring.RoleProvenance `json:"role_provenance"`
 				} `json:"players"`
 			} `json:"data"`
 		}
@@ -1467,8 +1502,14 @@ func TestRoleOverrideFrozenSequenceEndToEnd(t *testing.T) {
 			t.Fatalf("corpus status %d", code)
 		}
 		for _, p := range cs.Data.Players {
-			if p.AccountID == ACCT && p.NominalRole != wantEffective {
-				t.Fatalf("step %d corpus effective=%s want %s", step, p.NominalRole, wantEffective)
+			if p.AccountID == ACCT {
+				if p.NominalRole != wantEffective {
+					t.Fatalf("step %v corpus effective=%s want %s", step, p.NominalRole, wantEffective)
+				}
+				prov := p.RoleProvenance["8944521919"]
+				if prov.RoleRecordVersion == "" || (wantEffective != "5" && (prov.OverrideAuthor == "" || prov.OverrideVersion == "")) {
+					t.Fatalf("step %v corpus provenance incomplete: %+v", step, prov)
+				}
 			}
 		}
 		// Persisted report agrees (on-read overlay applies even to the file).
@@ -1926,6 +1967,35 @@ func findStartForRef(intervals []review.PhaseInterval, ref string) (review.Phase
 		}
 	}
 	return review.PhaseInterval{}, false
+}
+
+func TestPhaseMutationStorageFailureReturns500AndIsAtomic(t *testing.T) {
+	st := testStore(t)
+	matchID := "8944521919"
+	addCumulativePhaseMatch(t, st, matchID)
+	rv, _ := review.New(st.Root)
+	corrupt := []byte(`{"broken"`)
+	if err := os.WriteFile(rv.AuditPath(), corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	initial, _ := rv.Load(matchID)
+	srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	status, _, apiErr := postPhaseOperation(t, ts.URL, review.PhaseOpReq{
+		MatchID: matchID, Author: "paul", Reason: "storage failure",
+		Op: review.OpAccept, EventRef: "interval@2454-2633", ExpectedRevision: initial.ReviewRevision,
+	})
+	if status != http.StatusInternalServerError || !strings.Contains(apiErr, "review storage") {
+		t.Fatalf("status=%d error=%q want 500 storage error", status, apiErr)
+	}
+	if _, err := os.Stat(rv.Path(matchID)); !os.IsNotExist(err) {
+		t.Fatalf("review mutated on storage failure: %v", err)
+	}
+	got, _ := os.ReadFile(rv.AuditPath())
+	if !bytes.Equal(got, corrupt) {
+		t.Fatal("audit bytes changed on storage failure")
+	}
 }
 
 // TestPhaseRevisionConflictSameBoundary proves the API serves the current

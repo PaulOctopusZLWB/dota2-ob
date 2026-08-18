@@ -130,7 +130,6 @@ func TestMetricClosureEqualsRegistry(t *testing.T) {
 // evaluator entry point (kept in sync with computeMetric/phaseDurationValue).
 var publishedIDs = map[string]bool{
 	"kill_count": true, "assist_count": true, "death_count": true,
-	"buyback_use_count":      true,
 	"objective_damage_total": true, "hero_damage_total": true,
 	"phase_duration_seconds": true,
 }
@@ -148,8 +147,8 @@ func TestClosureResolutionFieldsPersisted(t *testing.T) {
 	calc.SetRoles(map[string]string{"a1": "1"})
 	calc.SetFactsCoverage([]string{"combat_event", "death_respawn_buyback_event"})
 	// Feed a resolved kill so kill_count publishes with lineage.
-	calc.Feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 100, Seq: 1, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a2", KillerAccount: "a1"})})
-	out := calc.Result(nil, nil)
+	calc.Feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 100, GameSecondOK: true, Seq: 1, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a2", KillerAccount: "a1"})})
+	out := calc.Result(nil, testOfficialPhases(200))
 	if len(out.ResolutionTable) != 52 {
 		t.Fatalf("resolution rows=%d want 52", len(out.ResolutionTable))
 	}
@@ -185,8 +184,8 @@ func TestClosureDispatchRepresentativeProbes(t *testing.T) {
 	calc.SetFactsCoverage([]string{"combat_event"})
 	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
 	// Published V1: hero damage to an enemy real hero (a2 on T2).
-	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
-	out := calc.Result(nil, nil)
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, GameSecondOK: true, Seq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
+	out := calc.Result(nil, testOfficialPhases(200))
 	found := map[string]Value{}
 	for _, v := range out.Values {
 		found[v.MetricID] = v
@@ -222,8 +221,8 @@ func TestTypedLineageChainPreserved(t *testing.T) {
 	calc.SetRoles(map[string]string{"a1": "1"})
 	calc.SetFactsCoverage([]string{"combat_event"})
 	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
-	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
-	ph := &phase.Output{Intervals: []phase.Interval{
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, GameSecondOK: true, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
+	ph := &phase.Output{EligibleSeconds: 200, Intervals: []phase.Interval{
 		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{7}},
 	}}
 	out := calc.Result(nil, ph)
@@ -284,8 +283,8 @@ func TestTwoMatchesEqualEntityIDsStayDistinct(t *testing.T) {
 		calc.SetFactsCoverage([]string{"combat_event"})
 		calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
 		// Both matches use the same fact seq 7.
-		calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
-		return calc.Result(nil, nil)
+		calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, GameSecondOK: true, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
+		return calc.Result(nil, testOfficialPhases(200))
 	}
 	o1 := build("m1")
 	o2 := build("m2")
@@ -324,7 +323,7 @@ func TestCalculatorAggregation(t *testing.T) {
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1", "a2": "1"})
 	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
-	feed := func(f *facts.Fact) { calc.Feed(f) }
+	feed := func(f *facts.Fact) { f.GameSecondOK = true; calc.Feed(f) }
 	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 10, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a1", KillerAccount: "a2"})})
 	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 20, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a1", KillerAccount: "a2"})})
 	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 30, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a2", KillerAccount: "a1"})})
@@ -333,7 +332,7 @@ func TestCalculatorAggregation(t *testing.T) {
 	feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: &v})})
 	feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 25, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: &v})})
 
-	out := calc.Result(nil, nil)
+	out := calc.Result(nil, testOfficialPhases(100))
 	if err := out.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -343,15 +342,13 @@ func TestCalculatorAggregation(t *testing.T) {
 			got[v.MetricID] = *v.Value
 		}
 	}
-	// a1: 2 deaths (as victim), 1 kill (killed a2), 1 buyback, 100 hero damage.
+	// a1: 2 deaths (as victim), 1 kill, and 100 hero damage. Buyback use
+	// fails closed because the accepted adapter cannot prove its denominator.
 	if got["death_count"] != 2 {
 		t.Fatalf("a1 death_count=%v want 2", got["death_count"])
 	}
 	if got["kill_count"] != 1 {
 		t.Fatalf("a1 kill_count=%v want 1", got["kill_count"])
-	}
-	if got["buyback_use_count"] != 1 {
-		t.Fatalf("a1 buybacks=%v want 1", got["buybacks"])
 	}
 	if got["hero_damage_total"] != 100 {
 		t.Fatalf("a1 hero_damage_total=%v want 100", got["hero_damage_total"])
@@ -435,14 +432,14 @@ func TestPhaseDuration(t *testing.T) {
 	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1"})
-	ph := &phase.Output{Intervals: []phase.Interval{
+	ph := &phase.Output{EligibleSeconds: 600, Intervals: []phase.Interval{
 		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 300},
 		{GlobalPhase: phase.Midgame, StartGameSecond: 300, EndGameSecond: 600},
 	}}
 	out := calc.Result(nil, ph)
 	found := false
 	for _, v := range out.Values {
-		if v.MetricID == "phase_duration_seconds" && v.ReportLevel == "match" {
+		if v.MetricID == "phase_duration_seconds" && v.ReportLevel == "match" && v.OfficialPhase == "whole_match" {
 			if *v.Value != 600 {
 				t.Fatalf("phase_duration=%v want 600", *v.Value)
 			}
@@ -451,6 +448,117 @@ func TestPhaseDuration(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("phase_duration_seconds match-level value missing")
+	}
+}
+
+func TestFrozenPregameFactsRejectedAndPerPhaseReconcile(t *testing.T) {
+	reg := testRegistry(t)
+	cl := testClosure(t)
+	accounts := []string{"312436974", "victim", "assist1", "assist2", "assist3", "assist4"}
+	teams := map[string]string{"312436974": "T1", "victim": "T2", "assist1": "T1", "assist2": "T1", "assist3": "T1", "assist4": "T1"}
+	calc := NewCalculator("8944525313", accounts, nil, teams)
+	calc.SetRegistry(reg)
+	calc.SetClosure(cl)
+	calc.SetRoles(map[string]string{"312436974": "1", "victim": "2", "assist1": "3", "assist2": "4", "assist3": "5", "assist4": "1"})
+	calc.SetFactsCoverage([]string{facts.FamilyCombat, facts.FamilyDeathRespawn})
+
+	// Reviewer-reproduced frozen pregame/uncalibrated facts. These exact seqs
+	// must never enter any published numerator or lineage.
+	for _, seq := range []int64{62, 65} {
+		v := int64(88)
+		calc.Feed(&facts.Fact{Seq: seq, Family: facts.FamilyCombat, GameSecond: -85.4333, GameSecondOK: false,
+			Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "312436974", TargetAccount: "victim", Value: &v})})
+	}
+	for _, tc := range []struct {
+		seq int64
+		sec float64
+	}{{391, -25.19995}, {561, -4.26666}} {
+		calc.Feed(&facts.Fact{Seq: tc.seq, Family: facts.FamilyDeathRespawn, GameSecond: tc.sec, GameSecondOK: false,
+			Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "victim", KillerAccount: "312436974", AssistAccounts: []string{"assist1", "assist2", "assist3", "assist4"}})})
+	}
+	// One valid midgame damage/death establishes the retained direct metric
+	// classes without relying on rejected facts. The buyback event below must
+	// still fail closed because its exact eligible-death denominator is absent.
+	dmg := int64(1000)
+	calc.Feed(&facts.Fact{Seq: 700, Family: facts.FamilyCombat, GameSecond: 120, GameSecondOK: true,
+		Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "312436974", TargetAccount: "victim", Value: &dmg})})
+	calc.Feed(&facts.Fact{Seq: 701, Family: facts.FamilyDeathRespawn, GameSecond: 130, GameSecondOK: true,
+		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "victim", KillerAccount: "312436974", AssistAccounts: []string{"assist1"}})})
+	calc.Feed(&facts.Fact{Seq: 702, Family: facts.FamilyDeathRespawn, GameSecond: 190, GameSecondOK: true,
+		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "buyback", AccountID: "victim"})})
+	ph := &phase.Output{EligibleSeconds: 200, Intervals: []phase.Interval{
+		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 100, RuleVersion: "phase.v1"},
+		{GlobalPhase: phase.Midgame, StartGameSecond: 100, EndGameSecond: 180, RuleVersion: "phase.v1"},
+		{GlobalPhase: phase.Decisive, StartGameSecond: 180, EndGameSecond: 200, RuleVersion: "phase.v1"},
+	}}
+	out := calc.Result(nil, ph)
+
+	for _, v := range out.Values {
+		if directPhaseMetric(v.MetricID) {
+			if v.OfficialPhase == "" || v.Numerator == nil || v.Denominator == nil || v.OpportunityCount <= 0 || v.SampleCount <= 0 || v.EvidenceCount <= 0 || v.Coverage != 1 || v.GapCount != 0 {
+				t.Fatalf("published direct row missing exact fields: %+v", v)
+			}
+			seenPhase, seenCanonicalObs := false, false
+			for _, ref := range v.Evidence {
+				if ref.Kind == EvidenceFact && (ref.SourceFactSeq == 62 || ref.SourceFactSeq == 65 || ref.SourceFactSeq == 391 || ref.SourceFactSeq == 561) {
+					t.Fatalf("rejected frozen fact leaked into lineage: %+v", ref)
+				}
+				seenPhase = seenPhase || ref.Kind == EvidencePhase
+				seenCanonicalObs = seenCanonicalObs || (ref.Kind == EvidenceMetricObservation && ref.ID == v.MetricID+":"+v.AccountID)
+			}
+			if !seenPhase || !seenCanonicalObs {
+				t.Fatalf("published direct row missing phase/canonical observation: %+v", v)
+			}
+		}
+	}
+	whole := map[string]Value{}
+	for _, v := range out.Values {
+		if v.OfficialPhase == "whole_match" && v.AccountID != "" {
+			whole[v.MetricID+":"+v.AccountID] = v
+		}
+	}
+	if got := *whole["hero_damage_total:312436974"].Value; got != 1000 {
+		t.Fatalf("hero damage=%v want 1000; frozen pregame 176 leaked", got)
+	}
+	if got := whole["hero_damage_total:312436974"].ExcludedCount; got != 2 {
+		t.Fatalf("hero damage excluded_count=%d want 2", got)
+	}
+	if got := *whole["kill_count:312436974"].Value; got != 1 {
+		t.Fatalf("kill count=%v want 1", got)
+	}
+	if got := whole["kill_count:312436974"].ExcludedCount; got != 2 {
+		t.Fatalf("kill excluded_count=%d want 2", got)
+	}
+	if got := *whole["death_count:victim"].Value; got != 1 {
+		t.Fatalf("death count=%v want 1", got)
+	}
+	if got := *whole["assist_count:assist1"].Value; got != 1 {
+		t.Fatalf("assist count=%v want 1", got)
+	}
+	buybackUnavailable := false
+	for _, u := range out.Unavailable {
+		buybackUnavailable = buybackUnavailable || (u.MetricID == "buyback_use_count" && u.AccountID == "victim" && u.UnavailableReason == "eligible_death_buyback_state_denominator_not_in_accepted_adapter")
+	}
+	if !buybackUnavailable {
+		t.Fatal("buyback_use_count did not fail closed with the exact denominator reason")
+	}
+
+	durations := map[string]float64{}
+	for _, v := range out.Values {
+		if v.MetricID != "phase_duration_seconds" {
+			continue
+		}
+		durations[v.OfficialPhase] = *v.Value
+		canonical := false
+		for _, ref := range v.Evidence {
+			canonical = canonical || (ref.Kind == EvidenceMetricObservation && ref.ID == "phase_duration_seconds:match")
+		}
+		if !canonical || v.Numerator == nil || v.Denominator == nil {
+			t.Fatalf("phase duration missing canonical fields: %+v", v)
+		}
+	}
+	if durations["laning"] != 100 || durations["midgame"] != 80 || durations["decisive"] != 20 || durations["whole_match"] != 200 {
+		t.Fatalf("phase duration reconciliation=%v", durations)
 	}
 }
 
@@ -465,8 +573,8 @@ func TestRegistryResolutionComplete(t *testing.T) {
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1", "a2": "5"})
 	v := int64(50)
-	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: &v})})
-	out := calc.Result(nil, nil)
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, GameSecondOK: true, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: &v})})
+	out := calc.Result(nil, testOfficialPhases(100))
 	resolved := map[string]bool{}
 	for _, x := range out.Values {
 		resolved[x.MetricID] = true
@@ -484,6 +592,37 @@ func TestRegistryResolutionComplete(t *testing.T) {
 	}
 }
 
+func TestDirectOpportunityCountsAreNotCappedByBoundedLineage(t *testing.T) {
+	reg := testRegistry(t)
+	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
+	calc.SetRegistry(reg)
+	calc.SetRoles(map[string]string{"a1": "1", "a2": "1"})
+	for seq := int64(1); seq <= 70; seq++ {
+		v := int64(10)
+		calc.Feed(&facts.Fact{Seq: seq, Family: facts.FamilyCombat, GameSecond: 15, GameSecondOK: true,
+			Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: &v})})
+	}
+	out := calc.Result(nil, testOfficialPhases(100))
+	for _, v := range out.Values {
+		if v.MetricID == "hero_damage_total" && v.AccountID == "a1" && v.OfficialPhase == "whole_match" {
+			if v.OpportunityCount != 70 || v.SampleCount != 70 || v.EvidenceCount != 70 {
+				t.Fatalf("counts inherited bounded lineage: opportunity=%d sample=%d evidence=%d", v.OpportunityCount, v.SampleCount, v.EvidenceCount)
+			}
+			factRefs := 0
+			for _, ref := range v.Evidence {
+				if ref.Kind == EvidenceFact {
+					factRefs++
+				}
+			}
+			if factRefs != 64 {
+				t.Fatalf("bounded fact lineage=%d want 64", factRefs)
+			}
+			return
+		}
+	}
+	t.Fatal("whole-match hero_damage_total not published")
+}
+
 // TestObjectiveDamageOnlyConfiguredTargets proves objective_damage_total only
 // counts configured objective entities (tower/rax/ancient-fort/shrine/Roshan/
 // Tormentor) per the explicit taxonomy; lane/neutral creeps are excluded
@@ -494,7 +633,7 @@ func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
 	dmg := func(actor, target string, val int64, seq int64) *facts.Fact {
-		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetName: target, Value: &val})}
+		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, GameSecondOK: true, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetName: target, Value: &val})}
 	}
 	calc.Feed(dmg("a1", "npc_dota_goodguys_tower1_mid", 5000, 1))
 	calc.Feed(dmg("a1", "npc_dota_badguys_melee_rax_mid", 3000, 2))
@@ -508,7 +647,7 @@ func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
 	calc.Feed(dmg("a1", "npc_dota_neutral_centaur_khan", 888888, 7))
 	// Roshan's banner is a summoned unit, not Roshan.
 	calc.Feed(dmg("a1", "npc_dota_unit_roshans_banner", 1000, 8))
-	out := calc.Result(nil, nil)
+	out := calc.Result(nil, testOfficialPhases(200))
 	var obj *Value
 	for i := range out.Values {
 		if out.Values[i].MetricID == "objective_damage_total" && out.Values[i].AccountID == "a1" {
@@ -596,7 +735,7 @@ func TestOpportunityDurationCountsSecondsNotSamples(t *testing.T) {
 	calc.Feed(pos(0.6, 3))
 	calc.Feed(pos(1.0, 4))
 	calc.Feed(pos(2.0, 5))
-	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 2}}}
+	ph := &phase.Output{EligibleSeconds: 2, Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 2}}}
 	out := calc.Result(nil, ph)
 	// opportunity_duration_seconds requires a configured opportunity-key
 	// field-quality mask (per official phase, per-reason exclusions) that the
@@ -633,13 +772,13 @@ func TestPublishedEvidenceLineageNonEmpty(t *testing.T) {
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
 	dmg := func(actor, target string, val int64, seq int64) *facts.Fact {
-		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetAccount: target, Value: &val})}
+		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, GameSecondOK: true, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetAccount: target, Value: &val})}
 	}
 	calc.Feed(dmg("a1", "b1", 100, 1))
 	eps := &episodes.Output{Episodes: []episodes.Episode{
 		{Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"a1", "b1"}, EvidenceIDs: []int64{1}},
 	}}
-	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{1}}}}
+	ph := &phase.Output{EligibleSeconds: 200, Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{1}}}}
 	out := calc.Result(eps, ph)
 	for _, v := range out.Values {
 		if v.ReportLevel == "player" && len(v.Evidence) == 0 {
@@ -657,8 +796,8 @@ func TestResolutionTableComplete(t *testing.T) {
 	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
 	calc.SetFactsCoverage([]string{"combat_event"})
 	v := int64(50)
-	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, Seq: 1, SourceSeq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "b1", Value: &v})})
-	out := calc.Result(nil, nil)
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, GameSecondOK: true, Seq: 1, SourceSeq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "b1", Value: &v})})
+	out := calc.Result(nil, testOfficialPhases(100))
 	if len(out.ResolutionTable) != 52 {
 		t.Fatalf("resolution table rows=%d want 52", len(out.ResolutionTable))
 	}
@@ -690,7 +829,7 @@ func TestEconomyProxiesFailClosed(t *testing.T) {
 	calc.Feed(&facts.Fact{Family: facts.FamilyEconomy, GameSecond: 100, Payload: mustJSON(&facts.EconomySample{AccountID: "a1", Xp: int64p(34)})})
 	nw, lh := uint32(1000), uint32(42)
 	calc.Feed(&facts.Fact{Family: facts.FamilyEconomy, GameSecond: 101, Payload: mustJSON(&facts.EconomySample{AccountID: "a1", Networth: &nw, LastHits: &lh})})
-	ph := &phase.Output{Intervals: []phase.Interval{
+	ph := &phase.Output{EligibleSeconds: 200, Intervals: []phase.Interval{
 		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200},
 	}}
 	out := calc.Result(nil, ph)
@@ -825,3 +964,10 @@ func TestEconomyAttributionFromTarget(t *testing.T) {
 func f64ptr(v float64) *float64 { return &v }
 func int64p(v int64) *int64     { return &v }
 func uint32p(v uint32) *uint32  { return &v }
+
+func testOfficialPhases(end int) *phase.Output {
+	return &phase.Output{EligibleSeconds: end, Intervals: []phase.Interval{{
+		GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: end,
+		RuleVersion: "test.phase.v1",
+	}}}
+}

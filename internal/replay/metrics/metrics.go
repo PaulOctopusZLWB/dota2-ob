@@ -89,6 +89,8 @@ type Value struct {
 	Denominator      *float64 `json:"denominator"`
 	OpportunityCount int64    `json:"opportunity_count"`
 	ExcludedCount    int64    `json:"excluded_count"`
+	GapCount         int64    `json:"gap_count"`
+	Coverage         float64  `json:"coverage"`
 	// ExcludedDamage is the magnitude of excluded (non-objective) damage
 	// preserved separately; it is distinct from excluded_count (record count).
 	ExcludedDamage            *float64      `json:"excluded_damage,omitempty"`
@@ -210,6 +212,10 @@ type Calculator struct {
 	// evidence: "account\x00metric" -> ordered typed evidence refs (facts,
 	// episodes, phases) that produced the metric's observations.
 	evidence map[string][]EvidenceRef
+	// samples counts every accepted source observation even when evidence
+	// lineage is bounded for artifact size. Published opportunity/sample
+	// counts must never inherit that lineage cap.
+	samples map[string]int64
 
 	// factsCoverage is the per-family availability from the match's facts
 	// summary, used to resolve per-metric field gates precisely.
@@ -219,6 +225,12 @@ type Calculator struct {
 	// specific evaluator/gate mapping). When nil, every metric resolves to
 	// unavailable (the runner always supplies the frozen closure).
 	closure *Closure
+
+	// pendingFacts preserves normalized observations until Result receives the
+	// authoritative official-phase stream. No metric is accumulated before the
+	// calibrated-clock and causal-phase gates can be applied.
+	pendingFacts []*facts.Fact
+	excluded     map[string]int64 // account\x00metric -> rejected clock/phase facts
 }
 
 type damageEvent struct {
@@ -256,9 +268,11 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		heroStateSecs:  map[string]map[int64]struct{}{},
 		teams:          map[string]map[string]float64{},
 		evidence:       map[string][]EvidenceRef{},
+		samples:        map[string]int64{},
 		factsCoverage:  map[string]bool{},
 		healCasts:      map[string]int64{}, smokeParticles: map[string]int64{},
 		buybackRoundPart: map[string]int64{}, buybackTotal: map[string]int64{},
+		excluded: map[string]int64{},
 	}
 }
 
@@ -354,8 +368,21 @@ func (c *Calculator) SetTeamOfSide(m map[string]string) {
 // SetRegistry binds the frozen metric registry.
 func (c *Calculator) SetRegistry(reg *Registry) { c.registry = reg }
 
-// Feed processes one fact line.
+// Feed buffers one fact line. Publication is intentionally deferred until
+// Result has the authoritative phase stream needed for the calibrated-clock,
+// non-pregame, and official-causal-phase gates.
 func (c *Calculator) Feed(f *facts.Fact) {
+	if f == nil {
+		return
+	}
+	cp := *f
+	cp.Payload = append(json.RawMessage(nil), f.Payload...)
+	c.pendingFacts = append(c.pendingFacts, &cp)
+}
+
+// feedAccepted processes a fact that has already passed the calibrated-clock
+// and official-phase gates.
+func (c *Calculator) feedAccepted(f *facts.Fact) {
 	switch f.Family {
 	case facts.FamilyDeathRespawn:
 		var drb facts.DeathRespawnBuyback
@@ -369,13 +396,16 @@ func (c *Calculator) Feed(f *facts.Fact) {
 		case "death":
 			c.deaths[drb.AccountID]++
 			c.addEvidence(drb.AccountID, "death_count", f.Seq)
+			c.addSample(drb.AccountID, "death_count")
 			if drb.KillerAccount != "" {
 				c.kills[drb.KillerAccount]++
 				c.addEvidence(drb.KillerAccount, "kill_count", f.Seq)
+				c.addSample(drb.KillerAccount, "kill_count")
 			}
 			for _, a := range drb.AssistAccounts {
 				c.assists[a]++
 				c.addEvidence(a, "assist_count", f.Seq)
+				c.addSample(a, "assist_count")
 			}
 		case "buyback":
 			c.buybacks[drb.AccountID]++
@@ -405,11 +435,13 @@ func (c *Calculator) Feed(f *facts.Fact) {
 			if enemyHero {
 				c.heroDamage[cf.ActorAccount] += v
 				c.addEvidence(cf.ActorAccount, "hero_damage_total", f.Seq)
+				c.addSample(cf.ActorAccount, "hero_damage_total")
 			} else if obj {
 				// Only configured objective entities (tower/rax/ancient/
 				// fort/shrine/Roshan/Tormentor) count as objective damage.
 				c.objectiveDamage[cf.ActorAccount] += v
 				c.addEvidence(cf.ActorAccount, "objective_damage_total", f.Seq)
+				c.addSample(cf.ActorAccount, "objective_damage_total")
 			} else {
 				// Lane/neutral creep damage and other non-objective targets
 				// are excluded attribution: record count and magnitude are
@@ -501,6 +533,118 @@ func (c *Calculator) Feed(f *facts.Fact) {
 			c.addEvidence(mf.AccountID, "smoke_activation_participation", f.Seq)
 		}
 	}
+}
+
+// officialPhaseAt returns the single official causal phase containing sec.
+func officialPhaseAt(ph *phase.Output, sec float64) (string, bool) {
+	if ph == nil || sec < 0 {
+		return "", false
+	}
+	for i := range ph.Intervals {
+		iv := &ph.Intervals[i]
+		if !iv.GlobalPhase.Official() {
+			continue
+		}
+		if sec >= float64(iv.StartGameSecond) && sec < float64(iv.EndGameSecond) {
+			return string(iv.GlobalPhase), true
+		}
+	}
+	return "", false
+}
+
+func directPhaseMetric(id string) bool {
+	switch id {
+	case "kill_count", "assist_count", "death_count", "hero_damage_total", "objective_damage_total":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Calculator) excludedKey(account, metric string) string { return account + "\x00" + metric }
+
+func (c *Calculator) addSample(account, metric string) {
+	if account != "" {
+		c.samples[c.excludedKey(account, metric)]++
+	}
+}
+
+func (c *Calculator) addExcluded(account, metric string) {
+	if account != "" {
+		c.excluded[c.excludedKey(account, metric)]++
+	}
+}
+
+// recordRejected records definition-specific exclusions for facts rejected by
+// clock/phase gates. Rejected values never enter numerators.
+func (c *Calculator) recordRejected(f *facts.Fact) {
+	switch f.Family {
+	case facts.FamilyDeathRespawn:
+		var d facts.DeathRespawnBuyback
+		if json.Unmarshal(f.Payload, &d) != nil {
+			return
+		}
+		if d.Kind == "death" {
+			c.addExcluded(d.AccountID, "death_count")
+			c.addExcluded(d.KillerAccount, "kill_count")
+			for _, a := range d.AssistAccounts {
+				c.addExcluded(a, "assist_count")
+			}
+		} else if d.Kind == "buyback" {
+			c.addExcluded(d.AccountID, "buyback_use_count")
+		}
+	case facts.FamilyCombat:
+		var cf facts.CombatFact
+		if json.Unmarshal(f.Payload, &cf) != nil || cf.Kind != "damage" || cf.ActorAccount == "" {
+			return
+		}
+		team := c.teamByAcct[cf.ActorAccount]
+		enemyHero := cf.TargetAccount != "" && cf.TargetAccount != cf.ActorAccount &&
+			c.teamByAcct[cf.TargetAccount] != "" && c.teamByAcct[cf.TargetAccount] != team
+		if enemyHero {
+			c.addExcluded(cf.ActorAccount, "hero_damage_total")
+		} else if isObjectiveTarget(cf.TargetName) {
+			c.addExcluded(cf.ActorAccount, "objective_damage_total")
+		}
+	}
+}
+
+func (c *Calculator) scopedCalculator() *Calculator {
+	pc := NewCalculator(c.matchID, c.accounts, c.accountName, c.teamByAcct)
+	pc.registry, pc.closure = c.registry, c.closure
+	pc.SetRoles(c.roleByAcct)
+	pc.SetTeamOfSide(c.teamOfSide)
+	for family, ok := range c.factsCoverage {
+		if ok {
+			pc.factsCoverage[family] = true
+		}
+	}
+	return pc
+}
+
+// prepareFacts applies the immutable clock/phase gate once and builds one
+// isolated calculator per official phase plus this calculator's whole-match
+// reconciliation accumulators.
+func (c *Calculator) prepareFacts(ph *phase.Output) map[string]*Calculator {
+	pcs := map[string]*Calculator{
+		"laning": c.scopedCalculator(), "midgame": c.scopedCalculator(), "decisive": c.scopedCalculator(),
+	}
+	if !validOfficialPhaseCoverage(ph) {
+		for _, f := range c.pendingFacts {
+			c.recordRejected(f)
+		}
+		return pcs
+	}
+	for _, f := range c.pendingFacts {
+		phaseName, ok := officialPhaseAt(ph, f.GameSecond)
+		if !f.GameSecondOK || !ok {
+			c.recordRejected(f)
+			continue
+		}
+		c.feedAccepted(f)
+		pcs[phaseName].feedAccepted(f)
+	}
+	return pcs
 }
 
 // addEvidence appends a typed fact ref to the metric's evidence lineage,
@@ -623,6 +767,10 @@ func (c *Calculator) observationRef(v Value) EvidenceRef {
 	id := v.MetricID
 	if v.AccountID != "" {
 		id = v.MetricID + ":" + v.AccountID
+	} else if v.TeamID != "" {
+		id = v.MetricID + ":" + v.TeamID
+	} else {
+		id = v.MetricID + ":match"
 	}
 	return EvidenceRef{
 		MatchID:     c.matchID,
@@ -630,6 +778,91 @@ func (c *Calculator) observationRef(v Value) EvidenceRef {
 		ID:          id,
 		RuleVersion: v.MetricVersion,
 	}
+}
+
+func decorateValue(v Value, m *Metric, acct, team, role string) Value {
+	v.MetricID = m.ID
+	v.Name = m.Name
+	v.ReportLevel = m.ReportLevel
+	v.AccountID = acct
+	v.TeamID = team
+	v.NominalRole = role
+	v.Unit = m.Unit
+	v.EpistemicClass = m.EpistemicClass
+	v.CapabilityLevel = m.CapabilityLevel
+	v.MetricVersion = m.MetricVersion
+	v.Direction = m.Direction
+	v.OfficialScoreEligible = m.OfficialScoreEligible
+	v.ExperimentalScoreEligible = m.ExperimentalScoreEligible
+	return v
+}
+
+func phaseDurationMap(ph *phase.Output) map[string]float64 {
+	out := map[string]float64{"laning": 0, "midgame": 0, "decisive": 0}
+	if ph == nil {
+		return out
+	}
+	for _, iv := range ph.Intervals {
+		if iv.GlobalPhase.Official() {
+			out[string(iv.GlobalPhase)] += float64(iv.EndGameSecond - iv.StartGameSecond)
+		}
+	}
+	return out
+}
+
+func validOfficialPhaseCoverage(ph *phase.Output) bool {
+	if ph == nil || ph.EligibleSeconds <= 0 || len(ph.Intervals) == 0 {
+		return false
+	}
+	prev := 0
+	for i := range ph.Intervals {
+		iv := &ph.Intervals[i]
+		if !iv.GlobalPhase.Official() || iv.StartGameSecond != prev || iv.EndGameSecond <= iv.StartGameSecond {
+			return false
+		}
+		prev = iv.EndGameSecond
+	}
+	return prev == ph.EligibleSeconds
+}
+
+func phaseEvidence(matchID, phaseName string, ph *phase.Output) []EvidenceRef {
+	var out []EvidenceRef
+	if ph == nil {
+		return out
+	}
+	for i := range ph.Intervals {
+		iv := &ph.Intervals[i]
+		if phaseName != "whole_match" && string(iv.GlobalPhase) != phaseName {
+			continue
+		}
+		if !iv.GlobalPhase.Official() {
+			continue
+		}
+		out = append(out, EvidenceRef{MatchID: matchID, Kind: EvidencePhase,
+			ID: fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond), RuleVersion: iv.RuleVersion})
+	}
+	return out
+}
+
+func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role, phaseName string, duration float64, ph *phase.Output, excluded int64) (Value, bool) {
+	v = decorateValue(v, m, acct, team, role)
+	ev := dedupeEvidence(calc.evidenceFor(acct, m.ID))
+	samples := calc.samples[calc.excludedKey(acct, m.ID)]
+	if v.UnavailableReason != "" || len(ev) == 0 || samples <= 0 || duration <= 0 {
+		return v, false
+	}
+	v.OfficialPhase = phaseName
+	v.Denominator = &duration
+	v.OpportunityCount = samples
+	v.SampleCount = samples
+	v.EvidenceCount = samples
+	v.ExcludedCount += excluded
+	v.Coverage = 1.0
+	chain := append([]EvidenceRef(nil), ev...)
+	chain = append(chain, phaseEvidence(calc.matchID, phaseName, ph)...)
+	chain = append(chain, calc.observationRef(v), calc.algorithmRef(m.ID))
+	v.Evidence = dedupeEvidence(chain)
+	return v, true
 }
 
 // Result builds the Output artifact. It resolves every registry metric for
@@ -656,6 +889,8 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 		})
 		return out
 	}
+	phaseCalcs := c.prepareFacts(ph)
+	phaseDurations := phaseDurationMap(ph)
 
 	teamNetWorth := map[string]float64{}
 	for tid, m := range c.teams {
@@ -679,20 +914,32 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 			if len(m.Roles) > 0 && !m.AppliesToRole(role) {
 				continue
 			}
+			if directPhaseMetric(m.ID) {
+				published := false
+				for _, phaseName := range []string{"laning", "midgame", "decisive"} {
+					pc := phaseCalcs[phaseName]
+					pv := pc.computeMetric(m, acct, team, role, nil, nil, nil, nil)
+					if pv, ok := finalizeDirectValue(pc, pv, m, acct, team, role, phaseName, phaseDurations[phaseName], ph, 0); ok {
+						out.Values = append(out.Values, pv)
+						published = true
+					}
+				}
+				whole := c.computeMetric(m, acct, team, role, teamNetWorth, fightParticipation, fightDamageShare, phaseDuration)
+				totalDuration := phaseDurations["laning"] + phaseDurations["midgame"] + phaseDurations["decisive"]
+				if whole, ok := finalizeDirectValue(c, whole, m, acct, team, role, "whole_match", totalDuration, ph, c.excluded[c.excludedKey(acct, m.ID)]); ok {
+					out.Values = append(out.Values, whole)
+					published = true
+				}
+				if !published {
+					u := decorateValue(Value{UnavailableReason: "no_eligible_official_phase_evidence"}, m, acct, team, role)
+					u.EpistemicClass = ClassUnavailable
+					u.ExcludedCount = c.excluded[c.excludedKey(acct, m.ID)]
+					out.Unavailable = append(out.Unavailable, u)
+				}
+				continue
+			}
 			v := c.computeMetric(m, acct, team, role, teamNetWorth, fightParticipation, fightDamageShare, phaseDuration)
-			v.MetricID = m.ID
-			v.Name = m.Name
-			v.ReportLevel = "player"
-			v.AccountID = acct
-			v.TeamID = team
-			v.NominalRole = role
-			v.Unit = m.Unit
-			v.EpistemicClass = m.EpistemicClass
-			v.CapabilityLevel = m.CapabilityLevel
-			v.MetricVersion = m.MetricVersion
-			v.Direction = m.Direction
-			v.OfficialScoreEligible = m.OfficialScoreEligible
-			v.ExperimentalScoreEligible = m.ExperimentalScoreEligible
+			v = decorateValue(v, m, acct, team, role)
 			if v.UnavailableReason != "" {
 				v.EpistemicClass = ClassUnavailable
 				out.Unavailable = append(out.Unavailable, v)
@@ -727,9 +974,10 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 		}
 	}
 
-	// Match-level metrics.
+	// Match-level phase-duration observations: one row per official phase plus
+	// one explicitly labelled whole-match reconciliation.
 	if phaseDuration != nil {
-		out.Values = append(out.Values, c.phaseDurationValue(reg, c.matchID, ph, phaseDuration))
+		out.Values = append(out.Values, c.phaseDurationValues(reg, c.matchID, ph)...)
 	} else {
 		out.Unavailable = append(out.Unavailable, phaseDurationUnavailable(reg, c.matchID))
 	}
@@ -753,10 +1001,17 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 // buildResolutionTable derives the per-metric resolution summary from the
 // closure contract plus the computed values/unavailable rows.
 func (c *Calculator) buildResolutionTable(o *Output) []Resolution {
-	pubByMetric := map[string]int{}
+	pubSubjects := map[string]map[string]struct{}{}
 	evByMetric := map[string]int64{}
 	for _, v := range o.Values {
-		pubByMetric[v.MetricID]++
+		if pubSubjects[v.MetricID] == nil {
+			pubSubjects[v.MetricID] = map[string]struct{}{}
+		}
+		subject := v.AccountID
+		if subject == "" {
+			subject = "match"
+		}
+		pubSubjects[v.MetricID][subject] = struct{}{}
 		evByMetric[v.MetricID] += v.EvidenceCount
 	}
 	unavByMetric := map[string]string{}
@@ -773,7 +1028,7 @@ func (c *Calculator) buildResolutionTable(o *Output) []Resolution {
 		r := Resolution{
 			MetricID: d.ID, CapabilityLevel: d.CapabilityLevel,
 			EpistemicClass: d.EpistemicClass, ReportLevel: d.ReportLevel,
-			PublishedPlayers: pubByMetric[d.ID],
+			PublishedPlayers: len(pubSubjects[d.ID]),
 		}
 		if c.closure != nil {
 			if row := c.closure.Lookup(d.ID); row != nil {
@@ -816,7 +1071,10 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 	case "death_count":
 		v = c.countValue(c.deaths[acct], m)
 	case "buyback_use_count":
-		v = c.countValue(c.buybacks[acct], m)
+		// The accepted adapter emits buyback transitions but not the buyback
+		// availability/cost state for every eligible death. Consequently the
+		// frozen denominator cannot be proven exactly; fail closed.
+		v.UnavailableReason = "eligible_death_buyback_state_denominator_not_in_accepted_adapter"
 	case "last_hit_count":
 		// The registry requires validated monotonic increments with explicit
 		// reset/gap reconciliation. The adapter exposes occasional absolute
@@ -1167,7 +1425,7 @@ func isObjectiveTarget(name string) bool {
 
 // computePhaseDuration sums the official phase interval durations.
 func (c *Calculator) computePhaseDuration(ph *phase.Output) *float64 {
-	if ph == nil {
+	if !validOfficialPhaseCoverage(ph) {
 		return nil
 	}
 	var total float64
@@ -1179,30 +1437,36 @@ func (c *Calculator) computePhaseDuration(ph *phase.Output) *float64 {
 	return &total
 }
 
-func (c *Calculator) phaseDurationValue(reg *Registry, matchID string, ph *phase.Output, dur *float64) Value {
-	v := Value{
-		MetricID: "phase_duration_seconds", Name: "Phase duration (match)",
-		ReportLevel: "match", Unit: "seconds", EpistemicClass: ClassDerived,
-		CapabilityLevel: CapabilityV1, MetricVersion: "1.0.0",
-		Value: dur, SampleCount: 1, Confidence: 1.0, Direction: "context_only",
+func (c *Calculator) phaseDurationValues(reg *Registry, matchID string, ph *phase.Output) []Value {
+	durations := phaseDurationMap(ph)
+	total := durations["laning"] + durations["midgame"] + durations["decisive"]
+	if total <= 0 {
+		return nil
 	}
-	if ph != nil {
-		var ev []EvidenceRef
-		for i := range ph.Intervals {
-			iv := &ph.Intervals[i]
-			ev = append(ev, EvidenceRef{
-				MatchID: c.matchID, Kind: EvidencePhase,
-				ID:          fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond),
-				RuleVersion: iv.RuleVersion,
-			})
-			for _, fs := range iv.EvidenceSeqs {
-				ev = append(ev, EvidenceRef{MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", fs), SourceFactSeq: fs, RuleVersion: version.FactsSchema})
-			}
+	var out []Value
+	for _, phaseName := range []string{"laning", "midgame", "decisive", "whole_match"} {
+		dur := total
+		if phaseName != "whole_match" {
+			dur = durations[phaseName]
 		}
+		if dur <= 0 {
+			continue
+		}
+		v := Value{
+			MetricID: "phase_duration_seconds", Name: "Phase duration",
+			ReportLevel: "match", OfficialPhase: phaseName,
+			Unit: "seconds", EpistemicClass: ClassDerived,
+			CapabilityLevel: CapabilityV1, MetricVersion: "1.0.0",
+			Value: &dur, Numerator: &dur, Denominator: &total,
+			OpportunityCount: int64(dur), SampleCount: int64(dur),
+			Coverage: 1.0, Confidence: 1.0, Direction: "context_only",
+		}
+		ev := phaseEvidence(c.matchID, phaseName, ph)
 		v.Evidence = append(ev, c.observationRef(v), c.algorithmRef("phase_duration_seconds"))
 		v.EvidenceCount = int64(len(ev))
+		out = append(out, v)
 	}
-	return v
+	return out
 }
 
 func phaseDurationUnavailable(reg *Registry, matchID string) Value {

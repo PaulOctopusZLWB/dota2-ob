@@ -72,7 +72,11 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 		if err := st.ReadJSON(row.MatchID, store.ArtifactReport, &rep); err == nil {
 			haveReport = true
 			for _, p := range rep.Participants {
-				part = append(part, partLite{AccountID: p.AccountID, TeamID: p.TeamID, NominalRole: p.NominalRole, Side: p.Side})
+				part = append(part, partLite{
+					AccountID: p.AccountID, TeamID: p.TeamID, NominalRole: p.NominalRole, Side: p.Side,
+					SourceNominalRole: p.SourceNominalRole, RoleRecordVersion: p.RoleRecordVersion,
+					OverrideApplied: p.OverrideApplied, OverrideAuthor: p.OverrideAuthor, OverrideVersion: p.OverrideVersion,
+				})
 			}
 		} else {
 			var idn identity.Identity
@@ -99,6 +103,7 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 		}
 		// Resolve the effective nominal role from the registry + overrides.
 		roleByAcct := map[string]string{}
+		provenanceByAcct := map[string]RoleProvenance{}
 		if roleReg != nil {
 			for _, p := range part {
 				if p.AccountID == "" {
@@ -106,6 +111,11 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 				}
 				if eff, ok := roleReg.Effective(row.MatchID, p.AccountID, effective); ok {
 					roleByAcct[p.AccountID] = eff.NominalRole
+					provenanceByAcct[p.AccountID] = RoleProvenance{
+						MatchID: row.MatchID, SourceNominalRole: eff.SourceNominalRole, NominalRole: eff.NominalRole,
+						RoleRecordVersion: eff.RecordVersion, OverrideApplied: eff.OverrideApplied,
+						OverrideAuthor: stringValue(eff.OverrideAuthor), OverrideVersion: stringValue(eff.OverrideVersion),
+					}
 				} else if p.NominalRole != "" {
 					roleByAcct[p.AccountID] = p.NominalRole
 				}
@@ -114,6 +124,12 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 		byAcct := map[string]map[string]MetricValue{}
 		for _, v := range met.Values {
 			if v.AccountID == "" || v.Value == nil {
+				continue
+			}
+			// Per-phase metric rows are audit/drilldown observations. Scoring
+			// consumes the explicitly labelled whole-match reconciliation only,
+			// avoiding phase-order overwrite and double counting.
+			if v.OfficialPhase != "" && v.OfficialPhase != "whole_match" {
 				continue
 			}
 			if byAcct[v.AccountID] == nil {
@@ -142,8 +158,12 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 			byAcct[v.AccountID][v.MetricID] = mv
 		}
 		for acct, mvs := range byAcct {
+			prov := provenanceByAcct[acct]
 			players = append(players, &PlayerMatch{
-				MatchID: row.MatchID, AccountID: acct, TeamID: teamByAcct[acct], NominalRole: roleByAcct[acct],
+				MatchID: row.MatchID, AccountID: acct, TeamID: teamByAcct[acct],
+				SourceNominalRole: prov.SourceNominalRole, NominalRole: roleByAcct[acct],
+				RoleRecordVersion: prov.RoleRecordVersion, OverrideApplied: prov.OverrideApplied,
+				OverrideAuthor: prov.OverrideAuthor, OverrideVersion: prov.OverrideVersion,
 				Metrics: mvs,
 			})
 		}
@@ -179,19 +199,36 @@ func metricsToEvidenceRefs(matchID string, ev []metrics.EvidenceRef) []EvidenceR
 // reportLite is the report subset the scorer needs (participants with roles).
 type reportLite struct {
 	Participants []struct {
-		AccountID   string `json:"account_id"`
-		TeamID      string `json:"team_id"`
-		NominalRole string `json:"nominal_role"`
-		Side        string `json:"side"`
+		AccountID         string  `json:"account_id"`
+		TeamID            string  `json:"team_id"`
+		SourceNominalRole string  `json:"source_nominal_role"`
+		NominalRole       string  `json:"nominal_role"`
+		Side              string  `json:"side"`
+		RoleRecordVersion string  `json:"role_record_version"`
+		OverrideApplied   bool    `json:"override_applied"`
+		OverrideAuthor    *string `json:"override_author"`
+		OverrideVersion   *string `json:"override_version"`
 	} `json:"participants"`
 }
 
 // partLite is a participant row for role/team resolution.
 type partLite struct {
-	AccountID   string
-	TeamID      string
-	NominalRole string
-	Side        string
+	AccountID         string
+	TeamID            string
+	SourceNominalRole string
+	NominalRole       string
+	Side              string
+	RoleRecordVersion string
+	OverrideApplied   bool
+	OverrideAuthor    *string
+	OverrideVersion   *string
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // teamScoringVersionOf returns the team registry version (or empty).

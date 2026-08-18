@@ -44,7 +44,7 @@ async function load(){
       return;
     }
     const d = env.data || {};
-    const children = (d.child_refs || []).map(r => `<li class="mono">${esc(r)}</li>`).join("");
+    const children = (d.child_refs || []).map(r => `<li class="mono">${esc(`${r.kind}:${r.id} · match=${r.match_id || "-"} · rule=${r.rule_version || "-"}`)}</li>`).join("");
     c.innerHTML = `
       <div class="panel">
         <h3 style="margin-top:0">聚合实体</h3>

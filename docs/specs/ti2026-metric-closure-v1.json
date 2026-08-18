@@ -44,14 +44,14 @@
     },
     {
       "metric_id": "buyback_use_count",
-      "evaluator_id": "ev.buyback_use_count.v1.atomic",
-      "entry_point": "computeMetric:buyback_use_count",
+	  "evaluator_id": "ev.buyback_use_count.unavailable",
+	  "entry_point": "unavailable:buyback_use_count",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
-      "accepted_source_fields": "death_respawn_buyback_event.kind=buyback.account_id|calibrated_clock",
-      "publication_gate": "publish when a resolved buyback transition exists",
-      "unavailable_gate": "buyback_event_missing"
+	  "resolved": "unavailable",
+	  "accepted_source_fields": "death_respawn_buyback_event.kind=death|buyback (eligible-death buyback availability/cost state unavailable)",
+	  "publication_gate": "never for the accepted adapter (the exact eligible-death denominator is not emitted)",
+	  "unavailable_gate": "eligible_death_buyback_state_denominator_not_in_accepted_adapter"
     },
     {
       "metric_id": "control_duration_per_opportunity",

@@ -24,7 +24,7 @@
 // Run: PROBE_ROOT=<clean-five-probe-root> node web/replay/browser_e2e.mjs
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, cpSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, cpSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -379,16 +379,33 @@ async function main() {
         const playerRow = afterOvr.data.matches.find(m => m.match_id === player.match_id);
         assert.ok(playerRow && playerRow.nominal_role === newRole, "player match row role after override");
         assert.ok(playerRow && playerRow.source_nominal_role, "player match row source role preserved");
+        assert.strictEqual(playerRow.override_author, "browser", "player match row override author");
+        assert.ok(playerRow.role_record_version, "player match row role record version");
+        assert.ok(playerRow.override_version, "player match row override version");
         const matchRep = await api(page, `${base}/api/replay/v1/matches/${player.match_id}`);
         const part = matchRep.data.participants.find(p => p.account_id === acct);
         assert.ok(part && part.nominal_role === newRole, "match report role after override");
         assert.ok(part && part.source_nominal_role, "match report source role preserved");
+        assert.strictEqual(part.override_author, "browser", "match report override author");
+        assert.ok(part.role_record_version, "match report role record version");
+        assert.ok(part.override_version, "match report override version");
         const matchScore = await api(page, `${base}/api/replay/v1/matches/${player.match_id}/scores`);
         const row = (matchScore.data.players || []).find(p => p.account_id === acct);
         assert.ok(row && row.nominal_role === newRole, "match-score row role after override");
+        assert.strictEqual(row.override_author, "browser", "match-score override author");
+        assert.ok(row.role_record_version, "match-score role record version");
+        assert.ok(row.override_version, "match-score override version");
         const corpus = await api(page, `${base}/api/replay/v1/scores/corpus`);
         const pt = (corpus.data.players || []).find(p => p.account_id === acct);
         assert.ok(pt && pt.nominal_role === newRole, "corpus/tournament player role after override");
+        const scoreProv = pt && pt.role_provenance && pt.role_provenance[player.match_id];
+        assert.ok(scoreProv, "corpus score role provenance missing");
+        assert.strictEqual(scoreProv.override_author, "browser", "corpus score override author");
+        assert.ok(scoreProv.role_record_version, "corpus score role record version");
+        assert.ok(scoreProv.override_version, "corpus score override version");
+        const profileProv = afterOvr.data.score.role_provenance[player.match_id];
+        assert.strictEqual(profileProv.override_author, "browser", "player profile score override author");
+        assert.ok(profileProv.role_record_version && profileProv.override_version, "player profile score versions missing");
       };
       await assertRoleAgreement(restartedBase);
 
@@ -420,16 +437,25 @@ async function main() {
       const aggText = await page.evaluate(() => document.body.innerText);
       assert.ok(aggText.includes("聚合实体") || aggText.includes("aggregation"), "aggregation page missing content");
 
-      // Stale fact deep link shows explicit unavailable (404) via the UI.
-      const staleFact = await page.evaluate(async (u) => {
-        const r = await fetch(u); return { status: r.status, body: await r.json() };
-      }, `${restartedBase2}/api/replay/v1/matches/${MATCH}/facts/999999999`);
-      assert.strictEqual(staleFact.status, 404, "stale fact not 404");
-      assert.ok(staleFact.body.error && staleFact.body.error.includes("fact_not_found"), "stale fact missing reason");
+      // Turn an ACTUAL rendered fact link stale inside the disposable copy,
+      // navigate it, and assert the precise API error rendered by the UI.
+      await page.goto(`${restartedBase2}/match.html?id=${MATCH}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector("a[data-evidence-kind='fact']", { timeout: 15000 });
+      const factsPath = join(DATA, "matches", MATCH, "facts.jsonl");
+      const factsBytes = readFileSync(factsPath);
+      writeFileSync(factsPath, "");
+      try {
+        await page.click("a[data-evidence-kind='fact']");
+        await page.waitForSelector("[data-evidence-error='fact']", { timeout: 15000 });
+        const staleReason = await page.$eval("[data-evidence-error='fact']", el => el.innerText);
+        assert.ok(staleReason.includes("fact_not_found:seq="), `stale rendered fact reason=${staleReason}`);
+      } finally {
+        writeFileSync(factsPath, factsBytes);
+      }
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + stale 404; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

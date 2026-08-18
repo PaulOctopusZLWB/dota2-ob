@@ -257,10 +257,10 @@ func (s *Server) serveAggregation(w http.ResponseWriter, id string) {
 		for mid, am := range metrics {
 			for _, ref := range am.Lineage {
 				if ref.Kind == "aggregation" && ref.ID == id {
-					children := []string{}
+					children := []scoring.EvidenceRef{}
 					for _, child := range am.Lineage {
 						if child.Kind != "aggregation" {
-							children = append(children, child.Kind+":"+child.ID)
+							children = append(children, child)
 						}
 					}
 					writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: map[string]interface{}{
@@ -650,6 +650,7 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 				"override_reason":          p.OverrideReason,
 				"override_at":              p.OverrideAt,
 				"override_author":          p.OverrideAuthor,
+				"override_version":         p.OverrideVersion,
 			}
 			if rep.Phases != nil {
 				entry["phase_intervals"] = len(rep.Phases.Intervals)

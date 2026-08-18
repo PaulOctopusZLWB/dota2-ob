@@ -446,11 +446,26 @@ type AggregatedMetric struct {
 
 // PlayerMatch is one player in one match with its published metric values.
 type PlayerMatch struct {
-	MatchID     string                 `json:"match_id"`
-	AccountID   string                 `json:"account_id"`
-	TeamID      string                 `json:"team_id,omitempty"`
-	NominalRole string                 `json:"nominal_role"`
-	Metrics     map[string]MetricValue `json:"metrics"`
+	MatchID           string                 `json:"match_id"`
+	AccountID         string                 `json:"account_id"`
+	TeamID            string                 `json:"team_id,omitempty"`
+	SourceNominalRole string                 `json:"source_nominal_role,omitempty"`
+	NominalRole       string                 `json:"nominal_role"`
+	RoleRecordVersion string                 `json:"role_record_version,omitempty"`
+	OverrideApplied   bool                   `json:"override_applied,omitempty"`
+	OverrideAuthor    string                 `json:"override_author,omitempty"`
+	OverrideVersion   string                 `json:"override_version,omitempty"`
+	Metrics           map[string]MetricValue `json:"metrics"`
+}
+
+type RoleProvenance struct {
+	MatchID           string `json:"match_id"`
+	SourceNominalRole string `json:"source_nominal_role"`
+	NominalRole       string `json:"nominal_role"`
+	RoleRecordVersion string `json:"role_record_version"`
+	OverrideApplied   bool   `json:"override_applied"`
+	OverrideAuthor    string `json:"override_author,omitempty"`
+	OverrideVersion   string `json:"override_version,omitempty"`
 }
 
 // PlayerTournament is one player's records aggregated across its eligible
@@ -462,6 +477,7 @@ type PlayerTournament struct {
 	EligibleMatches int                         `json:"eligible_matches"`
 	MatchIDs        []string                    `json:"match_ids"`
 	Metrics         map[string]AggregatedMetric `json:"metrics"`
+	RoleProvenance  map[string]RoleProvenance   `json:"role_provenance"`
 }
 
 // TeamMatch is one team's metrics pooled across its five players in one match.
@@ -541,6 +557,7 @@ type PlayerScore struct {
 	ExperimentalTotal    *TotalResult                `json:"experimental_total"`
 	SubjectCoverage      SubjectCoverage             `json:"subject_coverage"`
 	ComparisonPopulation string                      `json:"comparison_population"`
+	RoleProvenance       map[string]RoleProvenance   `json:"role_provenance"`
 }
 
 // PercentileResult is one metric's normalized value with provenance.
@@ -743,10 +760,15 @@ func (c *Corpus) buildTournaments() {
 		rows := byKey[key]
 		pt := &PlayerTournament{
 			AccountID: rows[0].AccountID, TeamID: rows[0].TeamID, NominalRole: rows[0].NominalRole,
-			EligibleMatches: len(rows), Metrics: map[string]AggregatedMetric{},
+			EligibleMatches: len(rows), Metrics: map[string]AggregatedMetric{}, RoleProvenance: map[string]RoleProvenance{},
 		}
 		for _, r := range rows {
 			pt.MatchIDs = append(pt.MatchIDs, r.MatchID)
+			pt.RoleProvenance[r.MatchID] = RoleProvenance{
+				MatchID: r.MatchID, SourceNominalRole: r.SourceNominalRole, NominalRole: r.NominalRole,
+				RoleRecordVersion: r.RoleRecordVersion, OverrideApplied: r.OverrideApplied,
+				OverrideAuthor: r.OverrideAuthor, OverrideVersion: r.OverrideVersion,
+			}
 		}
 		byMetric := map[string][]MetricValue{}
 		for _, r := range rows {
@@ -905,6 +927,7 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 			PublishedMetrics: len(pt.Metrics), CorpusMatches: c.MatchCount(),
 		},
 		ComparisonPopulation: cv.ComparisonPopulation,
+		RoleProvenance:       pt.RoleProvenance,
 	}
 	// Carry the aggregated raw values + typed lineage for drilldown.
 	for mid, am := range pt.Metrics {

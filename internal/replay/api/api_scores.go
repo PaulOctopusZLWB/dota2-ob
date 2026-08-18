@@ -198,6 +198,10 @@ func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}
+		if review.IsStorageError(err) {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

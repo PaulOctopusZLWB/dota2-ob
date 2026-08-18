@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,62 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
+
+func atomicTestContext() PhaseContext {
+	return PhaseContext{EligibleSeconds: 100, RuleVersion: "phase.v1", ReplaySHA256: "sha", MachineIntervals: []PhaseInterval{{
+		StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning",
+	}}}
+}
+
+func TestPhaseMutationCorruptAuditLeavesAllBytesUnchanged(t *testing.T) {
+	s, _ := New(t.TempDir())
+	corrupt := []byte(`{"broken"`)
+	if err := os.WriteFile(s.AuditPath(), corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r0, _ := s.Load("m1")
+	_, err := s.ApplyPhaseOp("m1", atomicTestContext(), PhaseOpReq{
+		Op: OpAccept, EventRef: "interval@0-100", ExpectedRevision: r0.ReviewRevision,
+	})
+	if !IsStorageError(err) {
+		t.Fatalf("err=%v want storage error", err)
+	}
+	if _, statErr := os.Stat(s.Path("m1")); !os.IsNotExist(statErr) {
+		t.Fatalf("review file changed/created: %v", statErr)
+	}
+	got, _ := os.ReadFile(s.AuditPath())
+	if string(got) != string(corrupt) {
+		t.Fatal("corrupt audit bytes changed")
+	}
+}
+
+func TestPhaseMutationAuditWriteFailureLeavesAllBytesUnchanged(t *testing.T) {
+	s, _ := New(t.TempDir())
+	initialAudit := []byte(`{"schema_version":"replay.corrections.v2","entries":[]}`)
+	if err := store.WriteAtomic(s.AuditPath(), initialAudit); err != nil {
+		t.Fatal(err)
+	}
+	r0, _ := s.Load("m1")
+	s.writeAtomic = func(path string, b []byte) error {
+		if path == s.AuditPath() {
+			return fmt.Errorf("injected unwritable audit")
+		}
+		return store.WriteAtomic(path, b)
+	}
+	_, err := s.ApplyPhaseOp("m1", atomicTestContext(), PhaseOpReq{
+		Op: OpAccept, EventRef: "interval@0-100", ExpectedRevision: r0.ReviewRevision,
+	})
+	if !IsStorageError(err) {
+		t.Fatalf("err=%v want storage error", err)
+	}
+	if _, statErr := os.Stat(s.Path("m1")); !os.IsNotExist(statErr) {
+		t.Fatalf("review file changed/created: %v", statErr)
+	}
+	got, _ := os.ReadFile(s.AuditPath())
+	if string(got) != string(initialAudit) {
+		t.Fatal("audit bytes changed after injected write failure")
+	}
+}
 
 func TestAddAuthoritativePreservesMachineValue(t *testing.T) {
 	s, err := New(t.TempDir())
