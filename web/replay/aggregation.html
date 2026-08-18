@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TI 2026 回放分析 · 聚合实体</title>
+  <style>
+    :root { color-scheme: dark; --ink:#e8ece7; --muted:#a4aaa0; --line:#30352f; --panel:#171a16; --panel-2:#20241d; --accent:#9bcf53; --gold:#d4a845; --void:#0d0f0c; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; color:var(--ink); background:linear-gradient(90deg,rgba(155,207,83,.08) 1px,transparent 1px),linear-gradient(rgba(155,207,83,.06) 1px,transparent 1px),var(--void); background-size:42px 42px; font-family:"Cascadia Code","IBM Plex Mono",ui-monospace,monospace; }
+    .shell { width:min(1200px,calc(100vw - 32px)); margin:0 auto; padding:24px 0 40px; }
+    header { display:grid; grid-template-columns:1fr auto; align-items:end; gap:20px; padding:0 0 18px; border-bottom:1px solid var(--line); }
+    h1 { margin:0; font-size:clamp(20px,3.6vw,34px); line-height:.95; font-weight:800; }
+    .meta { color:var(--muted); font-size:13px; text-align:right; }
+    .panel { border:1px solid var(--line); background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.01)),var(--panel); border-radius:8px; padding:14px 16px; margin-top:16px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { text-align:left; padding:7px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:.06em; }
+    a { color:var(--accent); text-decoration:none; } a:hover{text-decoration:underline;}
+    .hint { color:var(--muted); font-size:12px; }
+    .mono { font-family:ui-monospace,monospace; font-size:11px; color:var(--muted); word-break:break-all; }
+    #status { color:var(--muted); }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>聚合实体 <span id="agg">…</span></h1>
+    <div class="meta"><a href="index.html">← 语料库</a> &nbsp; <span id="status">载入中…</span></div>
+  </header>
+  <div id="content"><p class="hint">载入中…</p></div>
+</div>
+<script>
+function esc(v){return String(v==null?"":v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
+async function load(){
+  const id = new URLSearchParams(location.search).get("id");
+  document.getElementById("agg").textContent = id || "?";
+  const c = document.getElementById("content");
+  try {
+    const resp = await fetch(`/api/replay/v1/aggregations/${encodeURIComponent(id)}`);
+    const env = await resp.json();
+    if (!resp.ok) {
+      c.innerHTML = `<div class="panel"><h3 style="margin-top:0">聚合实体</h3><p class="hint">不可用: ${esc(env.error || resp.status)}</p></div>`;
+      return;
+    }
+    const d = env.data || {};
+    const children = (d.child_refs || []).map(r => `<li class="mono">${esc(r)}</li>`).join("");
+    c.innerHTML = `
+      <div class="panel">
+        <h3 style="margin-top:0">聚合实体</h3>
+        <table>
+          <tr><th>聚合 ID</th><td class="mono">${esc(d.aggregation_id)}</td></tr>
+          <tr><th>作用域</th><td>${esc(d.scope)}</td></tr>
+          <tr><th>主体</th><td>${esc(d.subject)}</td></tr>
+          <tr><th>指标</th><td>${esc(d.metric_id)}</td></tr>
+          <tr><th>值</th><td class="num">${esc(d.value)}</td></tr>
+          <tr><th>合格比赛</th><td class="num">${esc(d.eligible_matches)}</td></tr>
+          <tr><th>算法版本</th><td class="mono">${esc(d.rule_version)}</td></tr>
+        </table>
+        <h4>子引用（保留底层证据链）</h4>
+        <ul>${children || "<li class=\"hint\">无</li>"}</ul>
+      </div>`;
+  } catch(e) {
+    document.getElementById("status").textContent = "加载失败: " + e;
+  }
+}
+load();
+</script>
+</body>
+</html>

@@ -33,14 +33,14 @@
     },
     {
       "metric_id": "buyback_round_participation",
-      "evaluator_id": "ev.buyback_round_participation.v2.derived",
-      "entry_point": "computeMetric:buyback_round_participation",
+      "evaluator_id": "ev.buyback_round_participation.unavailable",
+      "entry_point": "unavailable:buyback_round_participation",
       "capability_level": "V2",
       "report_level": "player",
-      "resolved": "published",
-      "accepted_source_fields": "death_respawn_buyback_event.kind=buyback|combat_event post-buyback window",
-      "publication_gate": "publish when verified buybacks with post-buyback combat exist",
-      "unavailable_gate": "buyback_events_missing"
+      "resolved": "unavailable",
+      "accepted_source_fields": "death_respawn_buyback_event.kind=buyback (round identity, position, availability/cost, and complete outcome vector unavailable)",
+      "publication_gate": "never for the accepted adapter (round identity and complete outcome-vector gates are not emitted)",
+      "unavailable_gate": "buyback_round_identity_position_outcome_vector_gates_not_in_accepted_adapter"
     },
     {
       "metric_id": "buyback_use_count",
@@ -187,25 +187,25 @@
     },
     {
       "metric_id": "fight_damage_share",
-      "evaluator_id": "ev.fight_damage_share.v2.derived",
-      "entry_point": "computeMetric:fight_damage_share",
+      "evaluator_id": "ev.fight_damage_share.unavailable",
+      "entry_point": "unavailable:fight_damage_share",
       "capability_level": "V2",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "fight episodes|combat_event.kind=damage.hero_target|ownership",
-      "publication_gate": "publish when fight-interval hero damage has a positive team denominator",
-      "unavailable_gate": "fight_damage_denominator_missing"
+      "publication_gate": "never for the accepted adapter (definition-specific gate)",
+      "unavailable_gate": "fight_share_phase_alive_resolution_gates_not_in_accepted_adapter"
     },
     {
       "metric_id": "fight_participation_count",
-      "evaluator_id": "ev.fight_participation_count.v1.derived",
-      "entry_point": "computeMetric:fight_participation_count",
+      "evaluator_id": "ev.fight_participation_count.unavailable",
+      "entry_point": "unavailable:fight_participation_count",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "fight episodes.participants|combat/objective events",
-      "publication_gate": "publish when fight episodes exist",
-      "unavailable_gate": "fight_episodes_missing"
+      "publication_gate": "never for the accepted adapter (definition-specific gate)",
+      "unavailable_gate": "fight_window_coverage_gate_not_in_accepted_adapter"
     },
     {
       "metric_id": "forced_regen_or_retreat_rate",
@@ -242,14 +242,14 @@
     },
     {
       "metric_id": "hero_healing_total",
-      "evaluator_id": "ev.hero_healing_total.v1.atomic",
-      "entry_point": "computeMetric:hero_healing_total",
+      "evaluator_id": "ev.hero_healing_total.unavailable",
+      "entry_point": "unavailable:hero_healing_total",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "combat_event.kind=heal.effective_healing",
-      "publication_gate": "publish when effective heal events exist",
-      "unavailable_gate": "hero_healing_missing"
+      "publication_gate": "never for the accepted adapter (definition-specific gate)",
+      "unavailable_gate": "effective_healing_overheal_target_gates_not_in_accepted_adapter"
     },
     {
       "metric_id": "highground_building_conversion",
@@ -341,25 +341,25 @@
     },
     {
       "metric_id": "last_hit_count",
-      "evaluator_id": "ev.last_hit_count.v1.atomic",
-      "entry_point": "computeMetric:last_hit_count",
+      "evaluator_id": "ev.last_hit_count.unavailable",
+      "entry_point": "unavailable:last_hit_count",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "economy_sample.last_hits|calibrated_clock",
-      "publication_gate": "publish when monotonic last-hit counter increments exist",
-      "unavailable_gate": "last_hit_state_missing"
+      "publication_gate": "never for the accepted adapter (counter reset/gap reconciliation is unavailable)",
+      "unavailable_gate": "last_hit_counter_reset_gap_reconciliation_not_in_accepted_adapter"
     },
     {
       "metric_id": "net_worth_delta",
-      "evaluator_id": "ev.net_worth_delta.v1.atomic",
-      "entry_point": "computeMetric:net_worth_delta",
+      "evaluator_id": "ev.net_worth_delta.unavailable",
+      "entry_point": "unavailable:net_worth_delta",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "economy_sample.networth|calibrated_clock",
-      "publication_gate": "publish when endpoint net-worth delta exists",
-      "unavailable_gate": "networth_state_missing"
+      "publication_gate": "never for the accepted adapter (valid contiguous endpoint segments and signed reset/gap handling are unavailable)",
+      "unavailable_gate": "networth_endpoint_segment_gap_reset_gates_not_in_accepted_adapter"
     },
     {
       "metric_id": "objective_damage_total",
@@ -385,14 +385,14 @@
     },
     {
       "metric_id": "opportunity_duration_seconds",
-      "evaluator_id": "ev.opportunity_duration_seconds.v1.derived",
-      "entry_point": "computeMetric:opportunity_duration_seconds",
+      "evaluator_id": "ev.opportunity_duration_seconds.unavailable",
+      "entry_point": "unavailable:opportunity_duration_seconds",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "hero_state_sample.position|official phase intervals",
-      "publication_gate": "publish when eligible second-grid bins within official phases exist",
-      "unavailable_gate": "position_state_missing"
+      "publication_gate": "never for the accepted adapter (definition-specific gate)",
+      "unavailable_gate": "opportunity_key_field_quality_mask_not_in_accepted_adapter"
     },
     {
       "metric_id": "phase_duration_seconds",
@@ -517,14 +517,14 @@
     },
     {
       "metric_id": "team_resource_share",
-      "evaluator_id": "ev.team_resource_share.v1.derived",
-      "entry_point": "computeMetric:team_resource_share",
+      "evaluator_id": "ev.team_resource_share.unavailable",
+      "entry_point": "unavailable:team_resource_share",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
+      "resolved": "unavailable",
       "accepted_source_fields": "economy_sample.networth|team roster",
-      "publication_gate": "publish when net-worth delta and positive team total exist",
-      "unavailable_gate": "team_networth_missing"
+      "publication_gate": "never for the accepted adapter (complete synchronized five-player frames and duration weights are unavailable)",
+      "unavailable_gate": "complete_synchronized_team_resource_frames_not_in_accepted_adapter"
     },
     {
       "metric_id": "theoretical_ward_coverage_seconds",
@@ -572,14 +572,14 @@
     },
     {
       "metric_id": "xp_delta",
-      "evaluator_id": "ev.xp_delta.v1.atomic",
-      "entry_point": "computeMetric:xp_delta",
+      "evaluator_id": "ev.xp_delta.unavailable",
+      "entry_point": "unavailable:xp_delta",
       "capability_level": "V1",
       "report_level": "player",
-      "resolved": "published",
-      "accepted_source_fields": "economy_sample.xp|calibrated_clock",
-      "publication_gate": "publish when non-negative xp deltas exist",
-      "unavailable_gate": "xp_state_missing"
+      "resolved": "unavailable",
+      "accepted_source_fields": "economy_sample.xp award facts|calibrated_clock (experience-state endpoints unavailable)",
+      "publication_gate": "never for the accepted adapter (experience-state endpoints, contiguous segments, and gap/reset handling are unavailable)",
+      "unavailable_gate": "experience_state_endpoint_segment_gap_gates_not_in_accepted_adapter"
     }
   ]
 }

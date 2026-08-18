@@ -10,6 +10,7 @@
 package review
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -77,23 +78,23 @@ type Correction struct {
 // The machine stream is never mutated; it is preserved verbatim as the
 // MachineValue source of truth.
 type PhaseCorrectionV2 struct {
-	ID             string `json:"id"`
-	SchemaVersion  string `json:"schema_version"`
-	RuleVersion    string `json:"rule_version"`
-	MatchID        string `json:"match_id"`
-	ReplaySHA256   string `json:"replay_sha256,omitempty"`
-	Kind           Kind   `json:"kind"`
-	Operation      string `json:"operation"`
-	ShapeVersion   string `json:"shape_version"`
-	Author         string `json:"author"`
-	Reason         string `json:"reason"`
-	AppliedAt      string `json:"applied_at"`
-	EventRef       string `json:"event_ref"`
-	SplitSecond    *int   `json:"split_second,omitempty"`
-	MergeRight     string `json:"merge_right,omitempty"`
-	AbsorbInto     string `json:"absorb_into,omitempty"`
-	EvidenceIDs    []string `json:"evidence_ids,omitempty"`
-	AlgorithmVersion string `json:"algorithm_version"`
+	ID               string   `json:"id"`
+	SchemaVersion    string   `json:"schema_version"`
+	RuleVersion      string   `json:"rule_version"`
+	MatchID          string   `json:"match_id"`
+	ReplaySHA256     string   `json:"replay_sha256,omitempty"`
+	Kind             Kind     `json:"kind"`
+	Operation        string   `json:"operation"`
+	ShapeVersion     string   `json:"shape_version"`
+	Author           string   `json:"author"`
+	Reason           string   `json:"reason"`
+	AppliedAt        string   `json:"applied_at"`
+	EventRef         string   `json:"event_ref"`
+	SplitSecond      *int     `json:"split_second,omitempty"`
+	MergeRight       string   `json:"merge_right,omitempty"`
+	AbsorbInto       string   `json:"absorb_into,omitempty"`
+	EvidenceIDs      []string `json:"evidence_ids,omitempty"`
+	AlgorithmVersion string   `json:"algorithm_version"`
 	// BeforeStream is the complete current effective stream before the op.
 	BeforeStream []PhaseInterval `json:"before_stream"`
 	// AfterStream is the complete resulting effective stream after the op.
@@ -125,6 +126,13 @@ type Review struct {
 	// present and non-empty it is the authoritative base for the next
 	// operation.
 	EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals,omitempty"`
+	// ReviewRevision is an opaque optimistic-concurrency token derived from
+	// the ordered correction state plus the canonical effective stream. It
+	// changes after EVERY successful correction, including accept operations
+	// that do not alter interval boundaries. Every phase mutation must carry
+	// the currently rendered revision; a mismatch is rejected atomically with
+	// 409 and changes no bytes or counts.
+	ReviewRevision string `json:"review_revision,omitempty"`
 	// ReviewStatus is the review workflow state.
 	ReviewStatus string `json:"review_status"` // pending|in_progress|reviewed
 	// RecomputeVersion is the scoring contract version that a synchronous
@@ -295,6 +303,17 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 	if err != nil {
 		return nil, err
 	}
+	// Optimistic concurrency: the caller must submit the currently rendered
+	// revision. A mismatch (stale form, including a same-boundary edit whose
+	// intervals still exist) fails closed with the stale sentinel and changes
+	// no bytes or counts. This is checked under the same mutation lock as the
+	// write so two concurrent reviewers cannot silently overwrite each other.
+	if req.ExpectedRevision == "" {
+		return nil, staleErrorf("review_revision_required:current=%s", r.ReviewRevision)
+	}
+	if req.ExpectedRevision != r.ReviewRevision {
+		return nil, staleErrorf("review_revision_mismatch:expected=%s current=%s", req.ExpectedRevision, r.ReviewRevision)
+	}
 	// Resolve the current stream: effective overlay when present, else machine.
 	var base []PhaseInterval
 	if len(r.EffectivePhaseIntervals) > 0 {
@@ -325,7 +344,11 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 	if r.ReviewStatus == "" || r.ReviewStatus == "pending" {
 		r.ReviewStatus = "in_progress"
 	}
-	// One serialized write: correction + effective stream together.
+	// Advance the revision from the ordered corrections + canonical effective
+	// stream AFTER this correction, so every success (including accept)
+	// yields a new revision for the next mutation.
+	r.ReviewRevision = revisionOf(r.PhaseCorrections, r.EffectivePhaseIntervals)
+	// One serialized write: correction + effective stream + revision together.
 	if err := s.writeJSON(s.Path(matchID), r); err != nil {
 		return nil, err
 	}
@@ -336,6 +359,35 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 		return nil, err
 	}
 	return r, nil
+}
+
+// revisionOf derives an opaque optimistic-concurrency token from the ordered
+// phase-correction state plus the canonical effective stream. It changes on
+// every correction (including accept, which appends a correction) and after
+// restart reproduces the same value deterministically from the persisted
+// ordered corrections and effective stream.
+func revisionOf(corrections []PhaseCorrectionV2, effective []json.RawMessage) string {
+	h := sha256.New()
+	for i := range corrections {
+		c := &corrections[i]
+		h.Write([]byte(c.ID))
+		h.Write([]byte{0})
+		h.Write([]byte(c.Operation))
+		h.Write([]byte{0})
+		if b, err := json.Marshal(c.BeforeStream); err == nil {
+			h.Write(b)
+		}
+		h.Write([]byte{0})
+		if b, err := json.Marshal(c.AfterStream); err == nil {
+			h.Write(b)
+		}
+		h.Write([]byte{0})
+	}
+	for _, iv := range effective {
+		h.Write(iv)
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("rev-%x", h.Sum(nil)[:16])
 }
 
 // buildPhaseCorrection constructs the v2 audit record for one phase operation.
@@ -508,20 +560,28 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 	var r Review
 	if err := s.readJSON(s.Path(matchID), &r); err != nil {
 		if os.IsNotExist(err) {
-			return &Review{
+			rv := &Review{
 				SchemaVersion:    version.CorrectionSchema,
 				RuleVersion:      version.CorrectionRuleVersion,
 				MatchID:          matchID,
 				Corrections:      []Correction{},
 				PhaseCorrections: []PhaseCorrectionV2{},
 				ReviewStatus:     "pending",
-			}, nil
+			}
+			rv.ReviewRevision = revisionOf(rv.PhaseCorrections, rv.EffectivePhaseIntervals)
+			return rv, nil
 		}
 		return nil, err
 	}
 	if r.SchemaVersion == version.CorrectionSchema {
 		if r.PhaseCorrections == nil {
 			r.PhaseCorrections = []PhaseCorrectionV2{}
+		}
+		// Deterministically derive the revision when the persisted document
+		// predates the optimistic-concurrency field, so the UI always has a
+		// valid token for its first mutation.
+		if r.ReviewRevision == "" {
+			r.ReviewRevision = revisionOf(r.PhaseCorrections, r.EffectivePhaseIntervals)
 		}
 		return &r, nil
 	}
@@ -530,6 +590,9 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 	migrated, err := s.migrateV1(matchID, &r)
 	if err != nil {
 		return nil, err
+	}
+	if migrated.ReviewRevision == "" {
+		migrated.ReviewRevision = revisionOf(migrated.PhaseCorrections, migrated.EffectivePhaseIntervals)
 	}
 	return migrated, nil
 }
@@ -641,8 +704,8 @@ func (s *Store) migrateV1(matchID string, r *Review) (*Review, error) {
 // machinePhaseContext reads the immutable phases artifact for a match.
 func (s *Store) machinePhaseContext(matchID string) (PhaseContext, error) {
 	var ph struct {
-		RuleVersion     string         `json:"rule_version"`
-		EligibleSeconds int            `json:"eligible_seconds"`
+		RuleVersion     string          `json:"rule_version"`
+		EligibleSeconds int             `json:"eligible_seconds"`
 		Intervals       []PhaseInterval `json:"intervals"`
 	}
 	path := filepath.Join(s.Root, "matches", matchID, store.ArtifactPhases)

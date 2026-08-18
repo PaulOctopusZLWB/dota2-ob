@@ -98,6 +98,11 @@ type PhaseOpReq struct {
 	// is always resolved server-side from phases.json; the client value is
 	// ignored in favor of the authoritative one.
 	EligibleSeconds int `json:"eligible_seconds,omitempty"`
+	// ExpectedRevision is the opaque optimistic-concurrency token rendered with
+	// the current effective stream. Every phase mutation must carry the
+	// currently rendered revision; a mismatch fails closed with 409 and changes
+	// no bytes or counts (prevents same-boundary stale overwrites).
+	ExpectedRevision string `json:"expected_revision"`
 }
 
 // ValidatePhaseLabel checks a phase label against the official set.

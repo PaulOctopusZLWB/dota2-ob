@@ -112,7 +112,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(Version+"/reviews/status", s.handleReviewStatus)
 	mux.HandleFunc(Version+"/roles/overrides", s.handleRoleOverrides)
 	mux.HandleFunc(Version+"/scores/corpus", s.handleScoreCorpus)
+	mux.HandleFunc(Version+"/aggregations/", s.handleAggregationRoot)
 	return mux
+}
+
+// handleAggregationRoot serves one corpus/scope-qualified aggregation entity by
+// its canonical id at /aggregations/{id}.
+func (s *Server) handleAggregationRoot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, Version+"/aggregations/")
+	id = strings.Trim(id, "/")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "aggregation_id_required")
+		return
+	}
+	s.serveAggregation(w, id)
 }
 
 type envelope struct {
@@ -203,21 +220,87 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 		s.handleMetricObservationDetail(w, matchID, parts)
 	case len(parts) >= 2 && parts[1] == "algorithms":
 		s.handleAlgorithmDetail(w, matchID, parts)
+	case len(parts) >= 2 && parts[1] == "aggregations":
+		s.handleAggregationDetail(w, matchID, parts)
 	default:
 		writeErr(w, http.StatusNotFound, "not_found")
 	}
 }
 
-// handleFactDetail serves one match-qualified fact by seq. Stale/unknown refs
-// render an explicit unavailable reason, never a misleading link target.
+// handleAggregationDetail serves one corpus/scope-qualified aggregation entity
+// from the persisted score corpus by its canonical aggregation id
+// (aggregation:<scope>:<subject>:<role>:<metric>:<ruleVersion>). The id is
+// stable, subject/scope/algorithm-version qualified, and carries the retained
+// child lineage refs; a stale id renders an explicit 404.
+func (s *Server) handleAggregationDetail(w http.ResponseWriter, matchID string, parts []string) {
+	if len(parts) != 3 {
+		writeErr(w, http.StatusBadRequest, "aggregation_id_required")
+		return
+	}
+	s.serveAggregation(w, parts[2])
+}
+
+// serveAggregation resolves an aggregation id against the persisted score
+// corpus (player and team aggregated metrics) and renders the entity with its
+// retained child lineage refs. Unknown/stale ids render an explicit 404.
+func (s *Server) serveAggregation(w http.ResponseWriter, id string) {
+	if !strings.HasPrefix(id, "aggregation:") {
+		writeErr(w, http.StatusBadRequest, "invalid_aggregation_id")
+		return
+	}
+	cs := s.corpusScoresFor()
+	if cs == nil {
+		writeErr(w, http.StatusNotFound, "scores_corpus_unavailable")
+		return
+	}
+	searchAggregated := func(subject, scope string, metrics map[string]scoring.AggregatedMetric) bool {
+		for mid, am := range metrics {
+			for _, ref := range am.Lineage {
+				if ref.Kind == "aggregation" && ref.ID == id {
+					children := []string{}
+					for _, child := range am.Lineage {
+						if child.Kind != "aggregation" {
+							children = append(children, child.Kind+":"+child.ID)
+						}
+					}
+					writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: map[string]interface{}{
+						"aggregation_id": id, "scope": scope, "subject": subject,
+						"metric_id": mid, "value": am.Value, "eligible_matches": am.EligibleMatches,
+						"rule_version": ref.RuleVersion, "child_refs": children,
+					}})
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, ps := range cs.Players {
+		if searchAggregated(ps.AccountID, "player_tournament", ps.AggregatedMetrics) {
+			return
+		}
+	}
+	for _, ts := range cs.Teams {
+		if searchAggregated(ts.TeamID, "team_tournament", ts.AggregatedMetrics) {
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "aggregation_not_found:"+id)
+}
+
+// handleFactDetail serves one match-qualified fact. The canonical fact id is
+// "fact:<seq>" and the route accepts either that stored id or the bare seq
+// ("/facts/1195"), so a rendered lineage link using the stored id resolves.
+// Stale/unknown refs render an explicit unavailable reason.
 func (s *Server) handleFactDetail(w http.ResponseWriter, matchID string, parts []string) {
 	if len(parts) != 3 {
 		writeErr(w, http.StatusBadRequest, "fact_seq_required")
 		return
 	}
-	seq, err := strconv.ParseInt(parts[2], 10, 64)
+	id := parts[2]
+	id = strings.TrimPrefix(id, "fact:")
+	seq, err := strconv.ParseInt(id, 10, 64)
 	if err != nil || seq < 1 {
-		writeErr(w, http.StatusBadRequest, "invalid_fact_seq")
+		writeErr(w, http.StatusBadRequest, "invalid_fact_seq:"+parts[2])
 		return
 	}
 	rf, err := s.Store.OpenArtifact(matchID, store.ArtifactFacts)
@@ -230,7 +313,7 @@ func (s *Server) handleFactDetail(w http.ResponseWriter, matchID string, parts [
 	for {
 		f, err := r.Next()
 		if err != nil {
-			writeErr(w, http.StatusNotFound, "fact_not_found:seq="+parts[2])
+			writeErr(w, http.StatusNotFound, "fact_not_found:seq="+id)
 			return
 		}
 		if f.Seq == seq {
@@ -288,14 +371,29 @@ func (s *Server) handlePhaseIntervalDetail(w http.ResponseWriter, matchID string
 	writeErr(w, http.StatusNotFound, "phase_interval_not_found:"+parts[2])
 }
 
-// handleMetricObservationDetail serves one match-qualified metric observation
-// (all rows for the metric id in this match, published and unavailable).
+// handleMetricObservationDetail serves match-qualified metric observations.
+// The canonical metric-observation id is "<metric>:<subject>" (subject =
+// account id, team id, or "match"). The route accepts:
+//
+//	/matches/{id}/metrics/{metric}                -> all observations (any subject)
+//	/matches/{id}/metrics/{metric}/{subject}      -> exactly the referenced observation
+//	/matches/{id}/metrics/{metric}:{subject}      -> exactly the referenced observation
+//
+// so a rendered lineage link carrying the subject-qualified stored id resolves
+// to precisely that observation, never every subject.
 func (s *Server) handleMetricObservationDetail(w http.ResponseWriter, matchID string, parts []string) {
-	if len(parts) != 3 {
+	if len(parts) < 3 {
 		writeErr(w, http.StatusBadRequest, "metric_id_required")
 		return
 	}
 	metricID := parts[2]
+	var subject string
+	if len(parts) >= 4 && parts[3] != "" {
+		subject = parts[3]
+	} else if i := strings.IndexByte(metricID, ':'); i >= 0 {
+		subject = metricID[i+1:]
+		metricID = metricID[:i]
+	}
 	var met metrics.Output
 	if err := s.Store.ReadJSON(matchID, store.ArtifactMetrics, &met); err != nil {
 		writeErr(w, http.StatusNotFound, "metrics_unavailable")
@@ -303,21 +401,51 @@ func (s *Server) handleMetricObservationDetail(w http.ResponseWriter, matchID st
 	}
 	rows := []metrics.Value{}
 	for _, v := range met.Values {
-		if v.MetricID == metricID {
-			rows = append(rows, v)
+		if v.MetricID != metricID {
+			continue
 		}
+		if subject != "" {
+			sid := v.AccountID
+			if sid == "" {
+				sid = v.TeamID
+			}
+			if sid == "" {
+				sid = "match"
+			}
+			if sid != subject {
+				continue
+			}
+		}
+		rows = append(rows, v)
 	}
 	for _, v := range met.Unavailable {
-		if v.MetricID == metricID {
-			rows = append(rows, v)
+		if v.MetricID != metricID {
+			continue
 		}
+		if subject != "" {
+			sid := v.AccountID
+			if sid == "" {
+				sid = v.TeamID
+			}
+			if sid == "" {
+				sid = "match"
+			}
+			if sid != subject {
+				continue
+			}
+		}
+		rows = append(rows, v)
 	}
 	if len(rows) == 0 {
+		if subject != "" {
+			writeErr(w, http.StatusNotFound, "metric_observation_not_found:"+metricID+":"+subject)
+			return
+		}
 		writeErr(w, http.StatusNotFound, "metric_observation_not_found:"+metricID)
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.MetricsSchema, Data: map[string]interface{}{
-		"match_id": matchID, "metric_id": metricID, "rows": rows,
+		"match_id": matchID, "metric_id": metricID, "subject": subject, "rows": rows,
 	}})
 }
 

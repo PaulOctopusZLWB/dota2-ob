@@ -571,9 +571,13 @@ type SubjectCoverage struct {
 // precise contract/gate reason — never a fabricated value or a borrowed
 // formula.
 type TeamScore struct {
-	TeamID               string                      `json:"team_id"`
-	ScoringVersion       string                      `json:"scoring_version"`
-	MetricPercentiles    map[string]PercentileResult `json:"metric_percentiles"`
+	TeamID            string                      `json:"team_id"`
+	ScoringVersion    string                      `json:"scoring_version"`
+	MetricPercentiles map[string]PercentileResult `json:"metric_percentiles"`
+	// AggregatedMetrics carries the team-tournament aggregated raw values with
+	// typed lineage (fact/episode/phase refs + the aggregation entity) for
+	// navigable drilldown, mirroring the player score.
+	AggregatedMetrics    map[string]AggregatedMetric `json:"aggregated_metrics,omitempty"`
 	OfficialAxes         map[string]AxisResult       `json:"official_axes"`
 	OfficialTotal        *TotalResult                `json:"official_total"`
 	ExperimentalAxes     map[string]AxisResult       `json:"experimental_axes"`
@@ -752,7 +756,7 @@ func (c *Corpus) buildTournaments() {
 		}
 		for mid, vals := range byMetric {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
-				pt.Metrics[mid] = agg
+				pt.Metrics[mid] = withAggregationRef(agg, "player_tournament", pt.AccountID, pt.NominalRole, c.Contract.SchemaVersion)
 			}
 		}
 		sort.Strings(pt.MatchIDs)
@@ -787,6 +791,7 @@ func (c *Corpus) buildTeams() {
 			}
 			for mid, vals := range byMetric {
 				if agg, ok := c.aggregateValues(mid, vals); ok {
+					agg = withAggregationRef(agg, "team_match", tid, "", c.teamRuleVersion())
 					tm.Metrics[mid] = agg
 					teamAgg[mid] = append(teamAgg[mid], MetricValue{
 						MetricID: mid, Value: agg.Value,
@@ -808,11 +813,38 @@ func (c *Corpus) buildTeams() {
 		tt.MatchIDs = mids
 		for mid, vals := range teamAgg {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
-				tt.Metrics[mid] = agg
+				tt.Metrics[mid] = withAggregationRef(agg, "team_tournament", tid, "", c.teamRuleVersion())
 			}
 		}
 		c.Teams[tid] = tt
 	}
+}
+
+// teamRuleVersion returns the team registry schema version, or "" when the
+// registry is absent (withAggregationRef falls back to the scoring version).
+func (c *Corpus) teamRuleVersion() string {
+	if c.TeamC == nil {
+		return ""
+	}
+	return c.TeamC.SchemaVersion
+}
+
+// withAggregationRef appends the canonical aggregation entity ref to an
+// aggregated metric's lineage. The id is scope/subject/role/metric/algorithm-
+// version qualified so each aggregation entity is stable and match/scope
+// distinct; child refs are retained underneath. When the team registry is
+// absent, ruleVersion falls back to the player scoring version.
+func withAggregationRef(agg AggregatedMetric, scope, subject, role, ruleVersion string) AggregatedMetric {
+	if ruleVersion == "" {
+		ruleVersion = "ti2026.scoring.v2"
+	}
+	agg.Lineage = append(agg.Lineage, EvidenceRef{
+		MatchID:     "", // aggregation is corpus/scope-qualified, not match-scoped
+		Kind:        "aggregation",
+		ID:          fmt.Sprintf("aggregation:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, ruleVersion),
+		RuleVersion: ruleVersion,
+	})
+	return agg
 }
 
 // buildCohorts derives the percentile populations: one value per subject
@@ -943,12 +975,18 @@ func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 	ts := &TeamScore{
 		TeamID: teamID, ScoringVersion: tc.SchemaVersion,
 		MetricPercentiles: map[string]PercentileResult{},
+		AggregatedMetrics: map[string]AggregatedMetric{},
 		OfficialAxes:      map[string]AxisResult{},
 		SubjectCoverage: SubjectCoverage{
 			EligibleMatches: tt.EligibleMatches, MatchIDs: tt.MatchIDs,
 			PublishedMetrics: len(tt.Metrics), CorpusMatches: c.MatchCount(),
 		},
 		ComparisonPopulation: tc.ComparisonPopulation,
+	}
+	// Carry the team-tournament aggregated raw values + typed lineage (incl.
+	// the aggregation entity) for drilldown.
+	for mid, am := range tt.Metrics {
+		ts.AggregatedMetrics[mid] = am
 	}
 	for mid, am := range tt.Metrics {
 		cohort := c.TeamCohort(mid)

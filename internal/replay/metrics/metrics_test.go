@@ -3,7 +3,6 @@ package metrics
 import (
 	"bytes"
 	"encoding/json"
-	"math"
 	"strings"
 	"testing"
 
@@ -131,12 +130,9 @@ func TestMetricClosureEqualsRegistry(t *testing.T) {
 // evaluator entry point (kept in sync with computeMetric/phaseDurationValue).
 var publishedIDs = map[string]bool{
 	"kill_count": true, "assist_count": true, "death_count": true,
-	"buyback_use_count": true, "last_hit_count": true, "xp_delta": true,
-	"net_worth_delta": true, "team_resource_share": true,
-	"objective_damage_total": true, "fight_participation_count": true,
-	"opportunity_duration_seconds": true, "hero_damage_total": true,
-	"hero_healing_total": true, "fight_damage_share": true,
-	"buyback_round_participation": true, "phase_duration_seconds": true,
+	"buyback_use_count":      true,
+	"objective_damage_total": true, "hero_damage_total": true,
+	"phase_duration_seconds": true,
 }
 
 // TestClosureResolutionFieldsPersisted proves the Resolution table carries the
@@ -146,7 +142,7 @@ var publishedIDs = map[string]bool{
 func TestClosureResolutionFieldsPersisted(t *testing.T) {
 	reg := testRegistry(t)
 	cl := testClosure(t)
-	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetClosure(cl)
 	calc.SetRoles(map[string]string{"a1": "1"})
@@ -182,25 +178,27 @@ func TestClosureResolutionFieldsPersisted(t *testing.T) {
 func TestClosureDispatchRepresentativeProbes(t *testing.T) {
 	reg := testRegistry(t)
 	cl := testClosure(t)
-	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetClosure(cl)
 	calc.SetRoles(map[string]string{"a1": "1"})
 	calc.SetFactsCoverage([]string{"combat_event"})
-	// Published V1: hero damage.
+	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
+	// Published V1: hero damage to an enemy real hero (a2 on T2).
 	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
-	// Published V2 (fight_damage_share) needs episodes: supply a fight.
-	eps := &episodes.Output{Episodes: []episodes.Episode{
-		{ID: "m1:fight:90:0", Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"a1"}, EvidenceIDs: []int64{1}},
-	}}
-	out := calc.Result(eps, nil)
+	out := calc.Result(nil, nil)
 	found := map[string]Value{}
 	for _, v := range out.Values {
 		found[v.MetricID] = v
 	}
-	for _, mid := range []string{"hero_damage_total", "fight_damage_share"} {
-		if _, ok := found[mid]; !ok {
-			t.Fatalf("%s not published", mid)
+	if _, ok := found["hero_damage_total"]; !ok {
+		t.Fatal("hero_damage_total not published")
+	}
+	// fight_damage_share is withdrawn: the accepted adapter lacks the
+	// phase/alive/98%-resolution gates, so it must be unavailable.
+	for _, v := range out.Unavailable {
+		if v.MetricID == "fight_damage_share" && v.UnavailableReason == "" {
+			t.Fatalf("fight_damage_share published without reason")
 		}
 	}
 	// V3 modelled metric must stay unavailable with a definition-specific gate.
@@ -212,44 +210,62 @@ func TestClosureDispatchRepresentativeProbes(t *testing.T) {
 }
 
 // TestTypedLineageChainPreserved proves a published metric carries the full
-// typed chain: fact -> episode/phase -> metric_observation -> algorithm, with
-// match-qualified identity on every ref.
+// typed chain: fact -> phase -> metric_observation -> algorithm, with
+// match-qualified identity on every ref (hero_damage_total: fact evidence;
+// phase_duration_seconds: phase evidence).
 func TestTypedLineageChainPreserved(t *testing.T) {
 	reg := testRegistry(t)
 	cl := testClosure(t)
-	calc := NewCalculator("8944521919", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc := NewCalculator("8944521919", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetClosure(cl)
 	calc.SetRoles(map[string]string{"a1": "1"})
 	calc.SetFactsCoverage([]string{"combat_event"})
+	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
 	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
-	eps := &episodes.Output{Episodes: []episodes.Episode{
-		{ID: "8944521919:fight:90:0", Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"a1"}, EvidenceIDs: []int64{7}},
-	}}
 	ph := &phase.Output{Intervals: []phase.Interval{
 		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{7}},
 	}}
-	out := calc.Result(eps, ph)
-	var fds *Value
+	out := calc.Result(nil, ph)
+	var hd *Value
 	for i := range out.Values {
-		if out.Values[i].MetricID == "fight_damage_share" && out.Values[i].AccountID == "a1" {
-			fds = &out.Values[i]
+		if out.Values[i].MetricID == "hero_damage_total" && out.Values[i].AccountID == "a1" {
+			hd = &out.Values[i]
 		}
 	}
-	if fds == nil {
-		t.Fatal("fight_damage_share not published")
+	if hd == nil {
+		t.Fatal("hero_damage_total not published")
 	}
 	seen := map[string]bool{}
-	for _, ref := range fds.Evidence {
+	for _, ref := range hd.Evidence {
 		if ref.MatchID != "8944521919" {
 			t.Fatalf("evidence ref missing match id: %+v", ref)
 		}
 		seen[ref.Kind] = true
 	}
-	for _, kind := range []string{EvidenceFact, EvidenceEpisode, EvidenceMetricObservation, EvidenceAlgorithm} {
+	for _, kind := range []string{EvidenceFact, EvidenceMetricObservation, EvidenceAlgorithm} {
 		if !seen[kind] {
-			t.Fatalf("fight_damage_share chain missing %s kind: %+v", kind, fds.Evidence)
+			t.Fatalf("hero_damage_total chain missing %s kind: %+v", kind, hd.Evidence)
 		}
+	}
+	// The match-level phase_duration_seconds value carries phase evidence.
+	var pd *Value
+	for i := range out.Values {
+		if out.Values[i].MetricID == "phase_duration_seconds" && out.Values[i].ReportLevel == "match" {
+			pd = &out.Values[i]
+		}
+	}
+	if pd == nil {
+		t.Fatal("phase_duration_seconds not published")
+	}
+	hasPhase := false
+	for _, ref := range pd.Evidence {
+		if ref.Kind == EvidencePhase {
+			hasPhase = true
+		}
+	}
+	if !hasPhase {
+		t.Fatalf("phase_duration_seconds chain missing phase ref: %+v", pd.Evidence)
 	}
 }
 
@@ -261,11 +277,12 @@ func TestTwoMatchesEqualEntityIDsStayDistinct(t *testing.T) {
 	reg := testRegistry(t)
 	cl := testClosure(t)
 	build := func(matchID string) *Output {
-		calc := NewCalculator(matchID, []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+		calc := NewCalculator(matchID, []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 		calc.SetRegistry(reg)
 		calc.SetClosure(cl)
 		calc.SetRoles(map[string]string{"a1": "1"})
 		calc.SetFactsCoverage([]string{"combat_event"})
+		calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
 		// Both matches use the same fact seq 7.
 		calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
 		return calc.Result(nil, nil)
@@ -303,7 +320,7 @@ func TestTwoMatchesEqualEntityIDsStayDistinct(t *testing.T) {
 
 func TestCalculatorAggregation(t *testing.T) {
 	reg := testRegistry(t)
-	calc := NewCalculator("1000000001", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T1"})
+	calc := NewCalculator("1000000001", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1", "a2": "1"})
 	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
@@ -370,7 +387,11 @@ func TestUnavailableNeverZero(t *testing.T) {
 	}
 }
 
-func TestFightDamageShare(t *testing.T) {
+// TestFightDamageShareSuppressed proves fight_damage_share is withdrawn: the
+// accepted adapter lacks the declared midgame/decisive phase filter,
+// active/alive opportunity, and >=98% actor/target resolution gate, so the
+// all-fight pooled share is not the defined quantity and must be unavailable.
+func TestFightDamageShareSuppressed(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "a2", "b1"}, map[string]string{"a1": "p1", "a2": "p2", "b1": "p3"}, map[string]string{"a1": "T1", "a2": "T1", "b1": "T2"})
 	calc.SetRegistry(reg)
@@ -387,28 +408,31 @@ func TestFightDamageShare(t *testing.T) {
 		},
 	}
 	out := calc.Result(eps, nil)
-	got := map[string]float64{}
 	for _, v := range out.Values {
 		if v.MetricID == "fight_damage_share" {
-			got[v.AccountID] = *v.Value
+			t.Fatalf("fight_damage_share must not publish without phase/alive/resolution gates")
 		}
 	}
-	// T1 deals 200 inside the fight; a1 contributes 100 → share 0.5.
-	if got["a1"] != 0.5 {
-		t.Fatalf("a1 fight_damage_share=%v want 0.5", got["a1"])
+	found := false
+	for _, u := range out.Unavailable {
+		if u.MetricID == "fight_damage_share" {
+			found = true
+			if u.Value != nil || u.IntValue != nil {
+				t.Fatalf("fight_damage_share unavailable row has a value")
+			}
+			if !strings.Contains(u.UnavailableReason, "fight_share_phase_alive_resolution_gates_not_in_accepted_adapter") {
+				t.Fatalf("fight_damage_share reason=%q", u.UnavailableReason)
+			}
+		}
 	}
-	if got["a2"] != 0.5 {
-		t.Fatalf("a2 fight_damage_share=%v want 0.5", got["a2"])
-	}
-	// b1's own team damage inside fight is 100; b1 contributed 100 → 1.0.
-	if got["b1"] != 1.0 {
-		t.Fatalf("b1 fight_damage_share=%v want 1.0", got["b1"])
+	if !found {
+		t.Fatal("fight_damage_share missing from unavailable rows")
 	}
 }
 
 func TestPhaseDuration(t *testing.T) {
 	reg := testRegistry(t)
-	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1"})
 	ph := &phase.Output{Intervals: []phase.Interval{
@@ -559,15 +583,14 @@ func TestClassifyObjectiveTargetTaxonomy(t *testing.T) {
 // same second contribute one eligible second, never more.
 func TestOpportunityDurationCountsSecondsNotSamples(t *testing.T) {
 	reg := testRegistry(t)
-	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1"})
 	pos := func(sec float64, seq int64) *facts.Fact {
 		x, y := 1.0, 2.0
 		return &facts.Fact{Family: facts.FamilyHeroState, GameSecond: sec, Seq: seq, SourceSeq: seq, Payload: mustJSON(&facts.HeroStateSample{AccountID: "a1", PosX: &x, PosY: &y})}
 	}
-	// Two samples at 0.0, one at 0.5, one at 1.0 → only seconds 0 and 1.
-	// The sample at the exclusive phase end is outside the eligible window.
+	// Two samples at 0.0, one at 0.5, one at 1.0, one at 2.0.
 	calc.Feed(pos(0.0, 1))
 	calc.Feed(pos(0.4, 2))
 	calc.Feed(pos(0.6, 3))
@@ -575,44 +598,31 @@ func TestOpportunityDurationCountsSecondsNotSamples(t *testing.T) {
 	calc.Feed(pos(2.0, 5))
 	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 2}}}
 	out := calc.Result(nil, ph)
-	var v *Value
-	for i := range out.Values {
-		if out.Values[i].MetricID == "opportunity_duration_seconds" && out.Values[i].AccountID == "a1" {
-			v = &out.Values[i]
+	// opportunity_duration_seconds requires a configured opportunity-key
+	// field-quality mask (per official phase, per-reason exclusions) that the
+	// accepted adapter does not provide. Distinct position-sample seconds are
+	// NOT the registry quantity, so it must be unavailable, never a
+	// null-phase/zero-opportunity published row.
+	for _, v := range out.Values {
+		if v.MetricID == "opportunity_duration_seconds" {
+			t.Fatal("opportunity_duration_seconds must not publish without the field-quality mask")
 		}
 	}
-	if v == nil {
-		t.Fatal("opportunity_duration_seconds not published")
-	}
-	if *v.Value != 2 {
-		t.Fatalf("opportunity_duration_seconds=%v want 2 distinct eligible seconds", *v.Value)
-	}
-	if v.Denominator == nil || *v.Denominator != 2 {
-		t.Fatalf("opportunity_duration_seconds denominator=%v want 2", v.Denominator)
-	}
-	if *v.Value > *v.Denominator {
-		t.Fatalf("opportunity_duration_seconds value=%v exceeds denominator=%v", *v.Value, *v.Denominator)
-	}
-	if v.ExcludedCount != 1 {
-		t.Fatalf("opportunity_duration_seconds excluded=%d want 1 out-of-window bin", v.ExcludedCount)
-	}
-
-	// Position samples without a validated official-phase denominator fail
-	// closed instead of publishing sample-derived opportunity seconds.
-	noPhase := NewCalculator("m2", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
-	noPhase.SetRegistry(reg)
-	noPhase.SetRoles(map[string]string{"a1": "1"})
-	noPhase.Feed(pos(0.0, 6))
-	noPhaseOut := noPhase.Result(nil, nil)
-	for _, u := range noPhaseOut.Unavailable {
+	found := false
+	for _, u := range out.Unavailable {
 		if u.AccountID == "a1" && u.MetricID == "opportunity_duration_seconds" {
-			if u.UnavailableReason != "eligible_phase_denominator_missing" {
-				t.Fatalf("opportunity_duration_seconds unavailable reason=%q", u.UnavailableReason)
+			found = true
+			if u.Value != nil || u.IntValue != nil {
+				t.Fatal("opportunity_duration_seconds unavailable row has a value")
 			}
-			return
+			if !strings.Contains(u.UnavailableReason, "opportunity_key_field_quality_mask_not_in_accepted_adapter") {
+				t.Fatalf("opportunity_duration_seconds reason=%q", u.UnavailableReason)
+			}
 		}
 	}
-	t.Fatal("opportunity_duration_seconds did not fail closed without phase denominator")
+	if !found {
+		t.Fatal("opportunity_duration_seconds missing from unavailable rows")
+	}
 }
 
 // TestPublishedEvidenceLineageNonEmpty proves every published value carries a
@@ -668,49 +678,61 @@ func TestResolutionTableComplete(t *testing.T) {
 	}
 }
 
-func TestRateMetricsDenominatorReconciliation(t *testing.T) {
+func TestEconomyProxiesFailClosed(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
 	calc.SetRegistry(reg)
 	calc.SetRoles(map[string]string{"a1": "1", "b1": "1"})
-	dmg := func(actor, target string, val int64, sec float64) *facts.Fact {
-		return &facts.Fact{Family: facts.FamilyCombat, GameSecond: sec, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: actor, TargetAccount: target, Value: &val})}
-	}
-	calc.Feed(dmg("a1", "b1", 100, 105))
-	calc.Feed(dmg("a1", "b1", 100, 108))
-	calc.Feed(dmg("b1", "a1", 50, 106))
-	eps := &episodes.Output{Episodes: []episodes.Episode{
-		{Kind: episodes.KindFight, StartGameSecond: 100, EndGameSecond: 120, Participants: []string{"a1", "b1"}, EvidenceIDs: []int64{101, 102}},
+	// These facts are deliberately insufficient for the frozen definitions:
+	// XP is an award (not state endpoints), net worth/last hits are isolated
+	// counters (not gap/reset-reconciled segments), and the team frames are not
+	// synchronized complete five-player frames.
+	calc.Feed(&facts.Fact{Family: facts.FamilyEconomy, GameSecond: 100, Payload: mustJSON(&facts.EconomySample{AccountID: "a1", Xp: int64p(34)})})
+	nw, lh := uint32(1000), uint32(42)
+	calc.Feed(&facts.Fact{Family: facts.FamilyEconomy, GameSecond: 101, Payload: mustJSON(&facts.EconomySample{AccountID: "a1", Networth: &nw, LastHits: &lh})})
+	ph := &phase.Output{Intervals: []phase.Interval{
+		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200},
 	}}
-	out := calc.Result(eps, nil)
-	byAcct := map[string]map[string]Value{}
-	for _, v := range out.Values {
-		if byAcct[v.AccountID] == nil {
-			byAcct[v.AccountID] = map[string]Value{}
+	out := calc.Result(nil, ph)
+	reasons := map[string]string{
+		"xp_delta":            "experience_state_endpoint_segment_gap_gates_not_in_accepted_adapter",
+		"last_hit_count":      "last_hit_counter_reset_gap_reconciliation_not_in_accepted_adapter",
+		"net_worth_delta":     "networth_endpoint_segment_gap_reset_gates_not_in_accepted_adapter",
+		"team_resource_share": "complete_synchronized_team_resource_frames_not_in_accepted_adapter",
+	}
+	seen := map[string]bool{}
+	for _, u := range out.Unavailable {
+		want, ok := reasons[u.MetricID]
+		if !ok || u.AccountID != "a1" {
+			continue
 		}
-		byAcct[v.AccountID][v.MetricID] = v
+		seen[u.MetricID] = true
+		if u.Value != nil || u.IntValue != nil || u.UnavailableReason != want {
+			t.Fatalf("%s did not fail closed exactly: %+v", u.MetricID, u)
+		}
 	}
-	// a1: 200 damage in fight, T1 team total 200 → share 1.0 with
-	// numerator=200 denominator=200.
-	share := byAcct["a1"]["fight_damage_share"]
-	if share.Numerator == nil || share.Denominator == nil {
-		t.Fatalf("fight_damage_share missing numerator/denominator: %+v", share)
+	for mid := range reasons {
+		if !seen[mid] {
+			t.Fatalf("%s missing unavailable row", mid)
+		}
 	}
-	if *share.Denominator <= 0 || *share.Numerator > *share.Denominator {
-		t.Fatalf("fight_damage_share numerator exceeds denominator: %+v", share)
+	// fight_damage_share is withdrawn (no phase/alive/resolution gates).
+	for _, u := range out.Unavailable {
+		if u.MetricID == "fight_damage_share" && u.Value != nil {
+			t.Fatalf("fight_damage_share published with value: %+v", u)
+		}
 	}
-	if math.Abs(*share.Value-(*share.Numerator / *share.Denominator)) > 1e-9 {
-		t.Fatalf("share %f != numerator/denominator %f", *share.Value, *share.Numerator / *share.Denominator)
-	}
-	// An account with no fight participation must NOT get a fabricated 0.
-	if v, ok := byAcct["a1"]["lane_pressure_damage_per_contact"]; ok {
-		t.Fatalf("lane_pressure_damage_per_contact published without geometry inputs: %+v", v)
+	// An account with no geometry inputs must NOT get a fabricated 0.
+	for _, v := range out.Values {
+		if _, bad := reasons[v.MetricID]; bad {
+			t.Fatalf("proxy metric published: %+v", v)
+		}
 	}
 }
 
 // TestAdditionalV1Metrics proves raw heal ticks and smoke modifier additions do
-// not publish the registry's opportunity-normalized cast/ratio metrics, while
-// buyback round participation still publishes from accepted facts.
+// not publish the registry's opportunity-normalized cast/ratio metrics or the
+// round-scoped buyback outcome vector from a fixed-window action proxy.
 func TestAdditionalV1Metrics(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "b1"}, map[string]string{"a1": "p1", "b1": "p2"}, map[string]string{"a1": "T1", "b1": "T2"})
@@ -758,9 +780,11 @@ func TestAdditionalV1Metrics(t *testing.T) {
 			t.Fatalf("smoke_activation_participation unavailable for %s=%+v", acct, u)
 		}
 	}
-	bb := got["a1"]["buyback_round_participation"]
-	if bb.Value == nil || *bb.Value != 1.0 {
-		t.Fatalf("buyback_round_participation a1=%+v want 1.0 (1/1 participated)", bb)
+	if v, ok := got["a1"]["buyback_round_participation"]; ok {
+		t.Fatalf("fixed-window action proxy published as buyback outcome vector: %+v", v)
+	}
+	if u := unavailable["a1"]["buyback_round_participation"]; u.UnavailableReason != "buyback_round_identity_position_outcome_vector_gates_not_in_accepted_adapter" {
+		t.Fatalf("buyback_round_participation unavailable=%+v", u)
 	}
 }
 

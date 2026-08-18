@@ -75,21 +75,40 @@ function safeUrl(v) {
 }
 
 // lineageLink renders one typed, match-qualified lineage ref as a deep link to
-// the referenced evidence entity. Kinds: fact -> /matches/{id}/facts/{seq},
-// episode -> /matches/{id}/episodes/{id}, phase -> /matches/{id}/phases/{ref},
-// metric_observation -> /matches/{id}/metrics/{metric}, algorithm ->
-// /matches/{id}/algorithms/{evaluator}. A ref without a match id renders as an
-// explicit unavailable marker instead of a misleading link.
+// the referenced evidence entity using the canonical ID/route contract.
+//   - fact -> /matches/{m}/facts/{seq}            (stored id "fact:<seq>")
+//   - episode -> /matches/{m}/episodes/{id}
+//   - phase -> /matches/{m}/phases/{interval@S-E}
+//   - metric_observation -> /matches/{m}/metrics/{metric}/{subject}
+//   - algorithm -> /matches/{m}/algorithms/{evaluator}
+//   - aggregation -> /aggregations/{id} (corpus-scoped, no match id needed)
+//
+// A ref without a match id (aggregation) still renders a navigable link; a
+// malformed id renders an explicit unavailable marker instead of a misleading
+// link.
 function lineageLink(ref) {
   if (!ref || !ref.kind) return "-";
   const label = `${ref.kind}:${ref.id}`;
-  if (!ref.match_id) return `<span class="hint" title="缺少 match_id，无法定位证据">不可用:${esc(label)}</span>`;
-  let href = `match.html?id=${encodeURIComponent(ref.match_id)}`;
-  let kind = String(ref.kind);
-  if (kind === "fact" || kind === "episode" || kind === "phase" || kind === "metric_observation" || kind === "algorithm") {
-    href += `&evidence=${encodeURIComponent(kind)}:${encodeURIComponent(ref.id)}`;
+  let href = null;
+  const kind = String(ref.kind);
+  if (kind === "fact") {
+    if (!ref.match_id) return `<span class="hint" title="缺少 match_id">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=fact:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "episode" || kind === "phase") {
+    if (!ref.match_id) return `<span class="hint" title="缺少 match_id">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=${encodeURIComponent(kind)}:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "metric_observation") {
+    if (!ref.match_id) return `<span class="hint" title="缺少 match_id">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=metric_observation:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "algorithm") {
+    if (!ref.match_id) return `<span class="hint" title="缺少 match_id">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=algorithm:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "aggregation") {
+    // Aggregation is corpus/scope-qualified; navigate to a dedicated view.
+    href = `aggregation.html?id=${encodeURIComponent(ref.id)}`;
   }
-  return `<a href="${href}" title="match ${esc(ref.match_id)} · ${esc(ref.rule_version || "")}">${esc(label)}</a>`;
+  if (!href) return `<span class="hint">不可用:${esc(label)}</span>`;
+  return `<a href="${href}" data-evidence-kind="${esc(kind)}" title="match ${esc(ref.match_id || "corpus")} · ${esc(ref.rule_version || "")}">${esc(label)}</a>`;
 }
 
 const AXES = ["laning","resources","tempo","map","vision","fight","objectives","endgame"];
@@ -209,6 +228,25 @@ function metricDrilldown(ps) {
   return rows;
 }
 
+// aggregationDrilldown renders the player-tournament aggregation entities with
+// their canonical aggregation links and retained child lineage refs. It
+// renders even when no axis publishes, so the aggregation entity is always
+// navigable.
+function aggregationDrilldown(ps) {
+  const agg = ps.aggregated_metrics || {};
+  const mids = Object.keys(agg).sort();
+  if (!mids.length) return `<p class="hint">无聚合指标</p>`;
+  let rows = "";
+  for (const mid of mids) {
+    const am = agg[mid];
+    const aggRefs = (am.lineage || []).filter(r => r.kind === "aggregation");
+    const childCount = (am.lineage || []).filter(r => r.kind !== "aggregation").length;
+    const links = aggRefs.map(r => lineageLink(r)).join(" ") || `<span class="hint">无聚合引用</span>`;
+    rows += `<tr><td>${esc(mid)}</td><td class="num">${fmt(am.value)}</td><td class="num">${esc(am.eligible_matches)}</td><td class="hint">${esc(childCount)} 个底层引用</td><td>${links}</td></tr>`;
+  }
+  return `<table><thead><tr><th>指标</th><th>聚合值</th><th>合格比赛</th><th>子引用数</th><th>聚合实体链接</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 // totalCard renders the official/experimental total with gates.
 function totalCard(total) {
   if (!total) return `<p class="hint">无总分记录</p>`;
@@ -278,6 +316,8 @@ async function load() {
           <table><thead><tr><th>轴</th><th>值</th><th>状态</th><th>说明</th></tr></thead><tbody>${axisRows(ps, "experimental")}</tbody></table>
           <h4 style="margin-top:12px">指标分解（原始值 · 同角色百分位 · 权重 · 覆盖 · 证据链）</h4>
           <table><thead><tr><th>指标</th><th>原始值</th><th>百分位</th><th>权重</th><th>发布</th><th>证据链</th></tr></thead><tbody>${metricDrilldown(ps)}</tbody></table>
+          <h4 style="margin-top:12px">聚合实体（选手锦标赛聚合，含底层证据链）</h4>
+          ${aggregationDrilldown(ps)}
         </div>`);
     } else {
       c.insertAdjacentHTML("beforeend", `<div class="panel"><p class="hint">该账户尚无评分快照（语料中无已发布比赛）。</p></div>`);

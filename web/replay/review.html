@@ -187,7 +187,9 @@ async function load() {
       c.insertAdjacentHTML("beforeend", `
         <div class="panel">
           <h3 style="margin-top:0">比赛 <a href="match.html?id=${esc(rv.match_id)}">${esc(rv.match_id)}</a>
-            <span class="badge ${rv.review_status === 'reviewed' ? 'ok' : rv.review_status === 'in_progress' ? 'warn' : ''}">${esc(rv.review_status || "pending")}</span></h3>
+            <span class="badge ${rv.review_status === 'reviewed' ? 'ok' : rv.review_status === 'in_progress' ? 'warn' : ''}">${esc(rv.review_status || "pending")}</span>
+            <span class="badge">修订 ${esc((rv.review_revision || "").slice(0, 12))}</span></h3>
+          <input type="hidden" id="phase-rev-${esc(rv.match_id)}" value="${esc(rv.review_revision || "")}">
 
           <div class="form-grid">
             <div>
@@ -287,6 +289,7 @@ function buildPhasePayload(matchId) {
     operation: op,
     event_ref: ref,
     shape_version: "phase-op.v2",
+    expected_revision: document.getElementById("phase-rev-" + matchId).value,
   };
   if (evidenceRaw && evidenceRaw.trim()) {
     payload.evidence_ids = evidenceRaw.split(",").map(s => s.trim()).filter(Boolean);

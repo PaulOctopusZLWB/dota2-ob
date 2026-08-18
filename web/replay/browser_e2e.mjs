@@ -295,6 +295,37 @@ async function main() {
       const audit = await api(page, `${restartedBase}/api/replay/v1/reviews/audit`);
       assert.ok(audit.data.entries.length >= ops.length, "restart audit shrank");
 
+      // ============ Optimistic-concurrency revision conflict (same boundary) ============
+      // The current revision is served with the effective stream; a stale
+      // same-boundary relabel (interval still exists) must fail 409 and change
+      // no bytes/counts, while a fresh-revision mutation succeeds.
+      const curRev = restarted.review_revision;
+      assert.ok(curRev && curRev.startsWith("rev-"), "review_revision not served after restart");
+      const conflict = await post(page, `${restartedBase}/api/replay/v1/reviews/phase-corrections`, {
+        match_id: MATCH, author: "stale", reason: "stale same-boundary", operation: "relabel",
+        event_ref: "interval@2454-2633", expected_revision: "rev-0000000000000000",
+        effective_value: { start_game_second: 2454, end_game_second: 2633, global_phase: "decisive" },
+      }, TOKEN);
+      assert.strictEqual(conflict.status, 409, "stale revision same-boundary must be 409");
+      const qConflict = await api(page, `${restartedBase}/api/replay/v1/reviews/queue`);
+      const rvConflict = qConflict.data.reviews.find(r => r.match_id === MATCH);
+      assert.strictEqual(rvConflict.phase_corrections.length, ops.length, "revision conflict advanced corrections");
+      assert.strictEqual(rvConflict.review_revision, curRev, "revision changed on conflict");
+      const conflictAudit = (await api(page, `${restartedBase}/api/replay/v1/reviews/audit`)).data.entries.length;
+      assert.strictEqual(conflictAudit, ops.length, "revision conflict advanced audit");
+      // A fresh-revision same-boundary relabel succeeds and advances the
+      // revision.
+      const okMut = await post(page, `${restartedBase}/api/replay/v1/reviews/phase-corrections`, {
+        match_id: MATCH, author: "fresh", reason: "fresh same-boundary", operation: "relabel",
+        event_ref: "interval@2454-2633", expected_revision: curRev,
+        effective_value: { start_game_second: 2454, end_game_second: 2633, global_phase: "midgame" },
+      }, TOKEN);
+      assert.strictEqual(okMut.status, 200, "fresh-revision mutation failed");
+      const qAfterFresh = await api(page, `${restartedBase}/api/replay/v1/reviews/queue`);
+      const rvAfterFresh = qAfterFresh.data.reviews.find(r => r.match_id === MATCH);
+      assert.strictEqual(rvAfterFresh.phase_corrections.length, ops.length + 1, "fresh mutation did not append correction");
+      assert.notStrictEqual(rvAfterFresh.review_revision, curRev, "revision did not advance on success");
+
       // ============ Failed-state atomicity via rendered/API mutations ============
       const reviewBytesBefore = await page.evaluate(async (u) => (await fetch(u)).status, `${restartedBase}/api/replay/v1/reviews/queue`);
       const q0 = await api(page, `${restartedBase}/api/replay/v1/reviews/queue`);
@@ -304,12 +335,14 @@ async function main() {
       // Stale closed ref -> 409.
       const stale = await post(page, `${restartedBase}/api/replay/v1/reviews/phase-corrections`, {
         match_id: MATCH, author: "paul", reason: "stale", operation: "relabel",
+        expected_revision: rvAfterFresh.review_revision,
         event_ref: "interval@100-999", effective_value: { start_game_second: 100, end_game_second: 700, global_phase: "midgame" },
       }, TOKEN);
       assert.strictEqual(stale.status, 409, "stale ref must be 409");
       // Illegal reset phase -> 400.
       const illegal = await post(page, `${restartedBase}/api/replay/v1/reviews/phase-corrections`, {
         match_id: MATCH, author: "paul", reason: "illegal", operation: "relabel",
+        expected_revision: rvAfterFresh.review_revision,
         event_ref: "interval@100-700", effective_value: { start_game_second: 100, end_game_second: 700, global_phase: "reset" },
       }, TOKEN);
       assert.strictEqual(illegal.status, 400, "illegal reset must be 400");
@@ -338,50 +371,65 @@ async function main() {
         match_id: player.match_id, account_id: acct, nominal_role: newRole, author: "browser", reason: "e2e override",
       }, TOKEN);
       assert.strictEqual(ovr.status, 200, "role override failed");
-      const afterOvr = await api(page, `${restartedBase}/api/replay/v1/players/${acct}`);
-      assert.strictEqual(afterOvr.data.score.nominal_role, newRole, "player score role after override");
-      const playerRow = afterOvr.data.matches.find(m => m.match_id === player.match_id);
-      assert.ok(playerRow && playerRow.nominal_role === newRole, "player match row role after override");
-      const matchRep = await api(page, `${restartedBase}/api/replay/v1/matches/${player.match_id}`);
-      const part = matchRep.data.participants.find(p => p.account_id === acct);
-      assert.ok(part && part.nominal_role === newRole, "match report role after override");
-      assert.ok(part && part.source_nominal_role, "match report source role preserved");
 
-      // ============ Match-qualified lineage deep links ============
-      const repL = await api(page, `${restartedBase}/api/replay/v1/matches/${MATCH}`);
-      const values = (repL.data.metrics && repL.data.metrics.values) || [];
-      let factRef, epRef, phRef, metRef, algRef;
-      for (const v of values) {
-        for (const e of (v.evidence || [])) {
-          if (!factRef && e.kind === "fact") factRef = e;
-          if (!epRef && e.kind === "episode") epRef = e;
-          if (!phRef && e.kind === "phase") phRef = e;
-          if (!metRef && e.kind === "metric_observation") metRef = e;
-          if (!algRef && e.kind === "algorithm") algRef = e;
-        }
+      // Verify every view agrees on the effective role immediately.
+      const assertRoleAgreement = async (base) => {
+        const afterOvr = await api(page, `${base}/api/replay/v1/players/${acct}`);
+        assert.strictEqual(afterOvr.data.score.nominal_role, newRole, "player score role after override");
+        const playerRow = afterOvr.data.matches.find(m => m.match_id === player.match_id);
+        assert.ok(playerRow && playerRow.nominal_role === newRole, "player match row role after override");
+        assert.ok(playerRow && playerRow.source_nominal_role, "player match row source role preserved");
+        const matchRep = await api(page, `${base}/api/replay/v1/matches/${player.match_id}`);
+        const part = matchRep.data.participants.find(p => p.account_id === acct);
+        assert.ok(part && part.nominal_role === newRole, "match report role after override");
+        assert.ok(part && part.source_nominal_role, "match report source role preserved");
+        const matchScore = await api(page, `${base}/api/replay/v1/matches/${player.match_id}/scores`);
+        const row = (matchScore.data.players || []).find(p => p.account_id === acct);
+        assert.ok(row && row.nominal_role === newRole, "match-score row role after override");
+        const corpus = await api(page, `${base}/api/replay/v1/scores/corpus`);
+        const pt = (corpus.data.players || []).find(p => p.account_id === acct);
+        assert.ok(pt && pt.nominal_role === newRole, "corpus/tournament player role after override");
+      };
+      await assertRoleAgreement(restartedBase);
+
+      // Restart the server after the override and re-verify full agreement.
+      await stopServer(server);
+      server = await startServer(DATA);
+      const restartedBase2 = server.base;
+      await setToken(page, restartedBase2);
+      await assertRoleAgreement(restartedBase2);
+
+      // ============ Click actual rendered lineage links on the match page ============
+      // Follow every canonical evidence kind from the actual rendered anchor;
+      // do not reconstruct, strip, or split any stored id in test code.
+      for (const kind of ["fact", "episode", "phase", "metric_observation", "algorithm"]) {
+        await page.goto(`${restartedBase2}/match.html?id=${MATCH}`, { waitUntil: "domcontentloaded" });
+        const selector = `a[data-evidence-kind='${kind}']`;
+        await page.waitForSelector(selector, { timeout: 15000 });
+        await page.click(selector);
+        await page.waitForSelector(`[data-evidence-panel='${kind}']`, { timeout: 15000 });
+        const panelText = await page.$eval(`[data-evidence-panel='${kind}']`, el => el.innerText);
+        assert.ok(panelText.includes("证据定位") && !panelText.includes("不可用:"), `${kind} rendered link did not resolve`);
       }
-      assert.ok(factRef && epRef && phRef && metRef && algRef, "missing lineage refs in " + MATCH);
-      const factSeq = String(factRef.source_fact_seq || factRef.id.replace("fact:", ""));
-      for (const path of [
-        `/matches/${MATCH}/facts/${factSeq}`,
-        `/matches/${MATCH}/episodes/${encodeURIComponent(epRef.id)}`,
-        `/matches/${MATCH}/phases/interval%40${phRef.id.replace("interval@", "")}`,
-        `/matches/${MATCH}/metrics/${metRef.id.split(":")[0]}`,
-        `/matches/${MATCH}/algorithms/${encodeURIComponent(algRef.id)}`,
-      ]) {
-        const st = await page.evaluate(async (u) => (await fetch(u)).status, `${restartedBase}/api/replay/v1${path}`);
-        assert.strictEqual(st, 200, `lineage route ${path} not 200`);
-      }
-      // Stale fact deep link shows explicit unavailable (404).
+
+      // Aggregation is rendered on the player drilldown; click that anchor too.
+      await page.goto(`${restartedBase2}/player.html?id=${acct}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector("a[data-evidence-kind='aggregation']", { timeout: 15000 });
+      await page.click("a[data-evidence-kind='aggregation']");
+      await page.waitForSelector(".panel", { timeout: 15000 });
+      const aggText = await page.evaluate(() => document.body.innerText);
+      assert.ok(aggText.includes("聚合实体") || aggText.includes("aggregation"), "aggregation page missing content");
+
+      // Stale fact deep link shows explicit unavailable (404) via the UI.
       const staleFact = await page.evaluate(async (u) => {
         const r = await fetch(u); return { status: r.status, body: await r.json() };
-      }, `${restartedBase}/api/replay/v1/matches/${MATCH}/facts/999999999`);
+      }, `${restartedBase2}/api/replay/v1/matches/${MATCH}/facts/999999999`);
       assert.strictEqual(staleFact.status, 404, "stale fact not 404");
       assert.ok(staleFact.body.error && staleFact.body.error.includes("fact_not_found"), "stale fact missing reason");
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, team layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + 409/400/403 atomicity, role override consistency, lineage deep links; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + stale 404; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

@@ -435,7 +435,11 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	// relabel operation changes its label to midgame via the typed op payload
 	// (boundaries kept contiguous). The single-interval stream has no internal
 	// shared boundary, so relabel is the correct narrow persistence probe.
-	body := `{"match_id":"m1","author":"paul","reason":"relabeled on evidence","operation":"relabel","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}}`
+	initial, err := rv.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"match_id":"m1","author":"paul","reason":"relabeled on evidence","operation":"relabel","event_ref":"interval@0-100","expected_revision":%q,"effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}}`, initial.ReviewRevision)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)
@@ -495,7 +499,11 @@ func TestReviewMutationRejectsTamperedMachineValue(t *testing.T) {
 
 	// The invalid-state test: a bogus phase label is rejected by validation
 	// (400), not persisted as invalid analytical state.
-	body := `{"match_id":"m1","author":"paul","reason":"x","operation":"relabel","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"bogus"}}`
+	initial, err := rv.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"match_id":"m1","author":"paul","reason":"x","operation":"relabel","event_ref":"interval@0-100","expected_revision":%q,"effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"bogus"}}`, initial.ReviewRevision)
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)
@@ -654,12 +662,18 @@ func TestPhaseCorrectionCumulativeAPIAndRestart(t *testing.T) {
 	}
 
 	previous := machine
+	initialReview, err := rv.Load(matchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRevision := initialReview.ReviewRevision
 	var final review.Review
 	for i := range operations {
 		operations[i].MatchID = matchID
 		operations[i].Author = "paul"
 		operations[i].Reason = fmt.Sprintf("cumulative step %d", i+1)
 		operations[i].EvidenceIDs = []string{fmt.Sprintf("phase:%d", i+1)}
+		operations[i].ExpectedRevision = currentRevision
 		status, got, apiErr := postPhaseOperation(t, ts.URL, operations[i])
 		if status != http.StatusOK {
 			t.Fatalf("step %d %s status=%d error=%q", i+1, operations[i].Op, status, apiErr)
@@ -696,6 +710,7 @@ func TestPhaseCorrectionCumulativeAPIAndRestart(t *testing.T) {
 			t.Fatalf("step %d audit entries=%d", i+1, len(audit.Entries))
 		}
 		previous = effective
+		currentRevision = got.ReviewRevision
 		final = got
 	}
 
@@ -711,14 +726,14 @@ func TestPhaseCorrectionCumulativeAPIAndRestart(t *testing.T) {
 	}
 	stale := review.PhaseOpReq{
 		MatchID: matchID, Author: "paul", Reason: "stale closed ref", Op: review.OpRelabel,
-		EventRef: "interval@100-999", Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "midgame"},
+		EventRef: "interval@100-999", ExpectedRevision: currentRevision, Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "midgame"},
 	}
 	if status, _, apiErr := postPhaseOperation(t, ts.URL, stale); status != http.StatusConflict {
 		t.Fatalf("stale status=%d error=%q want 409", status, apiErr)
 	}
 	invalid := review.PhaseOpReq{
 		MatchID: matchID, Author: "paul", Reason: "illegal phase", Op: review.OpRelabel,
-		EventRef: "interval@100-700", Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "reset"},
+		EventRef: "interval@100-700", ExpectedRevision: currentRevision, Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "reset"},
 	}
 	if status, _, apiErr := postPhaseOperation(t, ts.URL, invalid); status != http.StatusBadRequest {
 		t.Fatalf("invalid status=%d error=%q want 400", status, apiErr)
@@ -979,6 +994,43 @@ func TestNavigableTypedLineageRoutes(t *testing.T) {
 		EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
 		Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}},
 	}}})
+	aggID := "aggregation:player_tournament:1000:1:hero_damage_total:ti2026.scoring.v2"
+	st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{
+		SchemaVersion: "replay.score.v2", RuleVersion: "ti2026.scoring.v2",
+		Players: []*scoring.PlayerScore{{AccountID: "1000", NominalRole: "1", AggregatedMetrics: map[string]scoring.AggregatedMetric{
+			"hero_damage_total": {MetricID: "hero_damage_total", Value: 500, EligibleMatches: 1, Lineage: []scoring.EvidenceRef{
+				{MatchID: "m1", Kind: "fact", ID: "fact:7"},
+				{Kind: "aggregation", ID: aggID, RuleVersion: "ti2026.scoring.v2"},
+			}},
+		}}}, Matches: map[string]*scoring.MatchScores{},
+	})
+
+	// Canonical stored IDs pass through their routes unchanged. This matrix is
+	// the end-to-end ID/route contract for every evidence kind.
+	canonicalRoutes := []struct {
+		kind string
+		id   string
+		path string
+	}{
+		{"fact", "fact:7", "/matches/m1/facts/fact:7"},
+		{"episode", "m1:fight:90:0", "/matches/m1/episodes/m1:fight:90:0"},
+		{"phase", "interval@0-100", "/matches/m1/phases/interval@0-100"},
+		{"metric_observation", "hero_damage_total:1000", "/matches/m1/metrics/hero_damage_total:1000"},
+		{"algorithm", "ev.hero_damage_total.v1.atomic", "/matches/m1/algorithms/ev.hero_damage_total.v1.atomic"},
+		{"aggregation", aggID, "/aggregations/" + aggID},
+	}
+	for _, tc := range canonicalRoutes {
+		t.Run("canonical_"+tc.kind, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + Version + tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s id %q route status=%d", tc.kind, tc.id, resp.StatusCode)
+			}
+		})
+	}
 
 	// Fact route resolves.
 	var factEnv struct {
@@ -1013,7 +1065,7 @@ func TestNavigableTypedLineageRoutes(t *testing.T) {
 			MetricID string `json:"metric_id"`
 		} `json:"data"`
 	}
-	if code := getJSON(t, ts.URL+Version+"/matches/m1/metrics/hero_damage_total", &metEnv); code != 200 || metEnv.Data.MetricID != "hero_damage_total" {
+	if code := getJSON(t, ts.URL+Version+"/matches/m1/metrics/hero_damage_total:1000", &metEnv); code != 200 || metEnv.Data.MetricID != "hero_damage_total" {
 		t.Fatalf("metric observation route status=%d", code)
 	}
 	// Algorithm route resolves (closure evaluator).
@@ -1802,6 +1854,7 @@ func TestReviewQueueServesEffectiveStreamForUI(t *testing.T) {
 			Reviews []struct {
 				MatchID                 string            `json:"match_id"`
 				EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+				ReviewRevision          string            `json:"review_revision"`
 			} `json:"reviews"`
 		} `json:"data"`
 	}
@@ -1811,6 +1864,7 @@ func TestReviewQueueServesEffectiveStreamForUI(t *testing.T) {
 	var pre *struct {
 		MatchID                 string            `json:"match_id"`
 		EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+		ReviewRevision          string            `json:"review_revision"`
 	}
 	for i := range queue.Data.Reviews {
 		if queue.Data.Reviews[i].MatchID == matchID {
@@ -1823,12 +1877,15 @@ func TestReviewQueueServesEffectiveStreamForUI(t *testing.T) {
 	if len(pre.EffectivePhaseIntervals) != 0 {
 		t.Fatal("fresh match must have no effective overlay")
 	}
+	if pre.ReviewRevision == "" {
+		t.Fatal("fresh match missing review revision")
+	}
 
 	// Apply a split; the queue must then expose the effective stream with the
 	// newly created current refs (interval@0-100, interval@100-594).
 	if status, _, apiErr := postPhaseOperation(t, ts.URL, review.PhaseOpReq{
 		MatchID: matchID, Author: "paul", Reason: "split for UI",
-		Op: review.OpSplit, EventRef: "interval@0-594", SplitSecond: apiIntPtr(100),
+		Op: review.OpSplit, EventRef: "interval@0-594", SplitSecond: apiIntPtr(100), ExpectedRevision: pre.ReviewRevision,
 	}); status != http.StatusOK {
 		t.Fatalf("split status=%d error=%q", status, apiErr)
 	}
@@ -1838,6 +1895,7 @@ func TestReviewQueueServesEffectiveStreamForUI(t *testing.T) {
 	var post *struct {
 		MatchID                 string            `json:"match_id"`
 		EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+		ReviewRevision          string            `json:"review_revision"`
 	}
 	for i := range queue.Data.Reviews {
 		if queue.Data.Reviews[i].MatchID == matchID {
@@ -1868,4 +1926,119 @@ func findStartForRef(intervals []review.PhaseInterval, ref string) (review.Phase
 		}
 	}
 	return review.PhaseInterval{}, false
+}
+
+// TestPhaseRevisionConflictSameBoundary proves the API serves the current
+// review_revision, advances it on every success, and returns 409 atomically
+// for a stale same-boundary relabel/accept whose intervals still exist.
+func TestPhaseRevisionConflictSameBoundary(t *testing.T) {
+	st := testStore(t)
+	matchID := "8944521919"
+	addCumulativePhaseMatch(t, st, matchID)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Read the queue to obtain the current revision.
+	var queue struct {
+		Data struct {
+			Reviews []struct {
+				MatchID        string `json:"match_id"`
+				ReviewRevision string `json:"review_revision"`
+			} `json:"reviews"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/reviews/queue", &queue); code != 200 {
+		t.Fatalf("queue status %d", code)
+	}
+	var rev string
+	for _, q := range queue.Data.Reviews {
+		if q.MatchID == matchID {
+			rev = q.ReviewRevision
+		}
+	}
+	if rev == "" {
+		t.Fatal("queue did not serve review_revision")
+	}
+
+	// Reviewer A relabels the still-existing interval@2454-2633 (decisive)
+	// using the current revision.
+	opA := review.PhaseOpReq{
+		MatchID: matchID, Author: "reviewerA", Reason: "relabel A",
+		Op: review.OpRelabel, EventRef: "interval@2454-2633",
+		Effective:        &review.PhaseInterval{StartGameSecond: 2454, EndGameSecond: 2633, GlobalPhase: "midgame"},
+		ExpectedRevision: rev,
+	}
+	statusA, rvA, apiErr := postPhaseOperation(t, ts.URL, opA)
+	if statusA != http.StatusOK {
+		t.Fatalf("reviewer A status=%d error=%q", statusA, apiErr)
+	}
+	if len(rvA.PhaseCorrections) != 1 {
+		t.Fatalf("reviewer A corrections=%d", len(rvA.PhaseCorrections))
+	}
+	newRev := rvA.ReviewRevision
+	if newRev == "" || newRev == rev {
+		t.Fatal("revision did not advance")
+	}
+
+	// Reviewer B submits a stale form for the SAME still-existing boundary with
+	// the OLD revision -> 409, no bytes change.
+	opB := review.PhaseOpReq{
+		MatchID: matchID, Author: "reviewerB", Reason: "stale relabel B",
+		Op: review.OpRelabel, EventRef: "interval@2454-2633",
+		Effective:        &review.PhaseInterval{StartGameSecond: 2454, EndGameSecond: 2633, GlobalPhase: "decisive"},
+		ExpectedRevision: rev,
+	}
+	before, _ := os.ReadFile(rv.Path(matchID))
+	audBefore, _ := os.ReadFile(rv.AuditPath())
+	statusB, _, apiErrB := postPhaseOperation(t, ts.URL, opB)
+	if statusB != http.StatusConflict {
+		t.Fatalf("stale relabel status=%d error=%q want 409", statusB, apiErrB)
+	}
+	after, _ := os.ReadFile(rv.Path(matchID))
+	audAfter, _ := os.ReadFile(rv.AuditPath())
+	if !bytes.Equal(before, after) || !bytes.Equal(audBefore, audAfter) {
+		t.Fatal("stale revision changed review or audit bytes")
+	}
+
+	// Reviewer A accepts the same still-existing boundary with the NEW
+	// revision; accept advances the revision.
+	opAccept := review.PhaseOpReq{MatchID: matchID, Author: "reviewerA", Reason: "accept A", Op: review.OpAccept, EventRef: "interval@2454-2633", ExpectedRevision: newRev}
+	statusAcc, rvAcc, apiErrAcc := postPhaseOperation(t, ts.URL, opAccept)
+	if statusAcc != http.StatusOK {
+		t.Fatalf("accept status=%d error=%q", statusAcc, apiErrAcc)
+	}
+	if rvAcc.ReviewRevision == newRev {
+		t.Fatal("revision did not advance after accept")
+	}
+	if len(rvAcc.PhaseCorrections) != 2 {
+		t.Fatalf("corrections after accept=%d want 2", len(rvAcc.PhaseCorrections))
+	}
+
+	// A stale same-boundary accept (old revision) is rejected atomically.
+	before2, _ := os.ReadFile(rv.Path(matchID))
+	if status, _, apiErr2 := postPhaseOperation(t, ts.URL, review.PhaseOpReq{MatchID: matchID, Author: "reviewerB", Reason: "stale accept B", Op: review.OpAccept, EventRef: "interval@2454-2633", ExpectedRevision: newRev}); status != http.StatusConflict {
+		t.Fatalf("stale accept status=%d error=%q want 409", status, apiErr2)
+	}
+	after2, _ := os.ReadFile(rv.Path(matchID))
+	if !bytes.Equal(before2, after2) {
+		t.Fatal("stale accept changed persisted state")
+	}
+
+	// Restart reproduces the same revision.
+	restarted, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, err := restarted.Load(matchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.ReviewRevision != rvAcc.ReviewRevision {
+		t.Fatalf("restart revision=%s want %s", rr.ReviewRevision, rvAcc.ReviewRevision)
+	}
 }

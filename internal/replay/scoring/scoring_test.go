@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
@@ -287,11 +288,25 @@ func TestLineagePreservedThroughAggregation(t *testing.T) {
 		t.Fatal("tournament nil")
 	}
 	agg := pt.Metrics["fight_damage_share"]
-	if len(agg.Lineage) != 2 {
-		t.Fatalf("lineage len=%d want 2 (deduplicated across matches)", len(agg.Lineage))
+	// 2 episode refs + the canonical aggregation entity ref.
+	if len(agg.Lineage) != 3 {
+		t.Fatalf("lineage len=%d want 3 (2 episode refs + aggregation entity)", len(agg.Lineage))
 	}
 	if agg.Lineage[0].Kind != "episode" || agg.Lineage[0].MatchID == "" {
 		t.Fatalf("lineage ref malformed: %+v", agg.Lineage[0])
+	}
+	// The aggregation entity ref is stable, scope/subject/rule qualified.
+	hasAgg := false
+	for _, ref := range agg.Lineage {
+		if ref.Kind == "aggregation" {
+			hasAgg = true
+			if !strings.HasPrefix(ref.ID, "aggregation:player_tournament:a1:1:fight_damage_share:") {
+				t.Fatalf("aggregation id malformed: %+v", ref)
+			}
+		}
+	}
+	if !hasAgg {
+		t.Fatalf("aggregation entity ref missing from lineage: %+v", agg.Lineage)
 	}
 }
 
@@ -313,11 +328,15 @@ func TestAggregationDedupMatchQualified(t *testing.T) {
 		t.Fatal("tournament nil")
 	}
 	agg := pt.Metrics["hero_damage_total"]
-	if len(agg.Lineage) != 2 {
-		t.Fatalf("lineage len=%d want 2 (equal entity ids from different matches must stay distinct)", len(agg.Lineage))
+	// 2 fact refs + the canonical aggregation entity ref.
+	if len(agg.Lineage) != 3 {
+		t.Fatalf("lineage len=%d want 3 (2 fact refs + aggregation entity)", len(agg.Lineage))
 	}
 	seen := map[string]bool{}
 	for _, ref := range agg.Lineage {
+		if ref.Kind == "aggregation" {
+			continue // corpus-scoped aggregation entity, not match-qualified
+		}
 		if ref.MatchID == "" || ref.Kind == "" || ref.ID == "" {
 			t.Fatalf("lineage ref malformed: %+v", ref)
 		}

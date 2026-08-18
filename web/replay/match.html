@@ -81,6 +81,33 @@ function safeUrl(v) {
   return null;
 }
 
+// lineageLink renders one typed, match-qualified lineage ref as a deep link
+// using the canonical ID/route contract (fact, episode, phase,
+// metric_observation, algorithm, aggregation). Same contract as player.html.
+function lineageLink(ref) {
+  if (!ref || !ref.kind) return "-";
+  const label = `${ref.kind}:${ref.id}`;
+  let href = null;
+  const kind = String(ref.kind);
+  if (kind === "fact") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=fact:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "episode" || kind === "phase") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=${encodeURIComponent(kind)}:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "metric_observation") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=metric_observation:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "algorithm") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=algorithm:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "aggregation") {
+    href = `aggregation.html?id=${encodeURIComponent(ref.id)}`;
+  }
+  if (!href) return `<span class="hint">不可用:${esc(label)}</span>`;
+  return `<a href="${href}" data-evidence-kind="${esc(kind)}" title="match ${esc(ref.match_id || "corpus")} · ${esc(ref.rule_version || "")}">${esc(label)}</a>`;
+}
+
 async function load() {
   const id = new URLSearchParams(location.search).get("id");
   document.getElementById("match-id").textContent = id || "?";
@@ -155,7 +182,10 @@ function render(r) {
       const label = PHRASE[iv.global_phase] || iv.global_phase;
       return `<div class="tl-seg ${cls}" style="width:${esc(w)}%" title="${esc(iv.start_game_second)}s–${esc(iv.end_game_second)}s ${esc(label)}">${w > 8 ? esc(label) : ""}</div>`;
     }).join("");
-    const phaseHint = r.phases.intervals.map(iv => `${esc(PHRASE[iv.global_phase] || iv.global_phase)}:${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s(r${esc(iv.round_index)})`).join(" · ");
+    const phaseHint = r.phases.intervals.map(iv => {
+      const ref = {kind:"phase", id:`interval@${iv.start_game_second}-${iv.end_game_second}`, match_id:r.match_id, rule_version:iv.rule_version};
+      return `${lineageLink(ref)} ${esc(PHRASE[iv.global_phase] || iv.global_phase)}:${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s(r${esc(iv.round_index)})`;
+    }).join(" · ");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">官方阶段时间线</h3>
@@ -168,7 +198,7 @@ function render(r) {
   // 核心事件（行为片段）
   if (r.episodes && r.episodes.episodes) {
     let rows = r.episodes.episodes.map(ep => `<tr>
-      <td>${esc(ep.kind)}</td><td class="num">${esc(ep.start_game_second)}s</td><td class="num">${esc(ep.end_game_second)}s</td>
+      <td>${lineageLink({kind:"episode", id:ep.id, match_id:r.match_id, rule_version:ep.rule_version})} ${esc(ep.kind)}</td><td class="num">${esc(ep.start_game_second)}s</td><td class="num">${esc(ep.end_game_second)}s</td>
       <td>${esc((ep.participants || []).join(", ") || ep.account_id || "-")}</td><td class="hint">${esc(ep.detail || "")}</td></tr>`).join("");
     const unavailEp = (r.episodes.unavailable || []).map(u => `<li>${esc(u.kind)}: ${esc(u.reason)}</li>`).join("");
     c.insertAdjacentHTML("beforeend", `
@@ -189,7 +219,7 @@ function render(r) {
     for (const [acct, vals] of Object.entries(byAcct)) {
       const name = (r.participants || []).find(p => p.account_id === acct);
       mrows += `<tr><td>${esc(name ? name.player_name : acct)} <span class="hint">${name ? "角色" + esc(name.nominal_role || "?") : ""}</span></td>` +
-        vals.map(v => `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}</td>`).join("") + `</tr>`;
+        vals.map(v => `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}<div class="hint">${lineageCell(v)}</div></td>`).join("") + `</tr>`;
     }
     const headers = [...new Set(r.metrics.values.map(v => v.metric_id))];
     const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li>${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
@@ -200,6 +230,13 @@ function render(r) {
         <details><summary>不可用指标</summary><ul class="hint">${unavailMet || "<li>无</li>"}</ul></details>
       </div>`);
   }
+
+// lineageCell renders the typed evidence links for one metric value row.
+function lineageCell(v) {
+  const refs = v.evidence || [];
+  if (!refs.length) return "-";
+  return refs.map(ref => lineageLink(ref)).join(" ");
+}
 
   // 队伍
   if (r.teams && r.teams.length) {
@@ -225,14 +262,21 @@ async function renderEvidenceTarget(r) {
   const c = document.getElementById("content");
   const panel = document.createElement("div");
   panel.className = "panel";
+  panel.dataset.evidencePanel = kind;
   panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">载入中…</p>`;
   c.appendChild(panel);
   let path = "";
-  if (kind === "fact") path = `/api/replay/v1/matches/${r.match_id}/facts/${encodeURIComponent(id)}`;
-  else if (kind === "episode") path = `/api/replay/v1/matches/${r.match_id}/episodes/${encodeURIComponent(id)}`;
+  if (kind === "fact") {
+    // Pass the stored canonical id through unchanged; the API accepts
+    // "fact:<seq>" directly.
+    path = `/api/replay/v1/matches/${r.match_id}/facts/${encodeURIComponent(id)}`;
+  } else if (kind === "episode") path = `/api/replay/v1/matches/${r.match_id}/episodes/${encodeURIComponent(id)}`;
   else if (kind === "phase") path = `/api/replay/v1/matches/${r.match_id}/phases/${encodeURIComponent(id)}`;
-  else if (kind === "metric_observation") path = `/api/replay/v1/matches/${r.match_id}/metrics/${encodeURIComponent(id)}`;
-  else if (kind === "algorithm") path = `/api/replay/v1/matches/${r.match_id}/algorithms/${encodeURIComponent(id)}`;
+  else if (kind === "metric_observation") {
+    // Pass the subject-qualified canonical id through unchanged.
+    path = `/api/replay/v1/matches/${r.match_id}/metrics/${encodeURIComponent(id)}`;
+  } else if (kind === "algorithm") path = `/api/replay/v1/matches/${r.match_id}/algorithms/${encodeURIComponent(id)}`;
+  else if (kind === "aggregation") path = `/api/replay/v1/aggregations/${encodeURIComponent(id)}`;
   else {
     panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">不可用: 未知证据类型 ${esc(kind)}</p>`;
     return;

@@ -185,6 +185,7 @@ type Calculator struct {
 	lastHits        map[string]int64
 	denies          map[string]int64
 	xpDelta         map[string]float64
+	xpDeltas        map[string][]xpDeltaEvt // per-second non-negative XP award deltas
 	netWorthDelta   map[string]float64
 	goldEarned      map[string]float64
 	firstItemSec    map[string]float64
@@ -230,6 +231,12 @@ type damageEvent struct {
 	FactSeq    int64
 }
 
+// xpDeltaEvt is one non-negative XP award delta at a calibrated game second.
+type xpDeltaEvt struct {
+	GameSecond float64
+	Value      float64
+}
+
 // NewCalculator creates a metric calculator bound to the participant list and
 // an optional role map. When registry is nil, all metrics resolve to
 // unavailable (the runner always supplies the frozen registry).
@@ -240,7 +247,7 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		kills: map[string]int64{}, assists: map[string]int64{}, deaths: map[string]int64{},
 		buybacks: map[string]int64{}, buybackSeconds: map[string][]float64{},
 		lastHits: map[string]int64{}, denies: map[string]int64{},
-		xpDelta: map[string]float64{}, netWorthDelta: map[string]float64{},
+		xpDelta: map[string]float64{}, xpDeltas: map[string][]xpDeltaEvt{}, netWorthDelta: map[string]float64{},
 		goldEarned: map[string]float64{}, firstItemSec: map[string]float64{},
 		heroDamage: map[string]float64{}, heroHealing: map[string]float64{},
 		objectiveDamage: map[string]float64{}, objectiveExcl: map[string]float64{},
@@ -389,7 +396,13 @@ func (c *Calculator) Feed(f *facts.Fact) {
 		team := c.teamByAcct[cf.ActorAccount]
 		switch cf.Kind {
 		case "damage":
-			if isHero {
+			// hero_damage_total: sum resolved post-mitigation damage to bound
+			// real ENEMY heroes. A target account that is not a bound
+			// participant of the opposing team is excluded (self/friendly,
+			// unbound summons), matching the registry's real-enemy-hero gate.
+			enemyHero := isHero && cf.TargetAccount != cf.ActorAccount &&
+				c.teamByAcct[cf.TargetAccount] != "" && c.teamByAcct[cf.TargetAccount] != team
+			if enemyHero {
 				c.heroDamage[cf.ActorAccount] += v
 				c.addEvidence(cf.ActorAccount, "hero_damage_total", f.Seq)
 			} else if obj {
@@ -426,8 +439,12 @@ func (c *Calculator) Feed(f *facts.Fact) {
 			c.lastHits[es.AccountID] = int64(*es.LastHits)
 			c.addEvidence(es.AccountID, "last_hit_count", f.Seq)
 		}
-		if es.Xp != nil && float64(*es.Xp) > c.xpDelta[es.AccountID] {
-			c.xpDelta[es.AccountID] = float64(*es.Xp)
+		if es.Xp != nil && *es.Xp >= 0 {
+			// The accepted adapter emits per-award XP deltas (non-negative).
+			// The exact metric is the SUM of non-negative deltas across valid
+			// contiguous calibrated segments, not the maximum award.
+			c.xpDelta[es.AccountID] += float64(*es.Xp)
+			c.xpDeltas[es.AccountID] = append(c.xpDeltas[es.AccountID], xpDeltaEvt{GameSecond: f.GameSecond, Value: float64(*es.Xp)})
 			c.addEvidence(es.AccountID, "xp_delta", f.Seq)
 		}
 		if es.Networth != nil {
@@ -801,25 +818,21 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 	case "buyback_use_count":
 		v = c.countValue(c.buybacks[acct], m)
 	case "last_hit_count":
-		if len(c.evidenceFor(acct, "last_hit_count")) == 0 {
-			v.UnavailableReason = "last_hit_state_missing"
-		} else {
-			v = c.countValue(c.lastHits[acct], m)
-		}
+		// The registry requires validated monotonic increments with explicit
+		// reset/gap reconciliation. The adapter exposes occasional absolute
+		// counters only, so taking the maximum is not the defined quantity.
+		v.UnavailableReason = "last_hit_counter_reset_gap_reconciliation_not_in_accepted_adapter"
 	case "deny_count":
 		v.UnavailableReason = "deny_counter_not_in_accepted_adapter"
 	case "xp_delta":
-		if len(c.evidenceFor(acct, "xp_delta")) == 0 {
-			v.UnavailableReason = "xp_state_missing"
-		} else {
-			v = c.floatValue(c.xpDelta[acct], m)
-		}
+		// The normalized XP facts are combat-log awards, not experience-state
+		// endpoints. They cannot prove valid contiguous monotonic segments or
+		// disclose state gaps/resets, so summing awards is not publishable.
+		v.UnavailableReason = "experience_state_endpoint_segment_gap_gates_not_in_accepted_adapter"
 	case "net_worth_delta":
-		if len(c.evidenceFor(acct, "net_worth_delta")) == 0 {
-			v.UnavailableReason = "networth_state_missing"
-		} else {
-			v = c.floatValue(c.netWorthDelta[acct], m)
-		}
+		// A maximum sampled net worth is not the signed end-minus-start delta
+		// across valid segments required by the registry.
+		v.UnavailableReason = "networth_endpoint_segment_gap_reset_gates_not_in_accepted_adapter"
 	case "gold_earned":
 		if len(c.evidenceFor(acct, "gold_earned")) == 0 {
 			v.UnavailableReason = "gold_state_missing"
@@ -827,14 +840,9 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 			v = c.floatValue(c.goldEarned[acct], m)
 		}
 	case "team_resource_share":
-		if len(c.evidenceFor(acct, "net_worth_delta")) == 0 {
-			v.UnavailableReason = "networth_state_missing"
-		} else if teamNetWorth[team] <= 0 {
-			v.UnavailableReason = "team_networth_missing"
-		} else {
-			share := c.netWorthDelta[acct] / teamNetWorth[team]
-			v = c.floatValue(share, m)
-		}
+		// Latest/maxima from independently timed samples are not complete
+		// synchronized five-player frames and cannot be duration weighted.
+		v.UnavailableReason = "complete_synchronized_team_resource_frames_not_in_accepted_adapter"
 	case "item_completion_timing_seconds":
 		// The accepted adapter emits raw purchase events without a complete
 		// inventory lifecycle / combine record, so "first possession second"
@@ -855,44 +863,33 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 			v.EvidenceCount = int64(len(c.evidenceFor(acct, "objective_damage_total")))
 		}
 	case "fight_participation_count":
-		v = c.countValue(fightParticipation[acct], m)
+		// Registry: count each eligible fight window at most once per player
+		// when at least one configured direct action is present AND the window
+		// has sufficient actor/target coverage. The accepted adapter's fight
+		// intervals lack a per-window coverage gate, so the count cannot be
+		// verified against the eligibility predicate. Suppressed at the gate.
+		v.UnavailableReason = "fight_window_coverage_gate_not_in_accepted_adapter"
 	case "opportunity_duration_seconds":
-		// Registry: numerator = seconds where every required field and
-		// opportunity predicate is valid; denominator = candidate seconds
-		// before exclusions; opportunity = per official phase. We count only
-		// distinct calibrated second bins that fall within the eligible phase
-		// window ([0, eligible_seconds)); a bin beyond the eligible phase
-		// coverage is excluded, never counted. Without a validated phase
-		// denominator the metric fails closed (unavailable).
-		bins := c.heroStateSecs[acct]
-		if len(bins) == 0 {
-			v.UnavailableReason = "position_state_missing"
-		} else if phaseDuration == nil || *phaseDuration <= 0 {
-			v.UnavailableReason = "eligible_phase_denominator_missing"
-		} else {
-			eligible := int64(*phaseDuration)
-			valid := int64(0)
-			for bin := range bins {
-				if bin >= 0 && bin < eligible {
-					valid++
-				}
-			}
-			// Invariant: opportunity seconds can never exceed the eligible
-			// phase denominator. If the count would exceed it, the field gate
-			// failed — fail closed rather than publish an invalid value.
-			if valid > eligible {
-				v.UnavailableReason = "opportunity_seconds_exceed_eligible_phase"
-			} else {
-				v = c.countValue(valid, m)
-				v.Denominator = phaseDuration
-				v.ExcludedCount = int64(len(bins)) - valid
-				v.EvidenceCount = int64(len(c.evidenceFor(acct, "opportunity_duration_seconds")))
-			}
-		}
+		// Registry: numerator = seconds where every required field and the
+		// configured opportunity predicate are valid (a per-opportunity-key,
+		// per-official-phase field-quality mask); denominator = candidate
+		// seconds before exclusions; exclusions by reason. Distinct
+		// position-sample seconds are NOT the registry's opportunity-key
+		// field-quality mask: the accepted adapter emits position samples
+		// without the configured opportunity predicate, per-phase field-quality
+		// masks, or per-reason exclusion bookkeeping, so an exact value cannot
+		// be produced. Suppressed at the exact gate (never a null-phase,
+		// zero-opportunity proxy).
+		v.UnavailableReason = "opportunity_key_field_quality_mask_not_in_accepted_adapter"
 	case "hero_damage_total":
 		v = c.floatValue(c.heroDamage[acct], m)
 	case "hero_healing_total":
-		v = c.floatValue(c.heroHealing[acct], m)
+		// Registry: numerator = resolved EFFECTIVE healing to bound real ALLIED
+		// heroes after overheal exclusion, target/owner gates, and the
+		// calibrated clock. The accepted adapter emits raw heal values without
+		// overheal classification or a verified allied-real-hero target gate,
+		// so a raw sum is not the defined effective-healing quantity.
+		v.UnavailableReason = "effective_healing_overheal_target_gates_not_in_accepted_adapter"
 	case "heal_dispel_save_casts":
 		// Registry: opportunity-normalized save/dispel casts keyed on ready
 		// ability/item sources with a valid ally target (heal, dispel,
@@ -920,35 +917,19 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 		// double counting.
 		v.UnavailableReason = "reported_at_match_level"
 	case "fight_damage_share":
-		sv := fightDamageShare[acct]
-		if sv == nil || sv.denom <= 0 {
-			v.UnavailableReason = "fight_damage_denominator_missing"
-		} else {
-			share := sv.num / sv.denom
-			v = c.floatValue(share, m)
-			v.Numerator = &sv.num
-			v.Denominator = &sv.denom
-			v.OpportunityCount = sv.fights
-			v.SampleCount = sv.fights
-		}
+		// Registry: qualifying player-attributed real-hero damage inside a
+		// VERIFIED fight interval restricted to the declared midgame/decisive
+		// phase, active/alive opportunities, and >=98% actor/target resolution
+		// for the interval. The accepted adapter emits fight intervals but no
+		// per-second alive/active state, no phase-scoped interval attribution,
+		// and no actor/target resolution metric, so the all-fight pooled share
+		// is not the defined quantity. Suppressed at the exact gate.
+		v.UnavailableReason = "fight_share_phase_alive_resolution_gates_not_in_accepted_adapter"
 	case "buyback_round_participation":
-		// Derived from verified buyback facts plus post-buyback combat within
-		// a 60-second window: participation = buyback uses followed by at
-		// least one hero damage/heal/objective event by the same player.
-		num, den, ev := c.computeBuybackParticipation(acct)
-		if den <= 0 {
-			v.UnavailableReason = "buyback_events_missing"
-		} else {
-			rate := float64(num) / float64(den)
-			v = c.floatValue(rate, m)
-			nf := float64(num)
-			df := float64(den)
-			v.Numerator = &nf
-			v.Denominator = &df
-			v.OpportunityCount = den
-			v.SampleCount = den
-			v.EvidenceCount = ev
-		}
+		// The registry publishes a round-scoped outcome vector, not a scalar
+		// "any action within 60 seconds" proxy. Round identity, position,
+		// availability/cost, and complete outcome/censor fields are unavailable.
+		v.UnavailableReason = "buyback_round_identity_position_outcome_vector_gates_not_in_accepted_adapter"
 	default:
 		// Definition-specific closure dispatch: the frozen 52-row closure
 		// contract maps every registry metric to a stable evaluator and a

@@ -53,6 +53,12 @@ func TestReplayMatchPage(t *testing.T) {
 		"不可用字段",
 		"官方阶段时间线",
 		"reset",
+		// Canonical lineage links on the match page.
+		"lineageCell",
+		"lineageLink",
+		"evidence=fact:",
+		"evidence=metric_observation:",
+		"aggregation.html?id=",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay match page missing %q", want)
@@ -191,6 +197,10 @@ func TestReplayPlayerPage(t *testing.T) {
 		"指标分解（原始值",
 		"function esc(",
 		"function safeUrl(",
+		// Canonical lineage links + aggregation drilldown.
+		"lineageLink",
+		"聚合实体（选手锦标赛聚合",
+		"aggregation.html?id=",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay player page missing %q", want)
@@ -199,6 +209,32 @@ func TestReplayPlayerPage(t *testing.T) {
 	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
 		if strings.Contains(html, scheme) {
 			t.Fatalf("replay player page references external resource via %q", scheme)
+		}
+	}
+}
+
+// TestReplayAggregationPage verifies the aggregation entity view renders the
+// canonical aggregation route and its retained child lineage.
+func TestReplayAggregationPage(t *testing.T) {
+	data, err := os.ReadFile("replay/aggregation.html")
+	if err != nil {
+		t.Fatalf("read replay/aggregation.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/aggregations/",
+		"聚合实体",
+		"child_refs",
+		"rule_version",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay aggregation page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay aggregation page references external resource via %q", scheme)
 		}
 	}
 }

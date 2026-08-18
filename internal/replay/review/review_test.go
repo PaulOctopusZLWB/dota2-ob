@@ -691,3 +691,117 @@ func TestCorrectionSchemaVersion(t *testing.T) {
 		t.Fatalf("id=%s", rv.Corrections[0].ID)
 	}
 }
+
+// TestReviewRevisionAdvancesAndRejectsStale proves the optimistic-concurrency
+// revision advances on every correction (including accept, which does not
+// change boundaries) and that a stale revision — even for a same-boundary
+// relabel whose interval still exists — is rejected atomically with the stale
+// sentinel and changes no bytes or counts.
+func TestReviewRevisionAdvancesAndRejectsStale(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+	}
+	ctx := PhaseContext{EligibleSeconds: 900, RuleVersion: "ti2026.phase.v1", ReplaySHA256: "abc", MachineIntervals: machine}
+
+	// The initial revision is deterministic and stable across loads.
+	r0, err := s.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r0.ReviewRevision == "" {
+		t.Fatal("initial revision empty")
+	}
+	r0b, err := s.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r0.ReviewRevision != r0b.ReviewRevision {
+		t.Fatal("revision not stable across loads")
+	}
+	// The revision is a required mutation precondition, not an optional hint.
+	if _, err := s.ApplyPhaseOp("m1", ctx, PhaseOpReq{Op: OpAccept, EventRef: "interval@600-900"}); !IsStale(err) {
+		t.Fatalf("missing review revision err=%v want stale sentinel", err)
+	}
+
+	// Reviewer A relabels interval@2454... (no: use 600-900 decisive) -> midgame
+	// with the initial revision.
+	relabel := PhaseOpReq{
+		Op: OpRelabel, EventRef: "interval@600-900", EligibleSeconds: 900,
+		Effective:        &PhaseInterval{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "midgame"},
+		ExpectedRevision: r0.ReviewRevision,
+	}
+	ra, err := s.ApplyPhaseOp("m1", ctx, relabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ra.ReviewRevision == r0.ReviewRevision {
+		t.Fatal("revision did not advance after correction")
+	}
+
+	// Reviewer B submits a stale form for the SAME still-existing boundary with
+	// the OLD revision: must fail closed with the stale sentinel, no bytes
+	// change.
+	stale := PhaseOpReq{
+		Op: OpRelabel, EventRef: "interval@600-900", EligibleSeconds: 900,
+		Effective:        &PhaseInterval{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+		ExpectedRevision: r0.ReviewRevision,
+	}
+	path := s.Path("m1")
+	before, _ := os.ReadFile(path)
+	if _, err := s.ApplyPhaseOp("m1", ctx, stale); !IsStale(err) {
+		t.Fatalf("stale same-boundary relabel err=%v want stale sentinel", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("stale revision changed persisted state")
+	}
+	// Still 1 correction (reviewer A's), audit still 1 entry.
+	rl, _ := s.Load("m1")
+	if len(rl.PhaseCorrections) != 1 {
+		t.Fatalf("corrections=%d want 1", len(rl.PhaseCorrections))
+	}
+	aud, _ := s.LoadAudit()
+	if len(aud.Entries) != 1 {
+		t.Fatalf("audit entries=%d want 1", len(aud.Entries))
+	}
+
+	// Reviewer A accepts the same still-existing boundary (600-900 midgame)
+	// with the CURRENT revision; accept appends a correction and advances the
+	// revision even though no boundary changed.
+	accept := PhaseOpReq{Op: OpAccept, EventRef: "interval@600-900", EligibleSeconds: 900, ExpectedRevision: ra.ReviewRevision}
+	rc, err := s.ApplyPhaseOp("m1", ctx, accept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc.ReviewRevision == ra.ReviewRevision {
+		t.Fatal("revision did not advance after accept")
+	}
+	if len(rc.PhaseCorrections) != 2 {
+		t.Fatalf("corrections=%d want 2 after accept", len(rc.PhaseCorrections))
+	}
+	// Same-boundary accept with a stale revision is rejected atomically.
+	before2, _ := os.ReadFile(path)
+	if _, err := s.ApplyPhaseOp("m1", ctx, PhaseOpReq{Op: OpAccept, EventRef: "interval@600-900", EligibleSeconds: 900, ExpectedRevision: ra.ReviewRevision}); !IsStale(err) {
+		t.Fatalf("stale same-boundary accept err=%v want stale", err)
+	}
+	after2, _ := os.ReadFile(path)
+	if string(before2) != string(after2) {
+		t.Fatal("stale accept changed persisted state")
+	}
+
+	// Restart reproduces the same revision from persisted ordered state.
+	s2, _ := New(s.Root)
+	rr, err := s2.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.ReviewRevision != rc.ReviewRevision {
+		t.Fatalf("restart revision=%s want %s", rr.ReviewRevision, rc.ReviewRevision)
+	}
+}
