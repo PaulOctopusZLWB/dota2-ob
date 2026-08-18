@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/identity"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
@@ -125,6 +126,13 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 			}
 		}
 		byAcct := map[string]map[string]MetricValue{}
+		unavailableByAcct := map[string]map[string]UnavailableMetric{}
+		for _, p := range part {
+			if p.AccountID != "" {
+				byAcct[p.AccountID] = map[string]MetricValue{}
+				unavailableByAcct[p.AccountID] = map[string]UnavailableMetric{}
+			}
+		}
 		for _, v := range met.Values {
 			if v.AccountID == "" || v.Value == nil {
 				continue
@@ -160,6 +168,19 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 			mv.Lineage = append(mv.Lineage, metricsToEvidenceRefs(row.MatchID, v.Evidence)...)
 			byAcct[v.AccountID][v.MetricID] = mv
 		}
+		for _, v := range met.Unavailable {
+			if v.AccountID == "" || (v.OfficialPhase != "" && v.OfficialPhase != "whole_match") {
+				continue
+			}
+			if unavailableByAcct[v.AccountID] == nil {
+				unavailableByAcct[v.AccountID] = map[string]UnavailableMetric{}
+			}
+			unavailableByAcct[v.AccountID][v.MetricID] = UnavailableMetric{
+				MetricID: v.MetricID, MetricVersion: v.MetricVersion,
+				UnavailableReason: v.UnavailableReason,
+				Lineage:           metricsToEvidenceRefs(row.MatchID, v.Evidence),
+			}
+		}
 		for acct, mvs := range byAcct {
 			prov := provenanceByAcct[acct]
 			players = append(players, &PlayerMatch{
@@ -167,7 +188,7 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 				SourceNominalRole: prov.SourceNominalRole, NominalRole: roleByAcct[acct],
 				RoleRecordVersion: prov.RoleRecordVersion, OverrideApplied: prov.OverrideApplied,
 				OverrideAuthor: prov.OverrideAuthor, OverrideVersion: prov.OverrideVersion,
-				Metrics: mvs,
+				Metrics: mvs, UnavailableMetrics: unavailableByAcct[acct],
 			})
 		}
 	}
@@ -223,6 +244,205 @@ func validateMetricsArtifact(matchID, path string, met *metrics.Output, reg *met
 		return err
 	}
 	return check("unavailable", met.Unavailable)
+}
+
+func validateRegistryMetric(reg *metrics.Registry, context, mapKey, metricID, metricVersion string) error {
+	if mapKey != "" && mapKey != metricID {
+		return fmt.Errorf("scoring: corrupt score artifact context=%s field=metric_id expected=%s actual=%s", context, mapKey, printableVersion(metricID))
+	}
+	if reg == nil {
+		return fmt.Errorf("scoring: score artifact validation context=%s metrics registry unavailable", context)
+	}
+	def := reg.Find(metricID)
+	if def == nil {
+		return fmt.Errorf("scoring: corrupt score artifact context=%s field=metric_id expected=registered actual=%s", context, printableVersion(metricID))
+	}
+	if metricVersion != def.MetricVersion {
+		return fmt.Errorf("scoring: corrupt score artifact context=%s metric=%s field=metric_version expected=%s actual=%s", context, metricID, def.MetricVersion, printableVersion(metricVersion))
+	}
+	return nil
+}
+
+func validateMetricMaps(reg *metrics.Registry, context string, published map[string]MetricValue, unavailable map[string]UnavailableMetric) error {
+	for key, value := range published {
+		if err := validateRegistryMetric(reg, context+".metrics["+key+"]", key, value.MetricID, value.MetricVersion); err != nil {
+			return err
+		}
+	}
+	for key, value := range unavailable {
+		if err := validateRegistryMetric(reg, context+".unavailable_metrics["+key+"]", key, value.MetricID, value.MetricVersion); err != nil {
+			return err
+		}
+		if value.UnavailableReason == "" {
+			return fmt.Errorf("scoring: corrupt score artifact context=%s.unavailable_metrics[%s] field=unavailable_reason expected=non-empty actual=<missing>", context, key)
+		}
+	}
+	return nil
+}
+
+func validateAggregatedMap(reg *metrics.Registry, context, scope, subject, role, contractVersion string, values map[string]AggregatedMetric) error {
+	for key, value := range values {
+		itemContext := context + ".aggregated_metrics[" + key + "]"
+		if err := validateRegistryMetric(reg, itemContext, key, value.MetricID, value.MetricVersion); err != nil {
+			return err
+		}
+		expectedID := fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, value.MetricID, value.MetricVersion, version.ScoreRuleVersion)
+		teamMatchChildID := fmt.Sprintf("aggregation:team_match:%s::%s:%s:%s", subject, value.MetricID, value.MetricVersion, version.ScoreRuleVersion)
+		found := 0
+		for _, ref := range value.Lineage {
+			if ref.Kind != "aggregation" {
+				continue
+			}
+			if ref.RuleVersion != version.ScoreRuleVersion {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.rule_version expected=%s actual=%s", itemContext, version.ScoreRuleVersion, printableVersion(ref.RuleVersion))
+			}
+			if !strings.HasSuffix(ref.ID, ":"+version.ScoreRuleVersion) {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.id expected_score_rule_suffix=%s actual=%s", itemContext, version.ScoreRuleVersion, ref.ID)
+			}
+			if ref.ContractVersion != contractVersion {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.contract_version expected=%s actual=%s", itemContext, printableVersion(contractVersion), printableVersion(ref.ContractVersion))
+			}
+			if ref.ID == expectedID {
+				found++
+			} else if scope != "team_tournament" || ref.ID != teamMatchChildID {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref.id expected=%s actual=%s", itemContext, expectedID, ref.ID)
+			}
+		}
+		if found != 1 {
+			return fmt.Errorf("scoring: corrupt score artifact context=%s field=aggregation_ref_count expected=1 actual=%d", itemContext, found)
+		}
+	}
+	return nil
+}
+
+func validateComponents(reg *metrics.Registry, context string, axes map[string]AxisResult) error {
+	for axisKey, axis := range axes {
+		for key, component := range axis.Components {
+			if err := validateRegistryMetric(reg, context+"["+axisKey+"].components["+key+"]", key, component.MetricID, component.MetricVersion); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateMatchScores rejects a current-tagged per-match score document whose
+// nested registry identity or version is stale/corrupt.
+func ValidateMatchScores(ms *MatchScores, reg *metrics.Registry) error {
+	if ms == nil {
+		return fmt.Errorf("scoring: corrupt score artifact context=match field=document expected=present actual=nil")
+	}
+	if ms.SchemaVersion != version.ScoreSchema {
+		return fmt.Errorf("scoring: stale score artifact match=%s field=schema_version expected=%s actual=%s", ms.MatchID, version.ScoreSchema, printableVersion(ms.SchemaVersion))
+	}
+	if ms.RuleVersion != version.ScoreRuleVersion {
+		return fmt.Errorf("scoring: stale score artifact match=%s field=rule_version expected=%s actual=%s", ms.MatchID, version.ScoreRuleVersion, printableVersion(ms.RuleVersion))
+	}
+	for i, player := range ms.Players {
+		if player == nil {
+			return fmt.Errorf("scoring: corrupt score artifact match=%s field=players[%d] expected=present actual=nil", ms.MatchID, i)
+		}
+		if err := validateMetricMaps(reg, fmt.Sprintf("match[%s].players[%d]", ms.MatchID, i), player.Metrics, player.UnavailableMetrics); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateCorpusScores validates every nested registry metric and canonical
+// aggregation reference before a current score corpus is persisted or served.
+func ValidateCorpusScores(cs *CorpusScores, reg *metrics.Registry) error {
+	if cs == nil {
+		return fmt.Errorf("scoring: corrupt score artifact context=corpus field=document expected=present actual=nil")
+	}
+	if cs.SchemaVersion != version.ScoreSchema {
+		return fmt.Errorf("scoring: stale score artifact context=corpus field=schema_version expected=%s actual=%s", version.ScoreSchema, printableVersion(cs.SchemaVersion))
+	}
+	if cs.RuleVersion != version.ScoreRuleVersion {
+		return fmt.Errorf("scoring: stale score artifact context=corpus field=rule_version expected=%s actual=%s", version.ScoreRuleVersion, printableVersion(cs.RuleVersion))
+	}
+	if cs.ContractVersion != SchemaVersion {
+		return fmt.Errorf("scoring: stale score artifact context=corpus field=contract_version expected=%s actual=%s", SchemaVersion, printableVersion(cs.ContractVersion))
+	}
+	if cs.TeamScoringVersion != TeamSchemaVersion {
+		return fmt.Errorf("scoring: stale score artifact context=corpus field=team_scoring_version expected=%s actual=%s", TeamSchemaVersion, printableVersion(cs.TeamScoringVersion))
+	}
+	for key, match := range cs.Matches {
+		if match == nil || match.MatchID != key {
+			return fmt.Errorf("scoring: corrupt score artifact context=corpus.matches[%s] field=match_id expected=%s actual=%s", key, key, func() string {
+				if match == nil {
+					return "<nil>"
+				}
+				return printableVersion(match.MatchID)
+			}())
+		}
+		if err := ValidateMatchScores(match, reg); err != nil {
+			return err
+		}
+	}
+	for i, player := range cs.Players {
+		if player == nil {
+			return fmt.Errorf("scoring: corrupt score artifact context=corpus.players[%d] expected=present actual=nil", i)
+		}
+		context := fmt.Sprintf("corpus.players[%d]", i)
+		if player.ScoringVersion != cs.ContractVersion {
+			return fmt.Errorf("scoring: corrupt score artifact context=%s field=scoring_version expected=%s actual=%s", context, cs.ContractVersion, printableVersion(player.ScoringVersion))
+		}
+		for key, percentile := range player.MetricPercentiles {
+			if err := validateRegistryMetric(reg, context+".metric_percentiles["+key+"]", key, percentile.MetricID, percentile.MetricVersion); err != nil {
+				return err
+			}
+		}
+		if err := validateAggregatedMap(reg, context, "player_tournament", player.AccountID, player.NominalRole, cs.ContractVersion, player.AggregatedMetrics); err != nil {
+			return err
+		}
+		for key, unavailable := range player.UnavailableMetrics {
+			if err := validateRegistryMetric(reg, context+".unavailable_metrics["+key+"]", key, unavailable.MetricID, unavailable.MetricVersion); err != nil {
+				return err
+			}
+			if unavailable.UnavailableReason == "" {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s.unavailable_metrics[%s] field=unavailable_reason expected=non-empty actual=<missing>", context, key)
+			}
+		}
+		if err := validateComponents(reg, context+".official_axes", player.OfficialAxes); err != nil {
+			return err
+		}
+		if err := validateComponents(reg, context+".experimental_axes", player.ExperimentalAxes); err != nil {
+			return err
+		}
+	}
+	for i, team := range cs.Teams {
+		if team == nil {
+			return fmt.Errorf("scoring: corrupt score artifact context=corpus.teams[%d] expected=present actual=nil", i)
+		}
+		context := fmt.Sprintf("corpus.teams[%d]", i)
+		if team.ScoringVersion != cs.TeamScoringVersion {
+			return fmt.Errorf("scoring: corrupt score artifact context=%s field=scoring_version expected=%s actual=%s", context, cs.TeamScoringVersion, printableVersion(team.ScoringVersion))
+		}
+		for key, percentile := range team.MetricPercentiles {
+			if err := validateRegistryMetric(reg, context+".metric_percentiles["+key+"]", key, percentile.MetricID, percentile.MetricVersion); err != nil {
+				return err
+			}
+		}
+		if err := validateAggregatedMap(reg, context, "team_tournament", team.TeamID, "", cs.TeamScoringVersion, team.AggregatedMetrics); err != nil {
+			return err
+		}
+		for key, unavailable := range team.UnavailableMetrics {
+			if err := validateRegistryMetric(reg, context+".unavailable_metrics["+key+"]", key, unavailable.MetricID, unavailable.MetricVersion); err != nil {
+				return err
+			}
+			if unavailable.UnavailableReason == "" {
+				return fmt.Errorf("scoring: corrupt score artifact context=%s.unavailable_metrics[%s] field=unavailable_reason expected=non-empty actual=<missing>", context, key)
+			}
+		}
+		if err := validateComponents(reg, context+".official_axes", team.OfficialAxes); err != nil {
+			return err
+		}
+		if err := validateComponents(reg, context+".experimental_axes", team.ExperimentalAxes); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // metricsToEvidenceRefs converts typed metric-boundary evidence refs to the
@@ -348,10 +568,16 @@ func ComputeAndPersist(st *store.Store, c *Contract, tc *TeamContract, mreg *met
 		pm := cor.Matches[matchID]
 		sort.Slice(pm, func(i, j int) bool { return pm[i].AccountID < pm[j].AccountID })
 		ms.Players = append(ms.Players, pm...)
+		if err := ValidateMatchScores(ms, mreg); err != nil {
+			return nil, err
+		}
 		if err := st.WriteJSON(matchID, store.ArtifactScores, ms); err != nil {
 			return nil, fmt.Errorf("scoring: persist %s: %w", matchID, err)
 		}
 		cs.Matches[matchID] = ms
+	}
+	if err := ValidateCorpusScores(cs, mreg); err != nil {
+		return nil, err
 	}
 	// Corpus-level scoring catalog (rebuildable; not part of any match's
 	// canonical tree).

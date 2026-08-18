@@ -459,7 +459,7 @@ async function main() {
         assert.ok(pt && pt.nominal_role === newRole, "corpus/tournament player role after override");
 		const aggregated = Object.values(pt.aggregated_metrics || {});
 		assert.ok(aggregated.length > 0 && aggregated.every(m => m.metric_version), "aggregated metric versions missing");
-		assert.ok(aggregated.every(m => (m.lineage || []).filter(r => r.kind === "aggregation").every(r => r.id.includes(`:${m.metric_version}:`))), "aggregation IDs are not metric-version qualified");
+		assert.ok(aggregated.every(m => (m.lineage || []).filter(r => r.kind === "aggregation").every(r => r.id.includes(`:${m.metric_version}:`) && r.id.endsWith(":ti2026.scoring.v5") && r.rule_version === "ti2026.scoring.v5")), "aggregation IDs are not metric/score-rule qualified");
         const scoreProv = pt && pt.role_provenance && pt.role_provenance[player.match_id];
         assert.ok(scoreProv, "corpus score role provenance missing");
         assert.strictEqual(scoreProv.override_author, "browser", "corpus score override author");
@@ -472,6 +472,23 @@ async function main() {
 		await page.waitForSelector("tr[data-aggregation-metric][data-metric-version]", { timeout: 15000 });
 		const renderedVersions = await page.$$eval("tr[data-aggregation-metric]", rows => rows.map(r => r.dataset.metricVersion));
 		assert.ok(renderedVersions.length > 0 && renderedVersions.every(v => v && v !== "-"), "rendered score decomposition metric versions missing");
+		const playerComponents = await page.$$eval("tr[data-score-metric]", rows => rows.map(r => ({ metric: r.dataset.scoreMetric, version: r.dataset.metricVersion })));
+		assert.ok(playerComponents.length > 0 && playerComponents.every(r => r.metric && r.version && r.version !== "-"), "player component row missing registry metric version");
+		const teamID = pt.team_id;
+		assert.ok(teamID, "player score team id missing");
+		const teamScore = (corpus.data.teams || []).find(t => t.team_id === teamID);
+		assert.ok(teamScore, "team score missing");
+		for (const layer of [teamScore.official_axes || {}, teamScore.experimental_axes || {}]) {
+			for (const axis of Object.values(layer)) {
+				for (const component of Object.values(axis.components || {})) {
+					assert.ok(component.metric_version, `team API component ${component.metric_id} missing registry version`);
+				}
+			}
+		}
+		await page.goto(`${base}/team.html?id=${teamID}`, { waitUntil: "domcontentloaded" });
+		await page.waitForSelector("tr[data-team-score-metric]", { timeout: 15000 });
+		const teamComponents = await page.$$eval("tr[data-team-score-metric]", rows => rows.map(r => ({ metric: r.dataset.teamScoreMetric, version: r.dataset.metricVersion })));
+		assert.ok(teamComponents.length > 0 && teamComponents.every(r => r.metric && r.version && r.version !== "-"), "team component row missing registry metric version");
       };
       await assertRoleAgreement(restartedBase);
 
@@ -499,10 +516,12 @@ async function main() {
       // Aggregation is rendered on the player drilldown; click that anchor too.
       await page.goto(`${restartedBase2}/player.html?id=${acct}`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector("a[data-evidence-kind='aggregation']", { timeout: 15000 });
+	  const renderedAggregationHref = await page.$eval("a[data-evidence-kind='aggregation']", a => a.getAttribute("href"));
+	  assert.ok(decodeURIComponent(renderedAggregationHref).includes(":ti2026.scoring.v5"), `rendered aggregation link is not score-rule qualified: ${renderedAggregationHref}`);
       await page.click("a[data-evidence-kind='aggregation']");
       await page.waitForSelector(".panel", { timeout: 15000 });
       const aggText = await page.evaluate(() => document.body.innerText);
-      assert.ok(aggText.includes("聚合实体") || aggText.includes("aggregation"), "aggregation page missing content");
+      assert.ok((aggText.includes("聚合实体") || aggText.includes("aggregation")) && aggText.includes("ti2026.scoring.v5"), "aggregation page missing score-rule-qualified identity");
 
       // Turn an ACTUAL rendered fact link stale inside the disposable copy,
       // navigate it, and assert the precise API error rendered by the UI.
@@ -522,7 +541,7 @@ async function main() {
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, metric versions preserved in match/aggregate API and rendered score decomposition, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

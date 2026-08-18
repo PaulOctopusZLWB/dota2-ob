@@ -1040,10 +1040,11 @@ func TestNavigableTypedLineageRoutes(t *testing.T) {
 	aggID := "aggregation:player_tournament:1000:1:hero_damage_total:1.0.0:" + version.ScoreRuleVersion
 	st.WriteRootJSON("scores-corpus.json", &scoring.CorpusScores{
 		SchemaVersion: version.ScoreSchema, RuleVersion: version.ScoreRuleVersion,
-		Players: []*scoring.PlayerScore{{AccountID: "1000", NominalRole: "1", AggregatedMetrics: map[string]scoring.AggregatedMetric{
+		ContractVersion: scoring.SchemaVersion, TeamScoringVersion: scoring.TeamSchemaVersion,
+		Players: []*scoring.PlayerScore{{AccountID: "1000", NominalRole: "1", ScoringVersion: scoring.SchemaVersion, AggregatedMetrics: map[string]scoring.AggregatedMetric{
 			"hero_damage_total": {MetricID: "hero_damage_total", MetricVersion: "1.0.0", Value: 500, EligibleMatches: 1, Lineage: []scoring.EvidenceRef{
 				{MatchID: "m1", Kind: "fact", ID: "fact:7", RuleVersion: "replay.facts.v2"},
-				{Kind: "aggregation", ID: aggID, RuleVersion: version.ScoreRuleVersion},
+				{Kind: "aggregation", ID: aggID, RuleVersion: version.ScoreRuleVersion, ContractVersion: scoring.SchemaVersion},
 			}},
 		}}}, Matches: map[string]*scoring.MatchScores{},
 	})
@@ -1850,6 +1851,121 @@ func TestStaleScoreWireShapeIsNotServedAsCurrent(t *testing.T) {
 			t.Fatalf("stale score path %s status=%d want 404", path, resp.StatusCode)
 		}
 	}
+}
+
+func TestCurrentTaggedScoreWithMissingNestedMetricVersionFailsClosedAcrossRestartAndOverride(t *testing.T) {
+	roleReg := frozenRoleRegistry()
+	st := testFrozenOverrideStore(t, roleReg)
+	path := filepath.Join(st.Root, "scores-corpus.json")
+	var cs scoring.CorpusScores
+	if err := st.ReadJSONFile(path, &cs); err != nil {
+		t.Fatal(err)
+	}
+	deleted := false
+	for _, player := range cs.Players {
+		for axisKey, axis := range player.OfficialAxes {
+			for mid, component := range axis.Components {
+				component.MetricVersion = ""
+				axis.Components[mid] = component
+				player.OfficialAxes[axisKey] = axis
+				deleted = true
+				break
+			}
+			if deleted {
+				break
+			}
+		}
+		if deleted {
+			break
+		}
+	}
+	if !deleted {
+		t.Fatal("fixture has no score component to corrupt")
+	}
+	if err := st.WriteRootJSON("scores-corpus.json", &cs); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertNotServed := func(t *testing.T) {
+		t.Helper()
+		srv := testServerWithContracts(t, st, roleReg)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		resp, err := http.Get(ts.URL + Version + "/scores/corpus")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatal("current-tagged corpus with missing nested metric_version was served")
+		}
+		t.Logf("corrupt corpus API status=%d", resp.StatusCode)
+	}
+	assertNotServed(t)
+	assertNotServed(t) // fresh server instance = restart boundary
+
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, roleReg).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	if code := overrideRole(t, ts.URL, "8944521919", "111114687", "1", "reviewer", "corrupt score rollback"); code != http.StatusInternalServerError {
+		t.Fatalf("role override status=%d want 500", code)
+	} else {
+		t.Logf("corrupt corpus role-override status=%d", code)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("role override mutated corrupt authoritative score corpus")
+	}
+}
+
+func TestCurrentTaggedMatchScoreWithMissingNestedMetricVersionIsNotServed(t *testing.T) {
+	roleReg := frozenRoleRegistry()
+	st := testFrozenOverrideStore(t, roleReg)
+	var ms scoring.MatchScores
+	if err := st.ReadJSON("8944521919", store.ArtifactScores, &ms); err != nil {
+		t.Fatal(err)
+	}
+	deleted := false
+	for _, player := range ms.Players {
+		for mid, value := range player.Metrics {
+			value.MetricVersion = ""
+			player.Metrics[mid] = value
+			deleted = true
+			break
+		}
+		if deleted {
+			break
+		}
+	}
+	if !deleted {
+		t.Fatal("fixture has no per-match metric to corrupt")
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactScores, &ms); err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, roleReg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + Version + "/matches/8944521919/scores")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("current-tagged per-match score with missing nested metric_version was served")
+	}
+	t.Logf("corrupt per-match score API status=%d", resp.StatusCode)
 }
 
 // TestTeamAPIStableSchema proves the /teams/{id} endpoint returns the stable

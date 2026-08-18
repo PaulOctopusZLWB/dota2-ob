@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
 
 // Contract is the frozen radar/score contract.
@@ -407,11 +408,23 @@ func Invert(pct float64) float64 {
 // derived episode, or applicable phase that produced a metric observation.
 // It is preserved through aggregation so drilldown can navigate to evidence.
 type EvidenceRef struct {
-	MatchID       string `json:"match_id,omitempty"`
-	Kind          string `json:"kind"` // fact|episode|phase|metric
-	ID            string `json:"id"`
-	RuleVersion   string `json:"rule_version,omitempty"`
-	SourceFactSeq int64  `json:"source_fact_seq,omitempty"`
+	MatchID         string `json:"match_id,omitempty"`
+	Kind            string `json:"kind"` // fact|episode|phase|metric
+	ID              string `json:"id"`
+	RuleVersion     string `json:"rule_version,omitempty"`
+	ContractVersion string `json:"contract_version,omitempty"`
+	SourceFactSeq   int64  `json:"source_fact_seq,omitempty"`
+}
+
+// UnavailableMetric preserves the validated registry identity and the exact
+// metrics-layer abstention reason when an observation cannot be published.
+// It prevents score decomposition from manufacturing an anonymous zero-value
+// aggregate for a known-but-unavailable component.
+type UnavailableMetric struct {
+	MetricID          string        `json:"metric_id"`
+	MetricVersion     string        `json:"metric_version"`
+	UnavailableReason string        `json:"unavailable_reason"`
+	Lineage           []EvidenceRef `json:"lineage,omitempty"`
 }
 
 // MetricValue is one published metric observation with the numerator/
@@ -448,16 +461,17 @@ type AggregatedMetric struct {
 
 // PlayerMatch is one player in one match with its published metric values.
 type PlayerMatch struct {
-	MatchID           string                 `json:"match_id"`
-	AccountID         string                 `json:"account_id"`
-	TeamID            string                 `json:"team_id,omitempty"`
-	SourceNominalRole string                 `json:"source_nominal_role,omitempty"`
-	NominalRole       string                 `json:"nominal_role"`
-	RoleRecordVersion string                 `json:"role_record_version,omitempty"`
-	OverrideApplied   bool                   `json:"override_applied,omitempty"`
-	OverrideAuthor    string                 `json:"override_author,omitempty"`
-	OverrideVersion   string                 `json:"override_version,omitempty"`
-	Metrics           map[string]MetricValue `json:"metrics"`
+	MatchID            string                       `json:"match_id"`
+	AccountID          string                       `json:"account_id"`
+	TeamID             string                       `json:"team_id,omitempty"`
+	SourceNominalRole  string                       `json:"source_nominal_role,omitempty"`
+	NominalRole        string                       `json:"nominal_role"`
+	RoleRecordVersion  string                       `json:"role_record_version,omitempty"`
+	OverrideApplied    bool                         `json:"override_applied,omitempty"`
+	OverrideAuthor     string                       `json:"override_author,omitempty"`
+	OverrideVersion    string                       `json:"override_version,omitempty"`
+	Metrics            map[string]MetricValue       `json:"metrics"`
+	UnavailableMetrics map[string]UnavailableMetric `json:"unavailable_metrics,omitempty"`
 }
 
 type RoleProvenance struct {
@@ -473,13 +487,14 @@ type RoleProvenance struct {
 // PlayerTournament is one player's records aggregated across its eligible
 // matches within a fixed nominal role (the scoring subject grain).
 type PlayerTournament struct {
-	AccountID       string                      `json:"account_id"`
-	TeamID          string                      `json:"team_id,omitempty"`
-	NominalRole     string                      `json:"nominal_role"`
-	EligibleMatches int                         `json:"eligible_matches"`
-	MatchIDs        []string                    `json:"match_ids"`
-	Metrics         map[string]AggregatedMetric `json:"metrics"`
-	RoleProvenance  map[string]RoleProvenance   `json:"role_provenance"`
+	AccountID          string                       `json:"account_id"`
+	TeamID             string                       `json:"team_id,omitempty"`
+	NominalRole        string                       `json:"nominal_role"`
+	EligibleMatches    int                          `json:"eligible_matches"`
+	MatchIDs           []string                     `json:"match_ids"`
+	Metrics            map[string]AggregatedMetric  `json:"metrics"`
+	UnavailableMetrics map[string]UnavailableMetric `json:"unavailable_metrics,omitempty"`
+	RoleProvenance     map[string]RoleProvenance    `json:"role_provenance"`
 }
 
 // TeamMatch is one team's metrics pooled across its five players in one match.
@@ -492,10 +507,11 @@ type TeamMatch struct {
 
 // TeamTournament is one team's metrics aggregated across its eligible matches.
 type TeamTournament struct {
-	TeamID          string                      `json:"team_id"`
-	EligibleMatches int                         `json:"eligible_matches"`
-	MatchIDs        []string                    `json:"match_ids"`
-	Metrics         map[string]AggregatedMetric `json:"metrics"`
+	TeamID             string                       `json:"team_id"`
+	EligibleMatches    int                          `json:"eligible_matches"`
+	MatchIDs           []string                     `json:"match_ids"`
+	Metrics            map[string]AggregatedMetric  `json:"metrics"`
+	UnavailableMetrics map[string]UnavailableMetric `json:"unavailable_metrics,omitempty"`
 }
 
 // AxisResult is one axis of a subject's radar.
@@ -553,14 +569,15 @@ type PlayerScore struct {
 	MetricPercentiles map[string]PercentileResult `json:"metric_percentiles"`
 	// AggregatedMetrics carries the aggregated raw values with typed lineage
 	// (fact/episode/phase refs) for navigable drilldown.
-	AggregatedMetrics    map[string]AggregatedMetric `json:"aggregated_metrics,omitempty"`
-	OfficialAxes         map[string]AxisResult       `json:"official_axes"`
-	ExperimentalAxes     map[string]AxisResult       `json:"experimental_axes"`
-	OfficialTotal        *TotalResult                `json:"official_total"`
-	ExperimentalTotal    *TotalResult                `json:"experimental_total"`
-	SubjectCoverage      SubjectCoverage             `json:"subject_coverage"`
-	ComparisonPopulation string                      `json:"comparison_population"`
-	RoleProvenance       map[string]RoleProvenance   `json:"role_provenance"`
+	AggregatedMetrics    map[string]AggregatedMetric  `json:"aggregated_metrics,omitempty"`
+	UnavailableMetrics   map[string]UnavailableMetric `json:"unavailable_metrics,omitempty"`
+	OfficialAxes         map[string]AxisResult        `json:"official_axes"`
+	ExperimentalAxes     map[string]AxisResult        `json:"experimental_axes"`
+	OfficialTotal        *TotalResult                 `json:"official_total"`
+	ExperimentalTotal    *TotalResult                 `json:"experimental_total"`
+	SubjectCoverage      SubjectCoverage              `json:"subject_coverage"`
+	ComparisonPopulation string                       `json:"comparison_population"`
+	RoleProvenance       map[string]RoleProvenance    `json:"role_provenance"`
 }
 
 // PercentileResult is one metric's normalized value with provenance.
@@ -598,13 +615,14 @@ type TeamScore struct {
 	// AggregatedMetrics carries the team-tournament aggregated raw values with
 	// typed lineage (fact/episode/phase refs + the aggregation entity) for
 	// navigable drilldown, mirroring the player score.
-	AggregatedMetrics    map[string]AggregatedMetric `json:"aggregated_metrics,omitempty"`
-	OfficialAxes         map[string]AxisResult       `json:"official_axes"`
-	OfficialTotal        *TotalResult                `json:"official_total"`
-	ExperimentalAxes     map[string]AxisResult       `json:"experimental_axes"`
-	ExperimentalTotal    *TotalResult                `json:"experimental_total"`
-	SubjectCoverage      SubjectCoverage             `json:"subject_coverage"`
-	ComparisonPopulation string                      `json:"comparison_population"`
+	AggregatedMetrics    map[string]AggregatedMetric  `json:"aggregated_metrics,omitempty"`
+	UnavailableMetrics   map[string]UnavailableMetric `json:"unavailable_metrics,omitempty"`
+	OfficialAxes         map[string]AxisResult        `json:"official_axes"`
+	OfficialTotal        *TotalResult                 `json:"official_total"`
+	ExperimentalAxes     map[string]AxisResult        `json:"experimental_axes"`
+	ExperimentalTotal    *TotalResult                 `json:"experimental_total"`
+	SubjectCoverage      SubjectCoverage              `json:"subject_coverage"`
+	ComparisonPopulation string                       `json:"comparison_population"`
 }
 
 // TeamExperimentalRecipeUnavailableReason is the precise reason exposed when
@@ -790,7 +808,7 @@ func (c *Corpus) buildTournaments() {
 		sort.Slice(rows, func(i, j int) bool { return rows[i].MatchID < rows[j].MatchID })
 		pt := &PlayerTournament{
 			AccountID: rows[0].AccountID, TeamID: rows[0].TeamID, NominalRole: rows[0].NominalRole,
-			EligibleMatches: len(rows), Metrics: map[string]AggregatedMetric{}, RoleProvenance: map[string]RoleProvenance{},
+			EligibleMatches: len(rows), Metrics: map[string]AggregatedMetric{}, UnavailableMetrics: map[string]UnavailableMetric{}, RoleProvenance: map[string]RoleProvenance{},
 		}
 		for _, r := range rows {
 			pt.MatchIDs = append(pt.MatchIDs, r.MatchID)
@@ -798,6 +816,11 @@ func (c *Corpus) buildTournaments() {
 				MatchID: r.MatchID, SourceNominalRole: r.SourceNominalRole, NominalRole: r.NominalRole,
 				RoleRecordVersion: r.RoleRecordVersion, OverrideApplied: r.OverrideApplied,
 				OverrideAuthor: r.OverrideAuthor, OverrideVersion: r.OverrideVersion,
+			}
+			for mid, unavailable := range r.UnavailableMetrics {
+				if _, published := pt.Metrics[mid]; !published {
+					pt.UnavailableMetrics[mid] = unavailable
+				}
 			}
 		}
 		byMetric := map[string][]MetricValue{}
@@ -809,6 +832,7 @@ func (c *Corpus) buildTournaments() {
 		for mid, vals := range byMetric {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
 				pt.Metrics[mid] = withAggregationRef(agg, "player_tournament", pt.AccountID, pt.NominalRole, c.Contract.SchemaVersion)
+				delete(pt.UnavailableMetrics, mid)
 			}
 		}
 		sort.Strings(pt.MatchIDs)
@@ -837,7 +861,7 @@ func (c *Corpus) buildTeams() {
 	for _, tid := range teamIDs {
 		byMatch := rows[tid]
 		c.TeamMatches[tid] = map[string]*TeamMatch{}
-		tt := &TeamTournament{TeamID: tid, Metrics: map[string]AggregatedMetric{}}
+		tt := &TeamTournament{TeamID: tid, Metrics: map[string]AggregatedMetric{}, UnavailableMetrics: map[string]UnavailableMetric{}}
 		teamAgg := map[string][]MetricValue{}
 		matchIDs := make([]string, 0, len(byMatch))
 		for matchID := range byMatch {
@@ -852,6 +876,11 @@ func (c *Corpus) buildTeams() {
 			for _, p := range players {
 				for mid, mv := range p.Metrics {
 					byMetric[mid] = append(byMetric[mid], mv)
+				}
+				for mid, unavailable := range p.UnavailableMetrics {
+					if _, exists := tt.UnavailableMetrics[mid]; !exists {
+						tt.UnavailableMetrics[mid] = unavailable
+					}
 				}
 			}
 			for mid, vals := range byMetric {
@@ -875,6 +904,7 @@ func (c *Corpus) buildTeams() {
 		for mid, vals := range teamAgg {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
 				tt.Metrics[mid] = withAggregationRef(agg, "team_tournament", tid, "", c.teamRuleVersion())
+				delete(tt.UnavailableMetrics, mid)
 			}
 		}
 		c.Teams[tid] = tt
@@ -892,19 +922,16 @@ func (c *Corpus) teamRuleVersion() string {
 
 // withAggregationRef appends the canonical aggregation entity ref to an
 // aggregated metric's lineage. The id is scope/subject/role/metric/algorithm-
-// metric-version and rule-version qualified so each aggregation entity is
-// stable and match/scope distinct; child refs are retained underneath. When
-// the team registry is absent, ruleVersion falls back to the player scoring
-// version.
-func withAggregationRef(agg AggregatedMetric, scope, subject, role, ruleVersion string) AggregatedMetric {
-	if ruleVersion == "" {
-		ruleVersion = "ti2026.scoring.v2"
-	}
+// metric-version and score-rule-version qualified so each aggregation entity
+// is stable and match/scope distinct; child refs are retained underneath. The
+// radar/team contract version remains separate provenance on the reference.
+func withAggregationRef(agg AggregatedMetric, scope, subject, role, contractVersion string) AggregatedMetric {
 	agg.Lineage = append(agg.Lineage, EvidenceRef{
-		MatchID:     "", // aggregation is corpus/scope-qualified, not match-scoped
-		Kind:        "aggregation",
-		ID:          fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, agg.MetricVersion, ruleVersion),
-		RuleVersion: ruleVersion,
+		MatchID:         "", // aggregation is corpus/scope-qualified, not match-scoped
+		Kind:            "aggregation",
+		ID:              fmt.Sprintf("aggregation:%s:%s:%s:%s:%s:%s", scope, subject, role, agg.MetricID, agg.MetricVersion, version.ScoreRuleVersion),
+		RuleVersion:     version.ScoreRuleVersion,
+		ContractVersion: contractVersion,
 	})
 	return agg
 }
@@ -957,11 +984,12 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 	}
 	ps := &PlayerScore{
 		AccountID: pt.AccountID, TeamID: pt.TeamID, NominalRole: pt.NominalRole,
-		ScoringVersion:    cv.SchemaVersion,
-		MetricPercentiles: map[string]PercentileResult{},
-		AggregatedMetrics: map[string]AggregatedMetric{},
-		OfficialAxes:      map[string]AxisResult{},
-		ExperimentalAxes:  map[string]AxisResult{},
+		ScoringVersion:     cv.SchemaVersion,
+		MetricPercentiles:  map[string]PercentileResult{},
+		AggregatedMetrics:  map[string]AggregatedMetric{},
+		UnavailableMetrics: map[string]UnavailableMetric{},
+		OfficialAxes:       map[string]AxisResult{},
+		ExperimentalAxes:   map[string]AxisResult{},
 		SubjectCoverage: SubjectCoverage{
 			EligibleMatches: pt.EligibleMatches, MatchIDs: pt.MatchIDs,
 			PublishedMetrics: len(pt.Metrics), CorpusMatches: c.MatchCount(),
@@ -972,6 +1000,9 @@ func (c *Corpus) ScorePlayer(account, role string) *PlayerScore {
 	// Carry the aggregated raw values + typed lineage for drilldown.
 	for mid, am := range pt.Metrics {
 		ps.AggregatedMetrics[mid] = am
+	}
+	for mid, unavailable := range pt.UnavailableMetrics {
+		ps.UnavailableMetrics[mid] = unavailable
 	}
 
 	// Step 1: normalize every published tournament metric to a same-role
@@ -1037,9 +1068,10 @@ func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 	}
 	ts := &TeamScore{
 		TeamID: teamID, ScoringVersion: tc.SchemaVersion,
-		MetricPercentiles: map[string]PercentileResult{},
-		AggregatedMetrics: map[string]AggregatedMetric{},
-		OfficialAxes:      map[string]AxisResult{},
+		MetricPercentiles:  map[string]PercentileResult{},
+		AggregatedMetrics:  map[string]AggregatedMetric{},
+		UnavailableMetrics: map[string]UnavailableMetric{},
+		OfficialAxes:       map[string]AxisResult{},
 		SubjectCoverage: SubjectCoverage{
 			EligibleMatches: tt.EligibleMatches, MatchIDs: tt.MatchIDs,
 			PublishedMetrics: len(tt.Metrics), CorpusMatches: c.MatchCount(),
@@ -1050,6 +1082,9 @@ func (c *Corpus) ScoreTeam(teamID string) *TeamScore {
 	// the aggregation entity) for drilldown.
 	for mid, am := range tt.Metrics {
 		ts.AggregatedMetrics[mid] = am
+	}
+	for mid, unavailable := range tt.UnavailableMetrics {
+		ts.UnavailableMetrics[mid] = unavailable
 	}
 	for mid, am := range tt.Metrics {
 		cohort := c.TeamCohort(mid)
@@ -1115,12 +1150,14 @@ func (c *Corpus) computeOfficialAxes(pt *PlayerTournament, pcts map[string]Perce
 		ar.Coverage.MetricCount = len(cm)
 		mandatoryMissing := false
 		for mid, w := range cm {
-			cr := ComponentResult{MetricID: mid, Weight: w}
+			cr := ComponentResult{MetricID: mid, MetricVersion: c.metricVersion(mid), Weight: w}
 			pr, ok := pt.Metrics[mid]
-			cr.MetricVersion = pr.MetricVersion
+			if ok {
+				cr.MetricVersion = pr.MetricVersion
+			}
 			pct, ok2 := pcts[mid]
 			if !ok || !pr.OfficialEligible || !ok2 {
-				cr.UnavailableReason = c.missingReason(pt, mid, pr, ok, ok2, "official")
+				cr.UnavailableReason = c.playerMissingReason(pt, mid, pr, ok, ok2, "official")
 				mandatoryMissing = true
 			} else {
 				v := pr.Value
@@ -1169,12 +1206,14 @@ func (c *Corpus) computeTeamAxes(tt *TeamTournament, pcts map[string]PercentileR
 		ar.Coverage.MetricCount = len(cm)
 		mandatoryMissing := false
 		for mid, w := range cm {
-			cr := ComponentResult{MetricID: mid, Weight: w}
+			cr := ComponentResult{MetricID: mid, MetricVersion: c.metricVersion(mid), Weight: w}
 			am, ok := tt.Metrics[mid]
-			cr.MetricVersion = am.MetricVersion
+			if ok {
+				cr.MetricVersion = am.MetricVersion
+			}
 			pct, ok2 := pcts[mid]
 			if !ok || !am.OfficialEligible || !ok2 {
-				cr.UnavailableReason = c.missingReason(tt, mid, am, ok, ok2, "official")
+				cr.UnavailableReason = c.teamMissingReason(tt, mid, am, ok, ok2, "official")
 				mandatoryMissing = true
 			} else {
 				v := am.Value
@@ -1220,8 +1259,7 @@ func (c *Corpus) percentileOf(p *PlayerTournament, mid string) (float64, bool) {
 }
 
 // missingReason builds a precise reason for a missing component.
-func (c *Corpus) missingReason(subject interface {
-}, mid string, am AggregatedMetric, ok, ok2 bool, layer string) string {
+func (c *Corpus) missingReason(mid string, am AggregatedMetric, ok, ok2 bool, layer string) string {
 	if !ok {
 		return "metric_not_published:" + mid
 	}
@@ -1232,6 +1270,33 @@ func (c *Corpus) missingReason(subject interface {
 		return "insufficient_cohort:" + mid
 	}
 	return "unknown"
+}
+
+func (c *Corpus) metricVersion(mid string) string {
+	if c.MetricReg != nil {
+		if def := c.MetricReg.Find(mid); def != nil {
+			return def.MetricVersion
+		}
+	}
+	return ""
+}
+
+func (c *Corpus) playerMissingReason(pt *PlayerTournament, mid string, am AggregatedMetric, ok, ok2 bool, layer string) string {
+	if !ok {
+		if unavailable, found := pt.UnavailableMetrics[mid]; found && unavailable.UnavailableReason != "" {
+			return unavailable.UnavailableReason
+		}
+	}
+	return c.missingReason(mid, am, ok, ok2, layer)
+}
+
+func (c *Corpus) teamMissingReason(tt *TeamTournament, mid string, am AggregatedMetric, ok, ok2 bool, layer string) string {
+	if !ok {
+		if unavailable, found := tt.UnavailableMetrics[mid]; found && unavailable.UnavailableReason != "" {
+			return unavailable.UnavailableReason
+		}
+	}
+	return c.missingReason(mid, am, ok, ok2, layer)
 }
 
 // missingMetricPolicyReason summarizes which components failed.
@@ -1401,12 +1466,19 @@ func (c *Corpus) computeExperimentalAxes(ps *PlayerScore) map[string]AxisResult 
 	for _, axis := range cv.AxisNames() {
 		ar := AxisResult{Axis: axis, DisplayZh: cv.AxisDisplayNameZh(axis), Components: map[string]ComponentResult{}, Suppressed: true}
 		official := ps.OfficialAxes[axis]
+		v3Comps := cv.ExperimentalComponentsByAxis[axis]
 		if !official.Published {
+			for _, mid := range v3Comps {
+				reason := "v3_component_not_published"
+				if unavailable, found := ps.UnavailableMetrics[mid]; found && unavailable.UnavailableReason != "" {
+					reason = unavailable.UnavailableReason
+				}
+				ar.Components[mid] = ComponentResult{MetricID: mid, MetricVersion: c.metricVersion(mid), UnavailableReason: reason}
+			}
 			ar.Reason = "official_axis_unavailable"
 			out[axis] = ar
 			continue
 		}
-		v3Comps := cv.ExperimentalComponentsByAxis[axis]
 		var v3Pcts []float64
 		for _, mid := range v3Comps {
 			if pr, ok := ps.MetricPercentiles[mid]; ok && pr.ExperimentalEligible {
@@ -1414,7 +1486,11 @@ func (c *Corpus) computeExperimentalAxes(ps *PlayerScore) map[string]AxisResult 
 				cr := ComponentResult{MetricID: mid, MetricVersion: pr.MetricVersion, Published: true, Percentile: &pr.Percentile, Weight: 0.25}
 				ar.Components[mid] = cr
 			} else {
-				ar.Components[mid] = ComponentResult{MetricID: mid, UnavailableReason: "v3_component_not_published"}
+				reason := "v3_component_not_published"
+				if unavailable, found := ps.UnavailableMetrics[mid]; found && unavailable.UnavailableReason != "" {
+					reason = unavailable.UnavailableReason
+				}
+				ar.Components[mid] = ComponentResult{MetricID: mid, MetricVersion: c.metricVersion(mid), UnavailableReason: reason}
 			}
 		}
 		if len(v3Pcts) == 0 {

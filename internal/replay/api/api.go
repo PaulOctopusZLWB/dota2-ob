@@ -596,6 +596,9 @@ func (s *Server) corpusScoresFor() *scoring.CorpusScores {
 	if cs.SchemaVersion != version.ScoreSchema || cs.RuleVersion != version.ScoreRuleVersion {
 		return nil
 	}
+	if err := scoring.ValidateCorpusScores(&cs, s.MetricReg); err != nil {
+		return nil
+	}
 	return &cs
 }
 

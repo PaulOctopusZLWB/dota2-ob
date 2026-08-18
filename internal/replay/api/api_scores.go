@@ -398,6 +398,21 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 	prevRole := eff.NominalRole
 	sourceRole := eff.SourceNominalRole
 
+	// A role override is a score-recomputation transaction, not a migration
+	// escape hatch. Refuse to mutate when the current authoritative corpus is
+	// current-tagged but internally corrupt; rollback must preserve those exact
+	// bytes for explicit repair/re-score rather than silently blessing them.
+	var currentScores scoring.CorpusScores
+	if err := s.Store.ReadJSONFile(filepath.Join(s.Store.Root, "scores-corpus.json"), &currentScores); err == nil {
+		if err := scoring.ValidateCorpusScores(&currentScores, s.MetricReg); err != nil {
+			writeErr(w, http.StatusInternalServerError, "score_corpus_invalid_before_override:"+err.Error())
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		writeErr(w, http.StatusInternalServerError, "score_corpus_unreadable_before_override")
+		return
+	}
+
 	// Snapshot every authoritative file this mutation may touch so a failure
 	// can roll back to the exact pre-mutation bytes.
 	paths := s.roleMutationPaths(req.MatchID)
@@ -625,6 +640,9 @@ func (s *Server) matchScoresFor(matchID string) *scoring.MatchScores {
 		return nil
 	}
 	if ms.SchemaVersion != version.ScoreSchema || ms.RuleVersion != version.ScoreRuleVersion {
+		return nil
+	}
+	if err := scoring.ValidateMatchScores(&ms, s.MetricReg); err != nil {
 		return nil
 	}
 	return &ms
