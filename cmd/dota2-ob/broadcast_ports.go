@@ -35,6 +35,7 @@ type productBroadcastRuntime interface {
 	broadcastPorts
 	io.Closer
 	applyObservation(context.Context, contracts.LiveObservationV1) error
+	applyRecord(context.Context, contracts.LiveObservationV1, string) error
 	session.StartupPublicationBarrier
 	session.RejectionHealthSink
 }
@@ -145,17 +146,23 @@ func newPolicyObservationProjection(runtime productBroadcastRuntime, tracker *op
 func (p policyObservationProjection) Apply(ctx context.Context, record *session.Record) error {
 	observation, err := p.mapObservation(record)
 	if err == nil {
+		rawRecordSHA256, hashErr := session.RecordV3SHA256(record)
+		if hashErr != nil {
+			err = hashErr
+		}
 		request, marshalErr := contracts.MarshalCanonical(observation)
-		if marshalErr != nil {
+		if err != nil {
+			// retain the source identity error
+		} else if marshalErr != nil {
 			err = marshalErr
 		} else if len(request) > contracts.MaxLiveObservationBytes {
-			err = p.runtime.applyObservation(ctx, observation)
+			err = p.runtime.applyRecord(ctx, observation, rawRecordSHA256)
 		} else {
 			var decoded contracts.LiveObservationV1
 			if decodeErr := contracts.DecodeStrict(request, &decoded); decodeErr != nil {
 				err = decodeErr
 			} else {
-				err = p.runtime.applyObservation(ctx, decoded)
+				err = p.runtime.applyRecord(ctx, decoded, rawRecordSHA256)
 			}
 		}
 	}

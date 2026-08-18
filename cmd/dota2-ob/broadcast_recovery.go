@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +17,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-const observationIndexEntryBytes = 16
+const observationIndexEntryBytes = 16 + 32
 
 type observationResolver struct {
 	rawPath        string
@@ -132,37 +133,42 @@ func recoverProductionApplication(store *commitlog.StoreV2, sessionID string, li
 }
 
 func (r *observationResolver) readCommittedObservation(sequence uint64) (*contracts.LiveObservationV1, error) {
+	observation, _, err := r.readCommittedObservationWithRecordSHA(sequence)
+	return observation, err
+}
+
+func (r *observationResolver) readCommittedObservationWithRecordSHA(sequence uint64) (*contracts.LiveObservationV1, string, error) {
 	if sequence == 0 {
-		return nil, errors.New("committed observation sequence is invalid")
+		return nil, "", errors.New("committed observation sequence is invalid")
 	}
 	if err := r.ensureIndex(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if sequence > r.maximum {
-		return nil, fmt.Errorf("committed record %d unavailable", sequence)
+		return nil, "", fmt.Errorf("committed record %d unavailable", sequence)
 	}
-	offset, length, err := r.indexEntry(sequence)
+	offset, length, rawRecordSHA256, err := r.indexEntry(sequence)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if length == 0 || length > contracts.MaxLiveObservationBytes {
-		return nil, errors.New("committed sequence has no produced observation")
+		return nil, "", errors.New("committed sequence has no produced observation")
 	}
 	payload := make([]byte, length)
 	if _, err := r.data.ReadAt(payload, int64(offset)); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var observation contracts.LiveObservationV1
 	if err := contracts.DecodeStrict(payload, &observation); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := observation.Validate(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if observation.Evidence.SessionID != r.sessionID || observation.Evidence.Sequence != sequence {
-		return nil, errors.New("persisted observation identity mismatch")
+		return nil, "", errors.New("persisted observation identity mismatch")
 	}
-	return &observation, nil
+	return &observation, rawRecordSHA256, nil
 }
 
 func (r *observationResolver) ensureIndex() (resultErr error) {
@@ -216,7 +222,16 @@ func (r *observationResolver) ensureIndex() (resultErr error) {
 		}
 		var entry [observationIndexEntryBytes]byte
 		binary.BigEndian.PutUint64(entry[:8], offset)
-		binary.BigEndian.PutUint64(entry[8:], uint64(len(payload)))
+		binary.BigEndian.PutUint64(entry[8:16], uint64(len(payload)))
+		recordSHA256, hashErr := session.RecordV3SHA256(record)
+		if hashErr != nil {
+			return hashErr
+		}
+		digest, hashErr := hex.DecodeString(recordSHA256)
+		if hashErr != nil || len(digest) != 32 {
+			return errors.New("invalid retained raw-record digest")
+		}
+		copy(entry[16:], digest)
 		if _, writeErr := index.Write(entry[:]); writeErr != nil {
 			return writeErr
 		}
@@ -236,15 +251,15 @@ func (r *observationResolver) ensureIndex() (resultErr error) {
 	return nil
 }
 
-func (r *observationResolver) indexEntry(sequence uint64) (uint64, uint64, error) {
+func (r *observationResolver) indexEntry(sequence uint64) (uint64, uint64, string, error) {
 	var encoded [observationIndexEntryBytes]byte
 	if _, err := r.index.ReadAt(encoded[:], int64(sequence-1)*observationIndexEntryBytes); err != nil {
 		if errors.Is(err, io.EOF) {
-			return 0, 0, fmt.Errorf("committed record %d unavailable", sequence)
+			return 0, 0, "", fmt.Errorf("committed record %d unavailable", sequence)
 		}
-		return 0, 0, err
+		return 0, 0, "", err
 	}
-	return binary.BigEndian.Uint64(encoded[:8]), binary.BigEndian.Uint64(encoded[8:]), nil
+	return binary.BigEndian.Uint64(encoded[:8]), binary.BigEndian.Uint64(encoded[8:16]), hex.EncodeToString(encoded[16:]), nil
 }
 
 func canonicalEqual(left, right any) bool {

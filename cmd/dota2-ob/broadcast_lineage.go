@@ -50,7 +50,7 @@ func expectedProductLineageArtifactsV3() productLineageArtifacts {
 			productRecoverySourceSHA256, productRuntimeSourceSHA256, productLineageSourceSHA256,
 			productLiveOnlySourceSHA256, productRecoveryV3SourceSHA256, productRuntimeV3SourceSHA256,
 			sessionHighWaterSourceSHA256, sessionFollowerSourceSHA256,
-			insightEngineSourceSHA256, policyEngineSourceSHA256, policyApplicationSourceSHA256, insight.RulesArtifact().ContentSHA256),
+			insightEngineSourceSHA256, insightLiveOnlyV2SourceSHA256, policyEngineSourceSHA256, policyApplicationSourceSHA256, insight.RulesArtifact().ContentSHA256),
 	}
 }
 

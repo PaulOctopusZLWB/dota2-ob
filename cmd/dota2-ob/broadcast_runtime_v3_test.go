@@ -159,6 +159,41 @@ func TestBroadcastRuntimeV3ProducesOnlyDurableV3TerminalCommit(t *testing.T) {
 	}
 }
 
+func TestBroadcastRuntimeV3RejectsFamilyEvidenceBeforePolicyPublication(t *testing.T) {
+	now := time.UnixMilli(10_000).UTC()
+	for name, mutate := range map[string]func(*insight.LiveOnlyEvaluationV2){
+		"missing":   func(result *insight.LiveOnlyEvaluationV2) { result.Audits = result.Audits[:7] },
+		"duplicate": func(result *insight.LiveOnlyEvaluationV2) { result.Audits[1] = result.Audits[0] },
+		"spliced":   func(result *insight.LiveOnlyEvaluationV2) { result.Audits[2].RawSequence++ },
+		"leaking":   func(result *insight.LiveOnlyEvaluationV2) { result.Audits[3].OverlayOrDisplayEmitted = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			const sessionID = "live-family-barrier"
+			runtime, err := newBroadcastRuntimeV3(broadcastConfigV3{
+				DataRoot: root, SessionID: sessionID, RawPath: filepath.Join(root, sessionID, "raw.jsonl"),
+				Artifacts: testLiveOnlyArtifacts(sessionID), Now: func() time.Time { return now },
+				EvaluateLiveOnlyV2: func(input insight.LiveOnlyInputV2, config insight.Config) insight.LiveOnlyEvaluationV2 {
+					result := insight.EvaluateLiveOnlyV2(input, config)
+					mutate(&result)
+					return result
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			observation := testObservation(sessionID, 1, now)
+			if err := runtime.applyRecord(context.Background(), observation, strings.Repeat("a", 64)); err == nil {
+				t.Fatal("invalid family evidence reached policy publication")
+			}
+			if runtime.app.State().LastObservationSequence != 0 || runtime.overlay.HealthCode != "live_only_family_evidence_invalid" || runtime.overlay.Visibility != "hidden" {
+				t.Fatalf("publication state=%#v overlay=%#v", runtime.app.State(), runtime.overlay)
+			}
+		})
+	}
+}
+
 func TestBroadcastRuntimeV3RestoreReadinessIsCausalAndOneShot(t *testing.T) {
 	now := time.UnixMilli(10_000).UTC()
 	root := t.TempDir()

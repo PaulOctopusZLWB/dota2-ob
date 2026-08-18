@@ -79,6 +79,12 @@ func (r *broadcastRuntime) applyObservation(ctx context.Context, observation con
 	return r.selected.ApplyObservation(ctx, observation)
 }
 
+// V2 semantics remain unchanged; the V3-only raw-record identity is ignored by
+// the immutable snapshot-backed runtime.
+func (r *broadcastRuntime) applyRecord(ctx context.Context, observation contracts.LiveObservationV1, _ string) error {
+	return r.applyObservation(ctx, observation)
+}
+
 func (r *broadcastRuntime) execute(ctx context.Context, command contracts.OperatorCommandV1) (contracts.OperatorCommandResultV1, error) {
 	return r.selected.Execute(ctx, command)
 }
