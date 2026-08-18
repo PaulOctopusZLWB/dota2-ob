@@ -164,6 +164,50 @@ function assertCoverage(stream, eligible) {
   }
 }
 
+async function assertFrozenOpportunityAndLineage(page, base, render) {
+  const m8107 = await api(page, `${base}/api/replay/v1/matches/8946228107`);
+  const rows8107 = m8107.data.metrics.values;
+  const metric = (account, id) => rows8107.find(v => v.account_id === account && v.metric_id === id && v.official_phase === "whole_match");
+  for (const account of ["145957968", "170896543"]) {
+    const row = metric(account, "kill_count");
+    assert.ok(row, `observed-zero kill row missing for ${account}`);
+    assert.strictEqual(row.value, 0, `${account} kill numerator`);
+    assert.strictEqual(row.opportunity_count, 5, `${account} opposing-death opportunities`);
+    assert.strictEqual(row.denominator, 1103, `${account} eligible duration`);
+  }
+  for (const account of ["312436974", "56351509"]) {
+    const row = metric(account, "death_count");
+    assert.ok(row && row.value === 0, `observed-zero death row missing for ${account}`);
+    assert.ok(row.opportunity_count > 0 && row.denominator === 1103, `${account} life-interval/duration proof`);
+  }
+  const nonzero = metric("315272623", "kill_count");
+  assert.ok(nonzero && nonzero.value === 1 && nonzero.opportunity_count === 5, "nonzero kill opportunity is not the opposing-death set");
+
+  const m1919 = await api(page, `${base}/api/replay/v1/matches/${MATCH}`);
+  const rows1919 = m1919.data.metrics.values;
+  for (const expected of [
+    { account: "157475523", id: "hero_damage_total", value: 73913, contributors: 1467 },
+    { account: "320017600", id: "objective_damage_total", value: 13393, contributors: 693 },
+  ]) {
+    const row = rows1919.find(v => v.account_id === expected.account && v.metric_id === expected.id && v.official_phase === "whole_match");
+    assert.ok(row && row.value === expected.value, `${expected.id} frozen value`);
+    const facts = row.evidence.filter(ref => ref.kind === "fact");
+    assert.strictEqual(row.evidence_count, expected.contributors, `${expected.id} evidence_count`);
+    assert.strictEqual(facts.length, expected.contributors, `${expected.id} complete fact refs`);
+    assert.strictEqual(new Set(facts.map(ref => `${ref.match_id}:${ref.id}`)).size, expected.contributors, `${expected.id} unique fact refs`);
+    const last = facts[facts.length - 1];
+    const navigable = await page.evaluate(async (u) => (await fetch(u)).status,
+      `${base}/api/replay/v1/matches/${MATCH}/facts/${last.source_fact_seq}`);
+    assert.strictEqual(navigable, 200, `${expected.id} last contributor not navigable`);
+    if (render) {
+      await page.goto(`${base}/match.html?id=${MATCH}`, { waitUntil: "domcontentloaded" });
+      const selector = `tr[data-metric-id='${expected.id}'][data-account-id='${expected.account}'][data-phase='whole_match'] a[data-evidence-kind='fact']`;
+      await page.waitForSelector(selector, { timeout: 15000 });
+      assert.strictEqual(await page.$$eval(selector, links => links.length), expected.contributors, `${expected.id} rendered contributor links`);
+    }
+  }
+}
+
 async function main() {
   if (!existsSync(join(SOURCE_ROOT, "catalog.json"))) {
     console.error(`probe data root missing: ${SOURCE_ROOT}`);
@@ -196,6 +240,7 @@ async function main() {
       page.on("pageerror", (e) => errors.push(String(e)));
 
       await setToken(page, base);
+	  await assertFrozenOpportunityAndLineage(page, base, true);
 
       // ============ Coherent product workflow: corpus + 5 matches ============
       await page.goto(`${base}/index.html`, { waitUntil: "domcontentloaded" });
@@ -415,6 +460,7 @@ async function main() {
       const restartedBase2 = server.base;
       await setToken(page, restartedBase2);
       await assertRoleAgreement(restartedBase2);
+	  await assertFrozenOpportunityAndLineage(page, restartedBase2, true);
 
       // ============ Click actual rendered lineage links on the match page ============
       // Follow every canonical evidence kind from the actual rendered anchor;
@@ -455,7 +501,7 @@ async function main() {
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen observed-zero/opportunity rows, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

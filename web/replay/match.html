@@ -214,7 +214,7 @@ function render(r) {
     const mrows = r.metrics.values.map(v => {
       const name = (r.participants || []).find(p => p.account_id === v.account_id);
       const subject = name ? esc(name.player_name) + " · 角色" + esc(name.nominal_role || "?") : esc(v.account_id || "match");
-      return `<tr><td>${subject}</td><td>${esc(v.metric_id)}</td><td>${esc(v.official_phase || "-")}</td>`+
+      return `<tr data-metric-id="${esc(v.metric_id)}" data-account-id="${esc(v.account_id || "match")}" data-phase="${esc(v.official_phase || "-")}"><td>${subject}</td><td>${esc(v.metric_id)}</td><td>${esc(v.official_phase || "-")}</td>`+
         `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}</td><td class="num">${esc(v.numerator)}</td>`+
         `<td class="num">${esc(v.denominator)}</td><td class="num">${esc(v.opportunity_count)}</td><td class="num">${esc(v.excluded_count)}</td>`+
         `<td class="hint">${lineageCell(v)}</td></tr>`;

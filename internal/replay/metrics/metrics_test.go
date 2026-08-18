@@ -338,7 +338,7 @@ func TestCalculatorAggregation(t *testing.T) {
 	}
 	got := map[string]float64{}
 	for _, v := range out.Values {
-		if v.AccountID == "a1" {
+		if v.AccountID == "a1" && v.OfficialPhase == "whole_match" {
 			got[v.MetricID] = *v.Value
 		}
 	}
@@ -495,7 +495,7 @@ func TestFrozenPregameFactsRejectedAndPerPhaseReconcile(t *testing.T) {
 
 	for _, v := range out.Values {
 		if directPhaseMetric(v.MetricID) {
-			if v.OfficialPhase == "" || v.Numerator == nil || v.Denominator == nil || v.OpportunityCount <= 0 || v.SampleCount <= 0 || v.EvidenceCount <= 0 || v.Coverage != 1 || v.GapCount != 0 {
+			if v.OfficialPhase == "" || v.Numerator == nil || v.Denominator == nil || v.OpportunityCount <= 0 || v.SampleCount < 0 || v.EvidenceCount < 0 || v.Coverage != 1 || v.GapCount != 0 {
 				t.Fatalf("published direct row missing exact fields: %+v", v)
 			}
 			seenPhase, seenCanonicalObs := false, false
@@ -592,7 +592,7 @@ func TestRegistryResolutionComplete(t *testing.T) {
 	}
 }
 
-func TestDirectOpportunityCountsAreNotCappedByBoundedLineage(t *testing.T) {
+func TestDirectContributorLineageIsComplete(t *testing.T) {
 	reg := testRegistry(t)
 	calc := NewCalculator("m1", []string{"a1", "a2"}, map[string]string{"a1": "p1", "a2": "p2"}, map[string]string{"a1": "T1", "a2": "T2"})
 	calc.SetRegistry(reg)
@@ -606,7 +606,7 @@ func TestDirectOpportunityCountsAreNotCappedByBoundedLineage(t *testing.T) {
 	for _, v := range out.Values {
 		if v.MetricID == "hero_damage_total" && v.AccountID == "a1" && v.OfficialPhase == "whole_match" {
 			if v.OpportunityCount != 70 || v.SampleCount != 70 || v.EvidenceCount != 70 {
-				t.Fatalf("counts inherited bounded lineage: opportunity=%d sample=%d evidence=%d", v.OpportunityCount, v.SampleCount, v.EvidenceCount)
+				t.Fatalf("counts mismatch: opportunity=%d sample=%d evidence=%d", v.OpportunityCount, v.SampleCount, v.EvidenceCount)
 			}
 			factRefs := 0
 			for _, ref := range v.Evidence {
@@ -614,13 +614,66 @@ func TestDirectOpportunityCountsAreNotCappedByBoundedLineage(t *testing.T) {
 					factRefs++
 				}
 			}
-			if factRefs != 64 {
-				t.Fatalf("bounded fact lineage=%d want 64", factRefs)
+			if factRefs != 70 {
+				t.Fatalf("complete fact lineage=%d want 70", factRefs)
 			}
 			return
 		}
 	}
 	t.Fatal("whole-match hero_damage_total not published")
+}
+
+func TestDeclaredOpportunitiesPublishObservedZeroes(t *testing.T) {
+	reg := testRegistry(t)
+	accounts := []string{"r1", "r2", "r3", "r4", "r5", "d1", "d2", "d3", "d4", "d5"}
+	team := map[string]string{}
+	roles := map[string]string{}
+	for i, account := range accounts {
+		if i < 5 {
+			team[account] = "R"
+		} else {
+			team[account] = "D"
+		}
+		roles[account] = "1"
+	}
+	calc := NewCalculator("m1", accounts, map[string]string{}, team)
+	calc.SetRegistry(reg)
+	calc.SetRoles(roles)
+	calc.SetFactsCoverage([]string{facts.FamilyDeathRespawn})
+	for seq := int64(1); seq <= 5; seq++ {
+		killer := "r1"
+		if seq > 1 {
+			killer = "r2"
+		}
+		calc.Feed(&facts.Fact{Seq: seq, Family: facts.FamilyDeathRespawn, GameSecond: float64(seq * 10), GameSecondOK: true,
+			Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "d1", KillerAccount: killer, AssistAccounts: []string{}})})
+	}
+	out := calc.Result(nil, testOfficialPhases(1103))
+	find := func(metric, account string) Value {
+		for _, v := range out.Values {
+			if v.MetricID == metric && v.AccountID == account && v.OfficialPhase == "whole_match" {
+				return v
+			}
+		}
+		t.Fatalf("missing %s observed row for %s", metric, account)
+		return Value{}
+	}
+	for _, account := range []string{"r3", "r4"} {
+		v := find("kill_count", account)
+		if *v.Value != 0 || *v.Numerator != 0 || v.SampleCount != 0 || v.EvidenceCount != 0 || v.OpportunityCount != 5 || *v.Denominator != 1103 {
+			t.Fatalf("%s zero kill row=%+v", account, v)
+		}
+	}
+	nonzero := find("kill_count", "r1")
+	if *nonzero.Value != 1 || nonzero.OpportunityCount != 5 {
+		t.Fatalf("nonzero kill numerator/opportunity=%v/%d want 1/5", *nonzero.Value, nonzero.OpportunityCount)
+	}
+	for _, account := range []string{"r3", "r4"} {
+		v := find("death_count", account)
+		if *v.Value != 0 || v.OpportunityCount != 1 || *v.Denominator != 1103 {
+			t.Fatalf("%s zero death row=%+v", account, v)
+		}
+	}
 }
 
 // TestObjectiveDamageOnlyConfiguredTargets proves objective_damage_total only

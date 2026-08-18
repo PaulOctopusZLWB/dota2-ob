@@ -758,6 +758,7 @@ func (c *Corpus) buildTournaments() {
 	sort.Strings(keys)
 	for _, key := range keys {
 		rows := byKey[key]
+		sort.Slice(rows, func(i, j int) bool { return rows[i].MatchID < rows[j].MatchID })
 		pt := &PlayerTournament{
 			AccountID: rows[0].AccountID, TeamID: rows[0].TeamID, NominalRole: rows[0].NominalRole,
 			EligibleMatches: len(rows), Metrics: map[string]AggregatedMetric{}, RoleProvenance: map[string]RoleProvenance{},
@@ -799,11 +800,24 @@ func (c *Corpus) buildTeams() {
 		}
 		rows[p.TeamID][p.MatchID] = append(rows[p.TeamID][p.MatchID], p)
 	}
-	for tid, byMatch := range rows {
+	teamIDs := make([]string, 0, len(rows))
+	for tid := range rows {
+		teamIDs = append(teamIDs, tid)
+	}
+	sort.Strings(teamIDs)
+	for _, tid := range teamIDs {
+		byMatch := rows[tid]
 		c.TeamMatches[tid] = map[string]*TeamMatch{}
 		tt := &TeamTournament{TeamID: tid, Metrics: map[string]AggregatedMetric{}}
 		teamAgg := map[string][]MetricValue{}
-		for matchID, players := range byMatch {
+		matchIDs := make([]string, 0, len(byMatch))
+		for matchID := range byMatch {
+			matchIDs = append(matchIDs, matchID)
+		}
+		sort.Strings(matchIDs)
+		for _, matchID := range matchIDs {
+			players := byMatch[matchID]
+			sort.Slice(players, func(i, j int) bool { return players[i].AccountID < players[j].AccountID })
 			tm := &TeamMatch{MatchID: matchID, TeamID: tid, Metrics: map[string]AggregatedMetric{}, PlayerCount: len(players)}
 			byMetric := map[string][]MetricValue{}
 			for _, p := range players {
@@ -821,18 +835,14 @@ func (c *Corpus) buildTeams() {
 						OpportunityCount: agg.OpportunityCount,
 						Direction:        agg.Direction, OfficialEligible: agg.OfficialEligible,
 						ExperimentalEligible: agg.ExperimentalEligible,
+						Lineage:              append([]EvidenceRef(nil), agg.Lineage...),
 					})
 				}
 			}
 			c.TeamMatches[tid][matchID] = tm
 		}
 		tt.EligibleMatches = len(byMatch)
-		mids := make([]string, 0, len(byMatch))
-		for m := range byMatch {
-			mids = append(mids, m)
-		}
-		sort.Strings(mids)
-		tt.MatchIDs = mids
+		tt.MatchIDs = append([]string(nil), matchIDs...)
 		for mid, vals := range teamAgg {
 			if agg, ok := c.aggregateValues(mid, vals); ok {
 				tt.Metrics[mid] = withAggregationRef(agg, "team_tournament", tid, "", c.teamRuleVersion())

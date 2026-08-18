@@ -598,6 +598,40 @@ func postPhaseOperation(t *testing.T, baseURL string, req review.PhaseOpReq) (in
 	return resp.StatusCode, rv, wire.Error
 }
 
+func postReviewStatus(t *testing.T, baseURL, matchID, status, author, expectedRevision string) (int, review.Review, string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"match_id": matchID, "status": status, "author": author, "expected_revision": expectedRevision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+Version+"/reviews/status", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var wire struct {
+		Data  json.RawMessage `json:"data"`
+		Error string          `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		t.Fatal(err)
+	}
+	var rv review.Review
+	if len(wire.Data) > 0 {
+		if err := json.Unmarshal(wire.Data, &rv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return resp.StatusCode, rv, wire.Error
+}
+
 func normalizePhaseStream(in []review.PhaseInterval) []review.PhaseInterval {
 	out := append([]review.PhaseInterval(nil), in...)
 	for i := range out {
@@ -1995,6 +2029,58 @@ func TestPhaseMutationStorageFailureReturns500AndIsAtomic(t *testing.T) {
 	got, _ := os.ReadFile(rv.AuditPath())
 	if !bytes.Equal(got, corrupt) {
 		t.Fatal("audit bytes changed on storage failure")
+	}
+}
+
+func TestReviewStatusStorageFailureReturns500AndIsAtomic(t *testing.T) {
+	st := testStore(t)
+	matchID := "8944521919"
+	addCumulativePhaseMatch(t, st, matchID)
+	rv, _ := review.New(st.Root)
+	initial, _ := rv.Load(matchID)
+	corrupt := []byte(`{"broken"`)
+	if err := os.WriteFile(rv.AuditPath(), corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	status, _, apiErr := postReviewStatus(t, ts.URL, matchID, "reviewed", "paul", initial.ReviewRevision)
+	if status != http.StatusInternalServerError || apiErr != "review_status_failed" {
+		t.Fatalf("status=%d error=%q want 500", status, apiErr)
+	}
+	if _, err := os.Stat(rv.Path(matchID)); !os.IsNotExist(err) {
+		t.Fatalf("review mutated on storage failure: %v", err)
+	}
+	got, _ := os.ReadFile(rv.AuditPath())
+	if !bytes.Equal(got, corrupt) {
+		t.Fatal("audit bytes changed on status storage failure")
+	}
+}
+
+func TestReviewStatusStaleRevisionReturns409WithoutMutation(t *testing.T) {
+	st := testStore(t)
+	matchID := "8944521919"
+	addCumulativePhaseMatch(t, st, matchID)
+	rv, _ := review.New(st.Root)
+	initial, _ := rv.Load(matchID)
+	srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	status, updated, apiErr := postReviewStatus(t, ts.URL, matchID, "reviewed", "a", initial.ReviewRevision)
+	if status != http.StatusOK || apiErr != "" || updated.ReviewRevision == initial.ReviewRevision {
+		t.Fatalf("first status=%d error=%q revision=%s", status, apiErr, updated.ReviewRevision)
+	}
+	beforeReview, _ := os.ReadFile(rv.Path(matchID))
+	beforeAudit, _ := os.ReadFile(rv.AuditPath())
+	status, _, apiErr = postReviewStatus(t, ts.URL, matchID, "pending", "b", initial.ReviewRevision)
+	if status != http.StatusConflict || !strings.Contains(apiErr, "review_revision_mismatch") {
+		t.Fatalf("stale status=%d error=%q want 409", status, apiErr)
+	}
+	afterReview, _ := os.ReadFile(rv.Path(matchID))
+	afterAudit, _ := os.ReadFile(rv.AuditPath())
+	if !bytes.Equal(beforeReview, afterReview) || !bytes.Equal(beforeAudit, afterAudit) {
+		t.Fatal("stale status changed review or audit")
 	}
 }
 

@@ -53,9 +53,10 @@ const (
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
 	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v9"
-	// ScoreRuleVersion identifies the radar/score computation rule set.
-	ScoreRuleVersion = "ti2026.scoring.v3"
+	MetricsRuleVersion = "ti2026.metrics.v10"
+	// ScoreRuleVersion identifies the radar/score computation and complete
+	// structured aggregation-lineage rule set.
+	ScoreRuleVersion = "ti2026.scoring.v4"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
-	CorrectionRuleVersion = "ti2026.corrections.v2"
+	CorrectionRuleVersion = "ti2026.corrections.v3"
 )

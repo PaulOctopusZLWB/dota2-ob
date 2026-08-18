@@ -161,9 +161,25 @@ type AuditEntry struct {
 // store root. Reads and writes are serialized by a mutex so loopback review
 // mutations never interleave partial state.
 type Store struct {
-	Root        string
-	mu          sync.Mutex
-	writeAtomic func(string, []byte) error // test injection; nil uses store.WriteAtomic
+	Root            string
+	mu              sync.Mutex
+	writeAtomic     func(string, []byte) error // test injection; nil uses store.WriteAtomic
+	recoveryAtomic  func(string, []byte) error // test injection for rollback/recovery
+	removeAtomicLog func(string) error         // test injection for journal removal
+}
+
+// transactionJournal is a durable prepare record for one review+audit commit.
+// If it exists after interruption or a failed rollback, recovery restores both
+// authoritative files to their exact pre-transaction bytes before any read or
+// subsequent mutation proceeds.
+type transactionJournal struct {
+	SchemaVersion string `json:"schema_version"`
+	ReviewPath    string `json:"review_path"`
+	AuditPath     string `json:"audit_path"`
+	ReviewExisted bool   `json:"review_existed"`
+	AuditExisted  bool   `json:"audit_existed"`
+	PriorReview   []byte `json:"prior_review,omitempty"`
+	PriorAudit    []byte `json:"prior_audit,omitempty"`
 }
 
 type storageError struct{ err error }
@@ -183,10 +199,18 @@ func New(root string) (*Store, error) {
 	if root == "" {
 		return nil, fmt.Errorf("review: empty root")
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("review: resolve root: %w", err)
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("review: mkdir: %w", err)
 	}
-	return &Store{Root: root}, nil
+	s := &Store{Root: abs}
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
+	return s, nil
 }
 
 // Path returns the review document path for a match. The match id is
@@ -218,10 +242,17 @@ func (s *Store) AuditPath() string {
 	return filepath.Join(s.Root, "review-audit.json")
 }
 
+func (s *Store) journalPath() string {
+	return filepath.Join(s.Root, "review-transaction.json")
+}
+
 // Load reads the review document for a match (missing → empty pending).
 func (s *Store) Load(matchID string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	return s.loadUnlocked(matchID)
 }
 
@@ -242,6 +273,9 @@ func LoadByStore(st *store.Store, matchID string) (*Review, error) {
 func (s *Store) AddAuthoritative(matchID string, c Correction, truth MachineTruth) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	r, err := s.loadUnlocked(matchID)
 	if err != nil {
 		return nil, err
@@ -273,6 +307,7 @@ func (s *Store) AddAuthoritative(matchID string, c Correction, truth MachineTrut
 	if r.ReviewStatus == "" || r.ReviewStatus == "pending" {
 		r.ReviewStatus = "in_progress"
 	}
+	r.ReviewRevision = revisionOfReview(r)
 	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: c.Author, Action: "correction_added", MatchID: matchID,
 		CorrectionID: c.ID, Summary: fmt.Sprintf("%s %s", c.Kind, c.EventRef),
@@ -309,6 +344,9 @@ type PhaseContext struct {
 func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	r, err := s.loadUnlocked(matchID)
 	if err != nil {
 		return nil, err
@@ -357,7 +395,7 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 	// Advance the revision from the ordered corrections + canonical effective
 	// stream AFTER this correction, so every success (including accept)
 	// yields a new revision for the next mutation.
-	r.ReviewRevision = revisionOf(r.PhaseCorrections, r.EffectivePhaseIntervals)
+	r.ReviewRevision = revisionOfReview(r)
 	// Commit correction/effective stream/revision and the immutable audit entry
 	// as one logical transaction. Any failure leaves both authoritative files
 	// at their exact prior bytes.
@@ -370,31 +408,20 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 	return r, nil
 }
 
-// revisionOf derives an opaque optimistic-concurrency token from the ordered
-// phase-correction state plus the canonical effective stream. It changes on
-// every correction (including accept, which appends a correction) and after
-// restart reproduces the same value deterministically from the persisted
-// ordered corrections and effective stream.
-func revisionOf(corrections []PhaseCorrectionV2, effective []json.RawMessage) string {
+// revisionOfReview derives an opaque optimistic-concurrency token from every
+// mutable review field. Phase operations, authoritative corrections, status
+// transitions, and effective-overlay writes therefore invalidate stale forms,
+// and restart deterministically reproduces the same token.
+func revisionOfReview(r *Review) string {
 	h := sha256.New()
-	for i := range corrections {
-		c := &corrections[i]
-		h.Write([]byte(c.ID))
-		h.Write([]byte{0})
-		h.Write([]byte(c.Operation))
-		h.Write([]byte{0})
-		if b, err := json.Marshal(c.BeforeStream); err == nil {
-			h.Write(b)
-		}
-		h.Write([]byte{0})
-		if b, err := json.Marshal(c.AfterStream); err == nil {
-			h.Write(b)
-		}
-		h.Write([]byte{0})
-	}
-	for _, iv := range effective {
-		h.Write(iv)
-		h.Write([]byte{0})
+	payload := struct {
+		Corrections             []Correction        `json:"corrections"`
+		PhaseCorrections        []PhaseCorrectionV2 `json:"phase_corrections"`
+		EffectivePhaseIntervals []json.RawMessage   `json:"effective_phase_intervals"`
+		ReviewStatus            string              `json:"review_status"`
+	}{r.Corrections, r.PhaseCorrections, r.EffectivePhaseIntervals, r.ReviewStatus}
+	if b, err := json.Marshal(payload); err == nil {
+		h.Write(b)
 	}
 	return fmt.Sprintf("rev-%x", h.Sum(nil)[:16])
 }
@@ -528,15 +555,16 @@ func findStart(intervals []PhaseInterval, ref string) (PhaseInterval, bool) {
 func (s *Store) SetEffectivePhases(matchID string, effective []json.RawMessage, author string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	r, err := s.loadUnlocked(matchID)
 	if err != nil {
 		return nil, err
 	}
 	r.EffectivePhaseIntervals = effective
-	if err := s.writeJSON(s.Path(matchID), r); err != nil {
-		return nil, err
-	}
-	if err := s.appendAudit(matchID, AuditEntry{
+	r.ReviewRevision = revisionOfReview(r)
+	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: author, Action: "effective_phase_overlay", MatchID: matchID,
 		Summary: fmt.Sprintf("applied %d intervals", len(effective)),
 	}); err != nil {
@@ -546,18 +574,25 @@ func (s *Store) SetEffectivePhases(matchID string, effective []json.RawMessage, 
 }
 
 // SetReviewStatus transitions the review workflow state and audits it.
-func (s *Store) SetReviewStatus(matchID, status, author string) (*Review, error) {
+func (s *Store) SetReviewStatus(matchID, status, author, expectedRevision string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	r, err := s.loadUnlocked(matchID)
 	if err != nil {
 		return nil, err
 	}
-	r.ReviewStatus = status
-	if err := s.writeJSON(s.Path(matchID), r); err != nil {
-		return nil, err
+	if expectedRevision == "" {
+		return nil, staleErrorf("review_revision_required:current=%s", r.ReviewRevision)
 	}
-	if err := s.appendAudit(matchID, AuditEntry{
+	if expectedRevision != r.ReviewRevision {
+		return nil, staleErrorf("review_revision_mismatch:expected=%s current=%s", expectedRevision, r.ReviewRevision)
+	}
+	r.ReviewStatus = status
+	r.ReviewRevision = revisionOfReview(r)
+	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: author, Action: "review_status", MatchID: matchID, Summary: status,
 	}); err != nil {
 		return nil, err
@@ -577,7 +612,7 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 				PhaseCorrections: []PhaseCorrectionV2{},
 				ReviewStatus:     "pending",
 			}
-			rv.ReviewRevision = revisionOf(rv.PhaseCorrections, rv.EffectivePhaseIntervals)
+			rv.ReviewRevision = revisionOfReview(rv)
 			return rv, nil
 		}
 		return nil, err
@@ -590,7 +625,7 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		// predates the optimistic-concurrency field, so the UI always has a
 		// valid token for its first mutation.
 		if r.ReviewRevision == "" {
-			r.ReviewRevision = revisionOf(r.PhaseCorrections, r.EffectivePhaseIntervals)
+			r.ReviewRevision = revisionOfReview(&r)
 		}
 		return &r, nil
 	}
@@ -601,7 +636,7 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		return nil, err
 	}
 	if migrated.ReviewRevision == "" {
-		migrated.ReviewRevision = revisionOf(migrated.PhaseCorrections, migrated.EffectivePhaseIntervals)
+		migrated.ReviewRevision = revisionOfReview(migrated)
 	}
 	return migrated, nil
 }
@@ -612,6 +647,9 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 func (s *Store) MigrateV1(matchID string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	r, err := s.loadUnlocked(matchID)
 	if err != nil {
 		return nil, err
@@ -754,10 +792,92 @@ func (s *Store) writeBytes(path string, b []byte) error {
 	return store.WriteAtomic(path, b)
 }
 
-// commitReviewAndAudit prepares both complete documents before writing. The
-// audit is promoted first; if the review promotion then fails, the audit is
-// restored byte-for-byte. A corrupt/unreadable audit fails before either file
-// is touched, and an audit write failure cannot advance the review.
+func (s *Store) recoveryWrite(path string, b []byte) error {
+	if s.recoveryAtomic != nil {
+		return s.recoveryAtomic(path, b)
+	}
+	return store.WriteAtomic(path, b)
+}
+
+func (s *Store) removeJournal() error {
+	if s.removeAtomicLog != nil {
+		return s.removeAtomicLog(s.journalPath())
+	}
+	err := os.Remove(s.journalPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func readPrior(path string) ([]byte, bool, error) {
+	b, err := os.ReadFile(path)
+	if err == nil {
+		return b, true, nil
+	}
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
+func (s *Store) restoreFile(path string, existed bool, b []byte) error {
+	if existed {
+		return s.recoveryWrite(path, b)
+	}
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// restoreTransaction rolls both authoritative documents back to the exact
+// prepared bytes. The journal is removed only after both restorations succeed;
+// otherwise it remains durable for the next restart/recovery attempt.
+func (s *Store) restoreTransaction(tx *transactionJournal) error {
+	if err := s.restoreFile(tx.ReviewPath, tx.ReviewExisted, tx.PriorReview); err != nil {
+		return fmt.Errorf("restore review: %w", err)
+	}
+	if err := s.restoreFile(tx.AuditPath, tx.AuditExisted, tx.PriorAudit); err != nil {
+		return fmt.Errorf("restore audit: %w", err)
+	}
+	if err := s.removeJournal(); err != nil {
+		return fmt.Errorf("remove transaction journal: %w", err)
+	}
+	return nil
+}
+
+// recoverPending runs before every read/mutation and at Store construction.
+// A prepared transaction is always rolled back, so an interrupted process or
+// double I/O failure can never expose a split review/audit revision.
+func (s *Store) recoverPending() error {
+	b, err := os.ReadFile(s.journalPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var tx transactionJournal
+	if err := json.Unmarshal(b, &tx); err != nil {
+		return fmt.Errorf("decode transaction journal: %w", err)
+	}
+	if tx.SchemaVersion != version.CorrectionRuleVersion || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
+		return fmt.Errorf("invalid transaction journal")
+	}
+	reviewRoot := filepath.Join(s.Root, "matches") + string(os.PathSeparator)
+	if len(tx.ReviewPath) <= len(reviewRoot) || tx.ReviewPath[:len(reviewRoot)] != reviewRoot {
+		return fmt.Errorf("transaction review path outside store")
+	}
+	return s.restoreTransaction(&tx)
+}
+
+// commitReviewAndAudit prepares both complete documents and durably records
+// their exact prior bytes before either promotion. Any failed promotion rolls
+// both back. If rollback itself fails, the journal survives so Store restart
+// (or the next operation) deterministically completes recovery before serving
+// data.
 func (s *Store) commitReviewAndAudit(matchID string, r *Review, e AuditEntry) error {
 	reviewBytes, err := json.Marshal(r)
 	if err != nil {
@@ -785,48 +905,55 @@ func (s *Store) commitReviewAndAudit(matchID string, r *Review, e AuditEntry) er
 	if err != nil {
 		return &storageError{fmt.Errorf("marshal audit: %w", err)}
 	}
-	if err := s.writeBytes(auditPath, auditBytes); err != nil {
-		return &storageError{fmt.Errorf("write audit: %w", err)}
+	reviewPath := s.Path(matchID)
+	priorReview, priorReviewExists, err := readPrior(reviewPath)
+	if err != nil {
+		return &storageError{fmt.Errorf("read review: %w", err)}
 	}
-	if err := s.writeBytes(s.Path(matchID), reviewBytes); err != nil {
-		var restoreErr error
-		if priorAuditExists {
-			restoreErr = store.WriteAtomic(auditPath, priorAudit)
-		} else {
-			restoreErr = os.Remove(auditPath)
-			if os.IsNotExist(restoreErr) {
-				restoreErr = nil
+	tx := transactionJournal{
+		SchemaVersion: version.CorrectionRuleVersion,
+		ReviewPath:    reviewPath, AuditPath: auditPath,
+		ReviewExisted: priorReviewExists, AuditExisted: priorAuditExists,
+		PriorReview: priorReview, PriorAudit: priorAudit,
+	}
+	journalBytes, err := json.Marshal(&tx)
+	if err != nil {
+		return &storageError{fmt.Errorf("marshal transaction journal: %w", err)}
+	}
+	if err := s.writeBytes(s.journalPath(), journalBytes); err != nil {
+		return &storageError{fmt.Errorf("prepare transaction journal: %w", err)}
+	}
+	promote := func(label, path string, b []byte) error {
+		if err := s.writeBytes(path, b); err != nil {
+			if restoreErr := s.restoreTransaction(&tx); restoreErr != nil {
+				return &storageError{fmt.Errorf("%s promotion: %v; durable recovery pending: %w", label, err, restoreErr)}
 			}
+			return &storageError{fmt.Errorf("%s promotion: %w", label, err)}
 		}
-		if restoreErr != nil {
-			return &storageError{fmt.Errorf("write review: %v; restore audit: %w", err, restoreErr)}
+		return nil
+	}
+	if err := promote("audit", auditPath, auditBytes); err != nil {
+		return err
+	}
+	if err := promote("review", reviewPath, reviewBytes); err != nil {
+		return err
+	}
+	if err := s.removeJournal(); err != nil {
+		if restoreErr := s.restoreTransaction(&tx); restoreErr != nil {
+			return &storageError{fmt.Errorf("commit journal removal: %v; durable recovery pending: %w", err, restoreErr)}
 		}
-		return &storageError{fmt.Errorf("write review: %w", err)}
+		return &storageError{fmt.Errorf("commit journal removal: %w", err)}
 	}
 	return nil
-}
-
-// appendAudit appends one immutable audit entry.
-func (s *Store) appendAudit(matchID string, e AuditEntry) error {
-	var a Audit
-	if err := s.readJSON(s.AuditPath(), &a); err != nil {
-		if os.IsNotExist(err) {
-			a = Audit{SchemaVersion: version.CorrectionSchema, Entries: []AuditEntry{}}
-		} else {
-			return err
-		}
-	}
-	e.Seq = int64(len(a.Entries) + 1)
-	e.AppliedAt = time.Now().UTC()
-	e.MatchID = matchID
-	a.Entries = append(a.Entries, e)
-	return s.writeJSON(s.AuditPath(), a)
 }
 
 // LoadAudit returns the full audit log, newest first.
 func (s *Store) LoadAudit() (*Audit, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{fmt.Errorf("recover pending transaction: %w", err)}
+	}
 	var a Audit
 	if err := s.readJSON(s.AuditPath(), &a); err != nil {
 		if os.IsNotExist(err) {

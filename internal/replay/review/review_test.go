@@ -165,7 +165,11 @@ func TestSetReviewStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rv, err := s.SetReviewStatus("m1", "reviewed", "paul")
+	before, err := s.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rv, err := s.SetReviewStatus("m1", "reviewed", "paul", before.ReviewRevision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +183,172 @@ func TestSetReviewStatus(t *testing.T) {
 	if loaded.ReviewStatus != "reviewed" {
 		t.Fatalf("reload status=%s", loaded.ReviewStatus)
 	}
+}
+
+type reviewMutator func(*Store) error
+
+func seededAtomicStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyPhaseOp("m1", atomicTestContext(), PhaseOpReq{
+		Op: OpAccept, EventRef: "interval@0-100", ExpectedRevision: r.ReviewRevision, Author: "seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return s, root
+}
+
+func atomicMutators() map[string]reviewMutator {
+	return map[string]reviewMutator{
+		"phase_op": func(s *Store) error {
+			r, err := s.Load("m1")
+			if err != nil {
+				return err
+			}
+			_, err = s.ApplyPhaseOp("m1", atomicTestContext(), PhaseOpReq{
+				Op: OpAccept, EventRef: "interval@0-100", ExpectedRevision: r.ReviewRevision, Author: "test",
+			})
+			return err
+		},
+		"review_status": func(s *Store) error {
+			r, err := s.Load("m1")
+			if err != nil {
+				return err
+			}
+			_, err = s.SetReviewStatus("m1", "reviewed", "test", r.ReviewRevision)
+			return err
+		},
+		"effective_overlay": func(s *Store) error {
+			_, err := s.SetEffectivePhases("m1", []json.RawMessage{json.RawMessage(`{"global_phase":"laning","start_game_second":0,"end_game_second":100}`)}, "test")
+			return err
+		},
+	}
+}
+
+func authoritativeBytes(t *testing.T, s *Store) ([]byte, []byte) {
+	t.Helper()
+	reviewBytes, err := os.ReadFile(s.Path("m1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditBytes, err := os.ReadFile(s.AuditPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reviewBytes, auditBytes
+}
+
+func assertAuthoritativeBytes(t *testing.T, s *Store, wantReview, wantAudit []byte) {
+	t.Helper()
+	gotReview, gotAudit := authoritativeBytes(t, s)
+	if string(gotReview) != string(wantReview) || string(gotAudit) != string(wantAudit) {
+		t.Fatal("review/audit bytes diverged from the committed revision")
+	}
+}
+
+func TestEveryReviewMutationFailedSecondPromotionRollsBack(t *testing.T) {
+	for name, mutate := range atomicMutators() {
+		t.Run(name, func(t *testing.T) {
+			s, _ := seededAtomicStore(t)
+			beforeReview, beforeAudit := authoritativeBytes(t, s)
+			s.writeAtomic = func(path string, b []byte) error {
+				if path == s.Path("m1") {
+					return fmt.Errorf("injected failed second promotion")
+				}
+				return store.WriteAtomic(path, b)
+			}
+			if err := mutate(s); !IsStorageError(err) {
+				t.Fatalf("err=%v want storage error", err)
+			}
+			assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+			if _, err := os.Stat(s.journalPath()); !os.IsNotExist(err) {
+				t.Fatalf("completed rollback left journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestEveryReviewMutationFailedRollbackRecoversOnRestart(t *testing.T) {
+	for name, mutate := range atomicMutators() {
+		t.Run(name, func(t *testing.T) {
+			s, root := seededAtomicStore(t)
+			beforeReview, beforeAudit := authoritativeBytes(t, s)
+			s.writeAtomic = func(path string, b []byte) error {
+				if path == s.Path("m1") {
+					return fmt.Errorf("injected failed second promotion")
+				}
+				return store.WriteAtomic(path, b)
+			}
+			s.recoveryAtomic = func(string, []byte) error { return fmt.Errorf("injected failed rollback") }
+			if err := mutate(s); !IsStorageError(err) {
+				t.Fatalf("err=%v want storage error", err)
+			}
+			if _, err := os.Stat(s.journalPath()); err != nil {
+				t.Fatalf("durable recovery journal missing: %v", err)
+			}
+			restarted, err := New(root)
+			if err != nil {
+				t.Fatalf("restart recovery: %v", err)
+			}
+			assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+			if _, err := os.Stat(restarted.journalPath()); !os.IsNotExist(err) {
+				t.Fatalf("restart recovery left journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestEveryReviewMutationCorruptOrUnwritableAuditIsAtomic(t *testing.T) {
+	for name, mutate := range atomicMutators() {
+		t.Run(name+"_corrupt", func(t *testing.T) {
+			s, _ := seededAtomicStore(t)
+			corrupt := []byte(`{"broken"`)
+			if err := os.WriteFile(s.AuditPath(), corrupt, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			beforeReview, _ := os.ReadFile(s.Path("m1"))
+			if err := mutate(s); !IsStorageError(err) {
+				t.Fatalf("err=%v want storage error", err)
+			}
+			assertAuthoritativeBytes(t, s, beforeReview, corrupt)
+		})
+		t.Run(name+"_unwritable", func(t *testing.T) {
+			s, _ := seededAtomicStore(t)
+			beforeReview, beforeAudit := authoritativeBytes(t, s)
+			s.writeAtomic = func(path string, b []byte) error {
+				if path == s.AuditPath() {
+					return fmt.Errorf("injected unwritable audit")
+				}
+				return store.WriteAtomic(path, b)
+			}
+			if err := mutate(s); !IsStorageError(err) {
+				t.Fatalf("err=%v want storage error", err)
+			}
+			assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+		})
+	}
+}
+
+func TestReviewStatusStaleRevisionIsMutationFree(t *testing.T) {
+	s, _ := seededAtomicStore(t)
+	current, _ := s.Load("m1")
+	staleRevision := current.ReviewRevision
+	if _, err := s.SetReviewStatus("m1", "reviewed", "a", staleRevision); err != nil {
+		t.Fatal(err)
+	}
+	beforeReview, beforeAudit := authoritativeBytes(t, s)
+	if _, err := s.SetReviewStatus("m1", "pending", "b", staleRevision); !IsStale(err) {
+		t.Fatalf("err=%v want stale", err)
+	}
+	assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
 }
 
 // TestPhaseOverlayTypedOps exercises accept/move/relabel/add/delete/split/

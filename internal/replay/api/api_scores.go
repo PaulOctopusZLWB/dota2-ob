@@ -288,9 +288,10 @@ func (s *Server) validMatchID(matchID string) bool {
 
 // reviewStatusReq is the review-status transition payload.
 type reviewStatusReq struct {
-	MatchID string `json:"match_id"`
-	Status  string `json:"status"`
-	Author  string `json:"author"`
+	MatchID          string `json:"match_id"`
+	Status           string `json:"status"`
+	Author           string `json:"author"`
+	ExpectedRevision string `json:"expected_revision"`
 }
 
 // handleReviewStatus transitions a match's review workflow state.
@@ -317,8 +318,12 @@ func (s *Server) handleReviewStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_review_status")
 		return
 	}
-	rv, err := s.Reviews.SetReviewStatus(req.MatchID, req.Status, req.Author)
+	rv, err := s.Reviews.SetReviewStatus(req.MatchID, req.Status, req.Author, req.ExpectedRevision)
 	if err != nil {
+		if review.IsStale(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "review_status_failed")
 		return
 	}

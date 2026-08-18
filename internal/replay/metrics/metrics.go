@@ -212,10 +212,12 @@ type Calculator struct {
 	// evidence: "account\x00metric" -> ordered typed evidence refs (facts,
 	// episodes, phases) that produced the metric's observations.
 	evidence map[string][]EvidenceRef
-	// samples counts every accepted source observation even when evidence
-	// lineage is bounded for artifact size. Published opportunity/sample
-	// counts must never inherit that lineage cap.
+	// samples is the numerator contributor count, never a shortcut for the
+	// metric's independently declared opportunity.
 	samples map[string]int64
+	// opportunities contains independently evaluated opportunity facts for
+	// count metrics whose opportunity differs from their numerator.
+	opportunities map[string][]EvidenceRef
 
 	// factsCoverage is the per-family availability from the match's facts
 	// summary, used to resolve per-metric field gates precisely.
@@ -269,6 +271,7 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		teams:          map[string]map[string]float64{},
 		evidence:       map[string][]EvidenceRef{},
 		samples:        map[string]int64{},
+		opportunities:  map[string][]EvidenceRef{},
 		factsCoverage:  map[string]bool{},
 		healCasts:      map[string]int64{}, smokeParticles: map[string]int64{},
 		buybackRoundPart: map[string]int64{}, buybackTotal: map[string]int64{},
@@ -375,6 +378,11 @@ func (c *Calculator) Feed(f *facts.Fact) {
 	if f == nil {
 		return
 	}
+	// Receiving a normalized fact is itself positive evidence that the
+	// accepted adapter emitted this family. The runner additionally supplies
+	// summary coverage, which is needed to publish observed zeroes when a
+	// family is covered but has no subject numerator event.
+	c.factsCoverage[f.Family] = true
 	cp := *f
 	cp.Payload = append(json.RawMessage(nil), f.Payload...)
 	c.pendingFacts = append(c.pendingFacts, &cp)
@@ -394,6 +402,20 @@ func (c *Calculator) feedAccepted(f *facts.Fact) {
 		}
 		switch drb.Kind {
 		case "death":
+			victimTeam := c.teamByAcct[drb.AccountID]
+			killerTeam := c.teamByAcct[drb.KillerAccount]
+			// Opportunities are every verified opposing-hero death, evaluated
+			// for all players on the killer's team independently of numerator
+			// credit. The normalized death fact always carries the parser's
+			// complete credited-assistant list (including an empty list).
+			if victimTeam != "" && killerTeam != "" && victimTeam != killerTeam {
+				for _, account := range c.accounts {
+					if c.teamByAcct[account] == killerTeam {
+						c.addOpportunity(account, "kill_count", f.Seq)
+						c.addOpportunity(account, "assist_count", f.Seq)
+					}
+				}
+			}
 			c.deaths[drb.AccountID]++
 			c.addEvidence(drb.AccountID, "death_count", f.Seq)
 			c.addSample(drb.AccountID, "death_count")
@@ -569,6 +591,17 @@ func (c *Calculator) addSample(account, metric string) {
 	}
 }
 
+func (c *Calculator) addOpportunity(account, metric string, seq int64) {
+	if account == "" {
+		return
+	}
+	key := c.excludedKey(account, metric)
+	c.opportunities[key] = append(c.opportunities[key], EvidenceRef{
+		MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", seq),
+		RuleVersion: version.FactsSchema, SourceFactSeq: seq,
+	})
+}
+
 func (c *Calculator) addExcluded(account, metric string) {
 	if account != "" {
 		c.excluded[c.excludedKey(account, metric)]++
@@ -647,21 +680,18 @@ func (c *Calculator) prepareFacts(ph *phase.Output) map[string]*Calculator {
 	return pcs
 }
 
-// addEvidence appends a typed fact ref to the metric's evidence lineage,
-// avoiding unbounded growth for high-frequency facts (bounded to a
-// representative sample of the earliest observations).
+// addEvidence appends every contributing typed fact ref. Published numerators
+// must be exactly reconstructible from canonical lineage; sampling belongs in
+// presentation/query layers, never in the authoritative artifact.
 func (c *Calculator) addEvidence(account, metric string, seq int64) {
 	key := account + "\x00" + metric
-	ev := c.evidence[key]
-	if len(ev) < 64 {
-		c.evidence[key] = append(ev, EvidenceRef{
-			MatchID:       c.matchID,
-			Kind:          EvidenceFact,
-			ID:            fmt.Sprintf("fact:%d", seq),
-			RuleVersion:   version.FactsSchema,
-			SourceFactSeq: seq,
-		})
-	}
+	c.evidence[key] = append(c.evidence[key], EvidenceRef{
+		MatchID:       c.matchID,
+		Kind:          EvidenceFact,
+		ID:            fmt.Sprintf("fact:%d", seq),
+		RuleVersion:   version.FactsSchema,
+		SourceFactSeq: seq,
+	})
 }
 
 // dedupeEvidence removes duplicate evidence refs by match+kind+id, preserving
@@ -844,25 +874,59 @@ func phaseEvidence(matchID, phaseName string, ph *phase.Output) []EvidenceRef {
 	return out
 }
 
-func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role, phaseName string, duration float64, ph *phase.Output, excluded int64) (Value, bool) {
+func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role, phaseName string, duration float64, ph *phase.Output, excluded int64) (Value, bool, string) {
 	v = decorateValue(v, m, acct, team, role)
-	ev := dedupeEvidence(calc.evidenceFor(acct, m.ID))
+	contributors := dedupeEvidence(calc.evidenceFor(acct, m.ID))
 	samples := calc.samples[calc.excludedKey(acct, m.ID)]
-	if v.UnavailableReason != "" || len(ev) == 0 || samples <= 0 || duration <= 0 {
-		return v, false
+	if v.UnavailableReason != "" {
+		return v, false, v.UnavailableReason
+	}
+	if duration <= 0 {
+		return v, false, "eligible_official_phase_duration_not_proven"
+	}
+	var opportunity int64
+	var opportunityEvidence []EvidenceRef
+	switch m.ID {
+	case "kill_count", "assist_count":
+		opportunityEvidence = dedupeEvidence(calc.opportunities[calc.excludedKey(acct, m.ID)])
+		opportunity = int64(len(opportunityEvidence))
+		if opportunity == 0 {
+			return v, false, "eligible_opposing_hero_death_opportunity_not_proven"
+		}
+	case "death_count":
+		if !calc.factsCoverage[facts.FamilyDeathRespawn] {
+			return v, false, "bound_real_hero_life_interval_not_proven"
+		}
+		// Positive duration plus participant binding prove one intersecting
+		// bound-real-hero life interval even when its death numerator is zero.
+		// Each verified death proves its own completed life interval; without
+		// an emitted respawn transition we do not fabricate a post-death one.
+		opportunity = calc.deaths[acct]
+		if opportunity == 0 {
+			opportunity = 1
+		}
+		opportunityEvidence = contributors
+	case "hero_damage_total", "objective_damage_total":
+		opportunity = samples
+		if opportunity == 0 {
+			return v, false, "eligible_damage_event_opportunity_not_proven"
+		}
+	default:
+		return v, false, "declared_opportunity_evaluator_missing"
 	}
 	v.OfficialPhase = phaseName
 	v.Denominator = &duration
-	v.OpportunityCount = samples
+	v.OpportunityCount = opportunity
 	v.SampleCount = samples
 	v.EvidenceCount = samples
 	v.ExcludedCount += excluded
 	v.Coverage = 1.0
-	chain := append([]EvidenceRef(nil), ev...)
+	chain := append([]EvidenceRef(nil), contributors...)
+	chain = append(chain, opportunityEvidence...)
 	chain = append(chain, phaseEvidence(calc.matchID, phaseName, ph)...)
 	chain = append(chain, calc.observationRef(v), calc.algorithmRef(m.ID))
 	v.Evidence = dedupeEvidence(chain)
-	return v, true
+	return v, true, ""
 }
 
 // Result builds the Output artifact. It resolves every registry metric for
@@ -919,19 +983,25 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 				for _, phaseName := range []string{"laning", "midgame", "decisive"} {
 					pc := phaseCalcs[phaseName]
 					pv := pc.computeMetric(m, acct, team, role, nil, nil, nil, nil)
-					if pv, ok := finalizeDirectValue(pc, pv, m, acct, team, role, phaseName, phaseDurations[phaseName], ph, 0); ok {
+					if pv, ok, _ := finalizeDirectValue(pc, pv, m, acct, team, role, phaseName, phaseDurations[phaseName], ph, 0); ok {
 						out.Values = append(out.Values, pv)
 						published = true
 					}
 				}
 				whole := c.computeMetric(m, acct, team, role, teamNetWorth, fightParticipation, fightDamageShare, phaseDuration)
 				totalDuration := phaseDurations["laning"] + phaseDurations["midgame"] + phaseDurations["decisive"]
-				if whole, ok := finalizeDirectValue(c, whole, m, acct, team, role, "whole_match", totalDuration, ph, c.excluded[c.excludedKey(acct, m.ID)]); ok {
-					out.Values = append(out.Values, whole)
+				wholeReason := ""
+				if wholeValue, ok, reason := finalizeDirectValue(c, whole, m, acct, team, role, "whole_match", totalDuration, ph, c.excluded[c.excludedKey(acct, m.ID)]); ok {
+					out.Values = append(out.Values, wholeValue)
 					published = true
+				} else {
+					wholeReason = reason
 				}
 				if !published {
-					u := decorateValue(Value{UnavailableReason: "no_eligible_official_phase_evidence"}, m, acct, team, role)
+					if wholeReason == "" {
+						wholeReason = "declared_opportunity_or_duration_not_proven"
+					}
+					u := decorateValue(Value{UnavailableReason: wholeReason}, m, acct, team, role)
 					u.EpistemicClass = ClassUnavailable
 					u.ExcludedCount = c.excluded[c.excludedKey(acct, m.ID)]
 					out.Unavailable = append(out.Unavailable, u)
@@ -986,7 +1056,10 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 		if out.Values[i].AccountID != out.Values[j].AccountID {
 			return out.Values[i].AccountID < out.Values[j].AccountID
 		}
-		return out.Values[i].MetricID < out.Values[j].MetricID
+		if out.Values[i].MetricID != out.Values[j].MetricID {
+			return out.Values[i].MetricID < out.Values[j].MetricID
+		}
+		return out.Values[i].OfficialPhase < out.Values[j].OfficialPhase
 	})
 	sort.Slice(out.Unavailable, func(i, j int) bool {
 		if out.Unavailable[i].AccountID != out.Unavailable[j].AccountID {
