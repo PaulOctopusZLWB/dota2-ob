@@ -23,9 +23,10 @@
     .shell { width: min(1500px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 40px; }
     header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; padding: 0 0 18px; border-bottom: 1px solid var(--line); }
     h1 { margin: 0; font-size: clamp(20px, 3.6vw, 38px); line-height: .95; font-weight: 800; }
+    h3 { margin: 0 0 10px; }
+    h4 { margin: 12px 0 6px; }
     .meta { color: var(--muted); font-size: 13px; text-align: right; }
     .panel { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.01)), var(--panel); border-radius: 8px; padding: 14px 16px; margin-top: 16px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
@@ -40,8 +41,12 @@
     input, textarea, select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font: inherit; width: 100%; }
     button { background: var(--accent); color: #0d0f0c; border: 0; border-radius: 4px; padding: 8px 14px; font: inherit; font-weight: 700; cursor: pointer; }
     button.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
     #status { color: var(--muted); }
     .mono { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
+    .stream { font-family: ui-monospace, monospace; font-size: 12px; }
+    .stream .cur { color: var(--accent); }
+    .stream .mach { color: var(--gold); }
   </style>
 </head>
 <body>
@@ -64,18 +69,47 @@ function esc(v) {
 
 const token = localStorage.getItem("dota2ob_session_token") || "";
 const PHASE = { laning: "对线期", midgame: "中期", decisive: "决胜期" };
+const VALID_PHASES = ["laning", "midgame", "decisive"];
 
 // postCorrection sends a review mutation with the session token.
 async function postCorrection(path, payload) {
   const resp = await fetch(`/api/replay/v1${path}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Dota2-OB-Token": token,
-    },
+    headers: { "Content-Type": "application/json", "X-Dota2-OB-Token": token },
     body: JSON.stringify(payload),
   });
   return resp;
+}
+
+// intervalRef builds a canonical interval@START-END ref.
+function intervalRef(iv) {
+  return `interval@${iv.start_game_second}-${iv.end_game_second}`;
+}
+
+// currentEffectiveStream returns the review's persisted effective stream when
+// present, else the machine stream (only used before the first correction).
+function currentEffectiveStream(rv) {
+  if (rv.effective_phase_intervals && rv.effective_phase_intervals.length) {
+    return rv.effective_phase_intervals.map(iv => ({
+      start_game_second: iv.start_game_second,
+      end_game_second: iv.end_game_second,
+      global_phase: iv.global_phase,
+      source: "effective",
+    }));
+  }
+  return null;
+}
+
+// machineStream fetches the immutable machine phase intervals for a match.
+async function machineStream(matchId) {
+  const tl = await (await fetch(`/api/replay/v1/matches/${matchId}/timeline`)).json();
+  const intervals = (tl.data && tl.data.phases && tl.data.phases.intervals) || [];
+  return intervals.map(iv => ({
+    start_game_second: iv.start_game_second,
+    end_game_second: iv.end_game_second,
+    global_phase: iv.global_phase,
+    source: "machine",
+  }));
 }
 
 async function load() {
@@ -95,12 +129,21 @@ async function load() {
           <input id="tok" type="password" value="${esc(token)}" placeholder="serve --session-token ...">
           <button class="ghost" onclick="localStorage.setItem('dota2ob_session_token', document.getElementById('tok').value); location.reload();">保存</button>
         </div>
-        <p class="hint">机器输出永不被修改；每次校正保留机器值、有效值、作者、原因、时间、算法版本与证据。</p>
+        <p class="hint">机器输出永不被修改；每次校正保留操作、参数、完整前后流、作者、原因、时间、算法版本与证据（replay.corrections.v2）。</p>
       </div>`);
 
-    // Per-match review state.
     const reviews = data.reviews || [];
     for (const rv of reviews) {
+      // Determine the current effective stream: persisted overlay when
+      // present, else the machine stream (pre-first-correction fallback).
+      let current = currentEffectiveStream(rv);
+      let machine = [];
+      if (current === null) {
+        machine = await machineStream(rv.match_id);
+        current = machine.map(iv => ({ ...iv, source: "effective" }));
+      } else {
+        machine = await machineStream(rv.match_id);
+      }
       const corrections = (rv.corrections || []).map(corr => `
         <tr>
           <td class="mono">${esc(corr.id)}</td>
@@ -112,48 +155,99 @@ async function load() {
           <td class="mono">${esc(JSON.stringify(corr.effective_value))}</td>
           <td class="hint">${esc(corr.applied_at || "")} · ${esc(corr.algorithm_version || "")}</td>
         </tr>`).join("");
-      // Preload the machine phase boundaries (canonical interval@START-END
-      // refs) so the reviewer accepts/moves/relabels/splits real machine
-      // intervals instead of blank JSON.
-      let phaseOptions = "";
-      try {
-        const tl = await (await fetch(`/api/replay/v1/matches/${rv.match_id}/timeline`)).json();
-        const intervals = (tl.data && tl.data.phases && tl.data.phases.intervals) || [];
-        phaseOptions = intervals.map(iv =>
-          `<option value="interval@${esc(iv.start_game_second)}-${esc(iv.end_game_second)}">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s（机器值）</option>`
-        ).join("");
-      } catch (e) { phaseOptions = ""; }
+      const v2corr = (rv.phase_corrections || []).map(pc => `
+        <tr>
+          <td class="mono">${esc(pc.id)}</td>
+          <td>${esc(pc.operation)}</td>
+          <td>${esc(pc.author)}</td>
+          <td class="hint">${esc(pc.reason || "")}</td>
+          <td class="mono">${esc(pc.event_ref || "")}</td>
+          <td class="hint">前后流 ${esc((pc.before_stream || []).length)}→${esc((pc.after_stream || []).length)} 段</td>
+          <td class="mono">${esc(pc.shape_version || "")} · ${esc(pc.algorithm_version || "")}</td>
+        </tr>`).join("");
+
+      // Target selector: current effective stream (canonical refs). Machine
+      // intervals are displayed separately and never used as targets once an
+      // effective overlay exists.
+      const phaseOptions = current.map(iv =>
+        `<option value="${esc(intervalRef(iv))}">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s（当前有效）</option>`
+      ).join("");
+      const mergeRightOptions = current.map(iv =>
+        `<option value="${esc(intervalRef(iv))}">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s</option>`
+      ).join("");
+      const absorbOptions = current.map(iv =>
+        `<option value="${esc(intervalRef(iv))}">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s</option>`
+      ).join("");
+      const phaseLabelOptions = VALID_PHASES.map(p =>
+        `<option value="${p}">${esc(PHASE[p])}（${p}）</option>`).join("");
+      const machineOptions = machine.map(iv =>
+        `<li class="mach">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s · interval@${esc(iv.start_game_second)}-${esc(iv.end_game_second)}</li>`
+      ).join("");
+
       c.insertAdjacentHTML("beforeend", `
         <div class="panel">
           <h3 style="margin-top:0">比赛 <a href="match.html?id=${esc(rv.match_id)}">${esc(rv.match_id)}</a>
             <span class="badge ${rv.review_status === 'reviewed' ? 'ok' : rv.review_status === 'in_progress' ? 'warn' : ''}">${esc(rv.review_status || "pending")}</span></h3>
-          <h4 style="margin-top:8px">阶段边界校正（机器值由服务端解析，拒绝伪造；非法阶段/边界被拒绝）</h4>
-          <div style="display:grid;gap:8px">
-            <label class="hint">目标机器区间</label>
-            <select id="phase-ref-${esc(rv.match_id)}">${phaseOptions || `<option value="">无机器区间</option>`}</select>
-            <label class="hint">操作类型</label>
-            <select id="phase-op-${esc(rv.match_id)}">
-              <option value="accept">接受（确认机器边界）</option>
-              <option value="relabel">重标注（仅改阶段名）</option>
-              <option value="move">移动（改边界）</option>
-              <option value="add">新增区间</option>
-              <option value="delete">删除区间</option>
-              <option value="split">拆分</option>
-              <option value="merge">合并相邻</option>
-            </select>
-            <label class="hint">有效值 JSON（accept/delete 可留空；split 请填 {"split_second":N}；merge 请填 {"merge_right":"interval@A-B"}）</label>
-            <textarea id="phase-eff-${esc(rv.match_id)}" rows="2" placeholder='{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}'></textarea>
-            <textarea id="phase-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因（必填）"></textarea>
-            <button onclick="submitPhase('${esc(rv.match_id)}')">提交阶段操作</button>
+
+          <div class="form-grid">
+            <div>
+              <h4>当前有效阶段流（操作目标）</h4>
+              <p class="stream">${current.map(iv => `<span class="cur">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s</span>`).join(" · ") || "<span class=\"hint\">无</span>"}</p>
+            </div>
+            <div>
+              <h4>机器阶段流（不可变，仅展示）</h4>
+              <ul class="stream" style="margin:0;padding-left:16px">${machineOptions || "<li class=\"hint\">无</li>"}</ul>
+            </div>
           </div>
+
+          <h4 style="margin-top:8px">阶段边界校正（针对当前有效流；服务端解析机器值，拒绝伪造）</h4>
+          <div class="form-grid">
+            <label class="hint">目标区间（当前有效）<select id="phase-ref-${esc(rv.match_id)}">${phaseOptions || `<option value="">无有效区间</option>`}</select></label>
+            <label class="hint">操作类型
+              <select id="phase-op-${esc(rv.match_id)}">
+                <option value="accept">接受（确认当前边界）</option>
+                <option value="relabel">重标注（仅改阶段名）</option>
+                <option value="move">移动（改一个共享边界）</option>
+                <option value="add">新增（细分已覆盖区间）</option>
+                <option value="delete">删除（吸收进相邻区间）</option>
+                <option value="split">拆分</option>
+                <option value="merge">合并相邻</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label class="hint">结果阶段（relabel/merge/add 使用）<select id="phase-phase-${esc(rv.match_id)}">${phaseLabelOptions}</select></label>
+            <label class="hint">新边界秒（move 的 end_game_second，或 split 的 split_second）<input id="phase-second-${esc(rv.match_id)}" type="number" placeholder="如 700 / 100"></label>
+          </div>
+          <div class="form-grid">
+            <label class="hint">merge 右邻区间（merge）<select id="phase-merge-right-${esc(rv.match_id)}">${mergeRightOptions || `<option value="">无</option>`}</select></label>
+            <label class="hint">delete 吸收目标（相邻）<select id="phase-absorb-${esc(rv.match_id)}">${absorbOptions || `<option value="">无</option>`}</select></label>
+          </div>
+          <div class="form-grid">
+            <label class="hint">add/move 起止（start,end；add 在单个已覆盖区间内）<input id="phase-start-${esc(rv.match_id)}" type="number" placeholder="1700"><input id="phase-end-${esc(rv.match_id)}" type="number" placeholder="1750"></label>
+            <label class="hint">作者<input id="phase-author-${esc(rv.match_id)}" value="paul"></label>
+          </div>
+          <div class="form-grid">
+            <label class="hint">原因（必填）<textarea id="phase-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因"></textarea></label>
+            <label class="hint">证据 ID（可选，逗号分隔）<input id="phase-evidence-${esc(rv.match_id)}" placeholder="fact:7, episode:m1:fight:90:0"></label>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button onclick="submitPhase('${esc(rv.match_id)}')">提交阶段操作</button>
+            <button class="ghost" onclick="location.reload()">刷新（重载当前有效流）</button>
+          </div>
+          <p id="phase-result-${esc(rv.match_id)}" class="hint"></p>
+
           <h4 style="margin-top:12px">争议事件校正（机器值由服务端解析）</h4>
-          <div style="display:grid;gap:8px">
+          <div class="form-grid">
             <input id="evt-ref-${esc(rv.match_id)}" placeholder="事件引用（如 fight_interval@100 或事件 ID）">
-            <input id="evt-eff-${esc(rv.match_id)}" placeholder='有效值 JSON'>
+            <input id="evt-eff-${esc(rv.match_id)}" placeholder="有效值 JSON">
             <textarea id="evt-reason-${esc(rv.match_id)}" rows="2" placeholder="校正原因（必填）"></textarea>
             <button onclick="submitEvent('${esc(rv.match_id)}')">提交事件校正（接受/拒绝/编辑）</button>
           </div>
-          <details style="margin-top:10px"><summary>校正历史</summary>
+          <details style="margin-top:10px"><summary>V2 阶段校正历史（含完整前后流）</summary>
+            <table><thead><tr><th>ID</th><th>操作</th><th>作者</th><th>原因</th><th>引用</th><th>前后流</th><th>版本</th></tr></thead><tbody>${v2corr || `<tr><td colspan="7" class="hint">无</td></tr>`}</tbody></table>
+          </details>
+          <details style="margin-top:10px"><summary>事件/角色校正历史</summary>
             <table><thead><tr><th>ID</th><th>类型</th><th>作者</th><th>原因</th><th>引用</th><th>机器值</th><th>有效值</th><th>时间/算法版本</th></tr></thead><tbody>${corrections || `<tr><td colspan="8" class="hint">无</td></tr>`}</tbody></table>
           </details>
         </div>`);
@@ -166,57 +260,124 @@ async function load() {
   }
 }
 
-async function submitPhase(matchId) {
+// buildPhasePayload constructs the exact server field set for a typed phase
+// operation with client-side validation of operation-specific inputs.
+function buildPhasePayload(matchId) {
   const ref = document.getElementById("phase-ref-" + matchId).value;
   const op = document.getElementById("phase-op-" + matchId).value;
-  const eff = document.getElementById("phase-eff-" + matchId).value;
+  const phase = document.getElementById("phase-phase-" + matchId).value;
+  const secondRaw = document.getElementById("phase-second-" + matchId).value;
+  const mergeRight = document.getElementById("phase-merge-right-" + matchId).value;
+  const absorb = document.getElementById("phase-absorb-" + matchId).value;
+  const startRaw = document.getElementById("phase-start-" + matchId).value;
+  const endRaw = document.getElementById("phase-end-" + matchId).value;
+  const author = document.getElementById("phase-author-" + matchId).value;
   const reason = document.getElementById("phase-reason-" + matchId).value;
-  let ev = {};
-  if (eff && eff.trim()) {
-    try { ev = JSON.parse(eff); } catch (e) { alert("有效值 JSON 无效"); return; }
+  const evidenceRaw = document.getElementById("phase-evidence-" + matchId).value;
+
+  if (!ref) { throw new Error("目标区间必填"); }
+  if (!author) { throw new Error("作者必填"); }
+  if (!reason) { throw new Error("原因必填"); }
+  if (phase && !VALID_PHASES.includes(phase)) { throw new Error("非法阶段：" + phase); }
+
+  const payload = {
+    match_id: matchId,
+    author,
+    reason,
+    operation: op,
+    event_ref: ref,
+    shape_version: "phase-op.v2",
+  };
+  if (evidenceRaw && evidenceRaw.trim()) {
+    payload.evidence_ids = evidenceRaw.split(",").map(s => s.trim()).filter(Boolean);
   }
-  if (!ref) { alert("目标机器区间必填"); return; }
-  if (!reason) { alert("原因必填"); return; }
-  const payload = { match_id: matchId, author: "paul", reason, operation: op, event_ref: ref };
-  if (op === "add" || op === "move" || op === "relabel") {
-    payload.effective_value = ev;
-  } else if (op === "split") {
-    if (ev.split_second == null) { alert("split 需要 split_second"); return; }
-    payload.split_second = ev.split_second;
-  } else if (op === "merge") {
-    if (!ev.merge_right) { alert("merge 需要 merge_right"); return; }
-    payload.merge_right = ev.merge_right;
+
+  const num = (v) => (v === "" || v == null) ? null : Number(v);
+
+  switch (op) {
+    case "accept":
+      break;
+    case "relabel":
+      if (!phase) { throw new Error("relabel 需要结果阶段"); }
+      payload.effective_value = { start_game_second: Number(ref.split("@")[1].split("-")[0]), end_game_second: Number(ref.split("-")[1]), global_phase: phase };
+      break;
+    case "split": {
+      const s = num(secondRaw);
+      if (s == null || !(s > 0)) { throw new Error("split 需要 split_second"); }
+      payload.split_second = s;
+      break;
+    }
+    case "move": {
+      const st = num(startRaw);
+      const en = num(secondRaw);
+      if (en == null && st == null) { throw new Error("move 需要新边界（end_game_second 或 start_game_second）"); }
+      const parts = ref.split("@")[1].split("-");
+      // move changes one shared boundary and adjusts both neighbors; it must
+      // not relabel, so global_phase is intentionally omitted.
+      payload.effective_value = {
+        start_game_second: st != null ? st : Number(parts[0]),
+        end_game_second: en != null ? en : Number(parts[1]),
+      };
+      break;
+    }
+    case "add": {
+      const st = num(startRaw);
+      const en = num(endRaw);
+      if (st == null || en == null || en <= st) { throw new Error("add 需要有效 start,end"); }
+      if (!phase) { throw new Error("add 需要结果阶段"); }
+      payload.effective_value = { start_game_second: st, end_game_second: en, global_phase: phase };
+      break;
+    }
+    case "delete":
+      if (!absorb) { throw new Error("delete 需要 absorb_into（相邻区间）"); }
+      payload.absorb_into = absorb;
+      break;
+    case "merge":
+      if (!mergeRight) { throw new Error("merge 需要 merge_right（相邻右区间）"); }
+      payload.merge_right = mergeRight;
+      if (phase) { payload.effective_value = { global_phase: phase }; }
+      break;
+    default:
+      throw new Error("未知操作：" + op);
+  }
+  return payload;
+}
+
+async function submitPhase(matchId) {
+  const resultEl = document.getElementById("phase-result-" + matchId);
+  let payload;
+  try {
+    payload = buildPhasePayload(matchId);
+  } catch (e) {
+    resultEl.textContent = "校验失败: " + e.message;
+    return;
   }
   const resp = await postCorrection("/reviews/phase-corrections", payload);
   const out = await resp.json();
-  if (resp.status === 200) { location.reload(); }
-  else { alert("提交失败: " + JSON.stringify(out)); }
+  if (resp.status === 200) {
+    resultEl.textContent = "成功：" + out.data && out.data.id ? out.data.id : "已提交";
+    location.reload();
+  } else {
+    resultEl.textContent = "提交失败(" + resp.status + "): " + JSON.stringify(out);
+  }
 }
 
 async function submitEvent(matchId) {
   const ref = document.getElementById("evt-ref-" + matchId).value;
   const eff = document.getElementById("evt-eff-" + matchId).value;
   const reason = document.getElementById("evt-reason-" + matchId).value;
-  await submit("event-corrections", matchId, ref, "", eff, reason);
-}
-
-async function submit(path, matchId, ref, prev, eff, reason) {
   let ev;
   try { ev = JSON.parse(eff || "{}"); } catch (e) { alert("有效值 JSON 无效"); return; }
   if (!ref) { alert("事件引用必填"); return; }
   if (!reason) { alert("原因必填"); return; }
-  // The server resolves the authoritative machine value; previous_value is
-  // not required from the caller (a conflicting one is rejected as tamper).
-  const resp = await postCorrection("/reviews/" + path, {
-    match_id: matchId, author: "paul", reason, event_ref: ref,
-    effective_value: ev,
+  const resp = await postCorrection("/reviews/event-corrections", {
+    match_id: matchId, author: "paul", reason, event_ref: ref, effective_value: ev,
   });
   const out = await resp.json();
   if (resp.status === 200) { location.reload(); }
   else { alert("提交失败: " + JSON.stringify(out)); }
 }
 
-// makeSubmitPhase available for inline onclick.
 window.submitPhase = submitPhase;
 window.submitEvent = submitEvent;
 load();

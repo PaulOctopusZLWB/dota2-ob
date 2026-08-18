@@ -221,6 +221,11 @@ func TestReplayTeamPage(t *testing.T) {
 		"实验轴分解（虚线层）",
 		"指标分解（可复现显示值）",
 		"player.html?id=",
+		// Suppressed layer stays visible as suppressed, never a zero polygon.
+		"已抑制",
+		"总分已抑制",
+		"renderTeamRadar",
+		"expVals",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay team page missing %q", want)
@@ -252,6 +257,28 @@ func TestReplayReviewPage(t *testing.T) {
 		"阶段边界校正",
 		"争议事件校正",
 		"机器输出永不被修改",
+		// Effective-stream selector operates on the persisted overlay.
+		"当前有效阶段流（操作目标）",
+		"机器阶段流（不可变，仅展示）",
+		"phase-ref-",
+		"effective_phase_intervals",
+		"currentEffectiveStream",
+		// Complete typed operation shapes.
+		"absorb_into",
+		"merge_right",
+		"split_second",
+		"shape_version",
+		"interval@",
+		// Operation-specific payload construction for all seven ops.
+		`case "accept"`,
+		`case "relabel"`,
+		`case "split"`,
+		`case "move"`,
+		`case "add"`,
+		`case "delete"`,
+		`case "merge"`,
+		// Only official phases are legal.
+		`VALID_PHASES = ["laning", "midgame", "decisive"]`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay review page missing %q", want)

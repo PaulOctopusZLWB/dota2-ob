@@ -1779,3 +1779,93 @@ func TestTeamScoreCorpusPersistsBothLayers(t *testing.T) {
 }
 
 func f64ptr(v float64) *float64 { return &v }
+
+// TestReviewQueueServesEffectiveStreamForUI proves the review queue the UI
+// consumes carries effective_phase_intervals (the current-stream selector
+// source) whenever a correction overlay exists, and that a fresh match with no
+// overlay has none (the UI then falls back to the machine timeline).
+func TestReviewQueueServesEffectiveStreamForUI(t *testing.T) {
+	st := testStore(t)
+	matchID := "8944521919"
+	machine := addCumulativePhaseMatch(t, st, matchID)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Before any correction: no effective overlay (UI falls back to machine).
+	var queue struct {
+		Data struct {
+			Reviews []struct {
+				MatchID                 string            `json:"match_id"`
+				EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+			} `json:"reviews"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/reviews/queue", &queue); code != 200 {
+		t.Fatalf("queue status %d", code)
+	}
+	var pre *struct {
+		MatchID                 string            `json:"match_id"`
+		EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+	}
+	for i := range queue.Data.Reviews {
+		if queue.Data.Reviews[i].MatchID == matchID {
+			pre = &queue.Data.Reviews[i]
+		}
+	}
+	if pre == nil {
+		t.Fatal("8944521919 not in review queue")
+	}
+	if len(pre.EffectivePhaseIntervals) != 0 {
+		t.Fatal("fresh match must have no effective overlay")
+	}
+
+	// Apply a split; the queue must then expose the effective stream with the
+	// newly created current refs (interval@0-100, interval@100-594).
+	if status, _, apiErr := postPhaseOperation(t, ts.URL, review.PhaseOpReq{
+		MatchID: matchID, Author: "paul", Reason: "split for UI",
+		Op: review.OpSplit, EventRef: "interval@0-594", SplitSecond: apiIntPtr(100),
+	}); status != http.StatusOK {
+		t.Fatalf("split status=%d error=%q", status, apiErr)
+	}
+	if code := getJSON(t, ts.URL+Version+"/reviews/queue", &queue); code != 200 {
+		t.Fatalf("queue after split status %d", code)
+	}
+	var post *struct {
+		MatchID                 string            `json:"match_id"`
+		EffectivePhaseIntervals []json.RawMessage `json:"effective_phase_intervals"`
+	}
+	for i := range queue.Data.Reviews {
+		if queue.Data.Reviews[i].MatchID == matchID {
+			post = &queue.Data.Reviews[i]
+		}
+	}
+	eff, err := review.FromJSON(post.EffectivePhaseIntervals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The split children are the next UI selector refs.
+	if _, ok := findStartForRef(eff, "interval@0-100"); !ok {
+		t.Fatalf("effective stream missing split child interval@0-100: %+v", eff)
+	}
+	if _, ok := findStartForRef(eff, "interval@100-594"); !ok {
+		t.Fatalf("effective stream missing split child interval@100-594: %+v", eff)
+	}
+	if len(machine) == 0 {
+		t.Fatal("machine fixture empty")
+	}
+}
+
+// findStartForRef returns the interval whose start matches a canonical ref.
+func findStartForRef(intervals []review.PhaseInterval, ref string) (review.PhaseInterval, bool) {
+	for i := range intervals {
+		if review.CanonicalEventRef(intervals[i]) == ref {
+			return intervals[i], true
+		}
+	}
+	return review.PhaseInterval{}, false
+}
