@@ -4,6 +4,7 @@ package m4match
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -48,6 +49,79 @@ func TestRehearsalCleanupQuarantinesOwnedEntryBeforeSubstitution(t *testing.T) {
 	}
 }
 
+func TestRehearsalCleanupRetainsMismatchedQuarantineAndOccupiedTarget(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Prepare(root, 1920, 1080); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+	priorTarget, priorHook := rehearsalGSITarget, rehearsalAfterGSIQuarantine
+	rehearsalGSITarget = func() string { return target }
+	t.Cleanup(func() { rehearsalGSITarget, rehearsalAfterGSIQuarantine = priorTarget, priorHook })
+	preflight := RehearsalPreflightV1{SessionID: "session", CandidateCommit: strings.Repeat("a", 40), RootOwnerSHA256: strings.Repeat("b", 64)}
+	arm, err := armRehearsalGSI(root, preflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight.ArmSHA256, _ = rehearsalArmBindingID(arm)
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	a := []byte("unrelated entry A\n")
+	b := []byte("unrelated entry B\n")
+	if err := os.WriteFile(target, a, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aBefore, err := inspectArmedGSI(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rehearsalAfterGSIQuarantine = func(path string) error { return os.WriteFile(path, b, 0o600) }
+	if err := cleanupRehearsalArm(root, preflight, arm.ArmToken); err == nil || !strings.Contains(err.Error(), "machine-checkable recovery retained") {
+		t.Fatalf("cleanup error=%v", err)
+	}
+	var recovery RehearsalArmRecoveryV1
+	payload, err := os.ReadFile(filepath.Join(root, "rehearsal", "arm-cleanup-recovery.json"))
+	if err != nil || json.Unmarshal(payload, &recovery) != nil || recovery.State != rehearsalRecoveryRetained {
+		t.Fatalf("recovery=%+v err=%v", recovery, err)
+	}
+	aAfter, err := inspectArmedGSI(recovery.QuarantinePath)
+	if err != nil || aAfter != aBefore || recovery.QuarantineDevice != aBefore.device || recovery.QuarantineInode != aBefore.inode {
+		t.Fatalf("retained A=%+v before=%+v recovery=%+v err=%v", aAfter, aBefore, recovery, err)
+	}
+	bAfter, err := inspectArmedGSI(target)
+	if err != nil || bAfter.hash != payloadSHA(b) || bAfter.bytes != int64(len(b)) || bAfter.device != recovery.OccupiedTargetDevice || bAfter.inode != recovery.OccupiedTargetInode {
+		t.Fatalf("retained B=%+v recovery=%+v err=%v", bAfter, recovery, err)
+	}
+}
+
+func TestRehearsalCreatedGSIStatFailureNeverDeletesWithoutIdentity(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Prepare(root, 1920, 1080); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+	priorTarget, priorStat := rehearsalGSITarget, rehearsalCreatedGSIStat
+	rehearsalGSITarget = func() string { return target }
+	rehearsalCreatedGSIStat = func(*os.File) (os.FileInfo, error) { return nil, errors.New("injected stat failure") }
+	t.Cleanup(func() { rehearsalGSITarget, rehearsalCreatedGSIStat = priorTarget, priorStat })
+	preflight := RehearsalPreflightV1{SessionID: "session", CandidateCommit: strings.Repeat("a", 40), RootOwnerSHA256: strings.Repeat("b", 64)}
+	if _, err := armRehearsalGSI(root, preflight); err == nil || !strings.Contains(err.Error(), "entry retained") {
+		t.Fatalf("arm error=%v", err)
+	}
+	before, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal("unidentified created entry was deleted:", err)
+	}
+	if err := removeCreatedGSI(target, 0, 0); err == nil {
+		t.Fatal("zero identity cleanup was accepted")
+	}
+	after, err := os.Lstat(target)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("zero identity cleanup changed entry: %v", err)
+	}
+}
+
 func TestRehearsalArmPostInstallFaultsRollbackOwnedGSI(t *testing.T) {
 	repo, _ := os.Getwd()
 	repo = filepath.Clean(filepath.Join(repo, "../.."))
@@ -74,6 +148,109 @@ func TestRehearsalArmPostInstallFaultsRollbackOwnedGSI(t *testing.T) {
 				t.Fatalf("post-install fault left cleanup entries: %v", matches)
 			}
 		})
+	}
+}
+
+func TestRehearsalArmRollbackFailureHasDurableConsumableRecovery(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Clean(filepath.Join(working, "../.."))
+	root := freshVarTmp(t)
+	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+	priorTarget, priorFault, priorRemove := rehearsalGSITarget, rehearsalArmFault, rehearsalBeforeGSIRemove
+	rehearsalGSITarget = func() string { return target }
+	rehearsalArmFault = func(point string) error {
+		if point == "preflight_after_arm" {
+			return errors.New("injected post-install failure")
+		}
+		return nil
+	}
+	rehearsalBeforeGSIRemove = func(string) error { return errors.New("injected rollback failure") }
+	t.Cleanup(func() {
+		rehearsalGSITarget, rehearsalArmFault, rehearsalBeforeGSIRemove = priorTarget, priorFault, priorRemove
+	})
+	withRehearsalProbe(t, repo, func(*rehearsalPreflightProbe) {})
+	if _, err := RehearsalPreflight(context.Background(), RehearsalPreflightConfig{DataRoot: root, RepoRoot: repo}); err == nil || !strings.Contains(err.Error(), "durable recovery token") {
+		t.Fatalf("preflight error=%v", err)
+	}
+	var recovery RehearsalArmRecoveryV1
+	payload, err := os.ReadFile(filepath.Join(root, "rehearsal", "arm-cleanup-recovery.json"))
+	if err != nil || json.Unmarshal(payload, &recovery) != nil || recovery.State != rehearsalRecoveryOwnedQuarantine || recovery.Arm.ArmToken == "" {
+		t.Fatalf("recovery=%+v err=%v", recovery, err)
+	}
+	rehearsalBeforeGSIRemove = func(string) error { return nil }
+	if err := DisarmRehearsal(root, repo, recovery.Arm.ArmToken); err != nil {
+		t.Fatal("durable recovery was not consumable:", err)
+	}
+	if _, err := os.Lstat(recovery.QuarantinePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned quarantine remains: %v", err)
+	}
+}
+
+func TestRehearsalArmRollbackAndCleanupRecoveryWriteFailureUsesPreprovisionedIntent(t *testing.T) {
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Clean(filepath.Join(working, "../.."))
+	root := freshVarTmp(t)
+	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+	priorTarget, priorFault, priorRemove := rehearsalGSITarget, rehearsalArmFault, rehearsalBeforeGSIRemove
+	rehearsalGSITarget = func() string { return target }
+	rehearsalArmFault = func(point string) error {
+		if point == "preflight_after_arm" {
+			if err := os.WriteFile(filepath.Join(root, "rehearsal", "arm-cleanup-recovery.json"), []byte("occupied\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return errors.New("injected post-install failure")
+		}
+		return nil
+	}
+	rehearsalBeforeGSIRemove = func(string) error { return errors.New("injected rollback failure") }
+	t.Cleanup(func() {
+		rehearsalGSITarget, rehearsalArmFault, rehearsalBeforeGSIRemove = priorTarget, priorFault, priorRemove
+	})
+	withRehearsalProbe(t, repo, func(*rehearsalPreflightProbe) {})
+	if _, err := RehearsalPreflight(context.Background(), RehearsalPreflightConfig{DataRoot: root, RepoRoot: repo}); err == nil || !strings.Contains(err.Error(), "durable recovery token") || !strings.Contains(err.Error(), "file exists") {
+		t.Fatalf("nested failure error=%v", err)
+	}
+	var recovery RehearsalArmRecoveryV1
+	payload, err := os.ReadFile(filepath.Join(root, "rehearsal", "arm-recovery.json"))
+	if err != nil || json.Unmarshal(payload, &recovery) != nil || recovery.State != rehearsalRecoveryInstalled || recovery.QuarantinePath == "" {
+		t.Fatalf("preprovisioned recovery=%+v err=%v", recovery, err)
+	}
+	rehearsalBeforeGSIRemove = func(string) error { return nil }
+	if err := DisarmRehearsal(root, repo, recovery.Arm.ArmToken); err != nil {
+		t.Fatal("preprovisioned recovery was not consumable:", err)
+	}
+	if _, err := os.Lstat(recovery.QuarantinePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned quarantine remains: %v", err)
+	}
+}
+
+func TestRehearsalArmRecoveryPersistenceFailureRollsBackAndPropagates(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Prepare(root, 1920, 1080); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+	priorTarget, priorFault := rehearsalGSITarget, rehearsalArmFault
+	rehearsalGSITarget = func() string { return target }
+	rehearsalArmFault = func(point string) error {
+		if point == "recovery_persist" {
+			return errors.New("injected recovery persistence failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { rehearsalGSITarget, rehearsalArmFault = priorTarget, priorFault })
+	preflight := RehearsalPreflightV1{SessionID: "session", CandidateCommit: strings.Repeat("a", 40), RootOwnerSHA256: strings.Repeat("b", 64)}
+	if _, err := armRehearsalGSI(root, preflight); err == nil || !strings.Contains(err.Error(), "recovery intent persistence failed") {
+		t.Fatalf("arm error=%v", err)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("persistence failure left installed GSI: %v", err)
 	}
 }
 
@@ -114,6 +291,9 @@ func TestRehearsalArmOwnsRefusesSubstitutionAndTokenGatesCleanup(t *testing.T) {
 		t.Fatal("symlink substitution accepted")
 	}
 	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "rehearsal", "arm-recovery.json")); err != nil {
 		t.Fatal(err)
 	}
 	second, err := armRehearsalGSI(root, preflight)

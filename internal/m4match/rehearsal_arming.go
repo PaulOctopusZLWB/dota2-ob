@@ -14,6 +14,13 @@ import (
 )
 
 const rehearsalArmSchemaV1 = "rehearsal_arm.v1"
+const rehearsalArmRecoverySchemaV1 = "rehearsal_arm_recovery.v1"
+
+const (
+	rehearsalRecoveryInstalled       = "installed_owned"
+	rehearsalRecoveryRetained        = "substituted_quarantine_retained"
+	rehearsalRecoveryOwnedQuarantine = "owned_quarantine_retained"
+)
 
 var rehearsalGSITarget = func() string {
 	return filepath.Join(os.Getenv("HOME"), ".local/share/Steam/steamapps/common/dota 2 beta/game/dota/cfg/gamestate_integration/gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
@@ -21,6 +28,8 @@ var rehearsalGSITarget = func() string {
 
 var rehearsalArmFault = func(string) error { return nil }
 var rehearsalAfterGSIQuarantine = func(string) error { return nil }
+var rehearsalCreatedGSIStat = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
+var rehearsalBeforeGSIRemove = func(string) error { return nil }
 
 func resolveRehearsalGo() (string, string, error) {
 	candidates := []string{os.Getenv("DOTA2_OB_GO"), "/home/linuxbrew/.linuxbrew/bin/go", "/usr/local/go/bin/go", "/usr/bin/go"}
@@ -84,15 +93,15 @@ func armRehearsalGSI(root string, preflight RehearsalPreflightV1) (RehearsalArmV
 	if err != nil {
 		return RehearsalArmV1{}, err
 	}
-	createdInfo, statErr := out.Stat()
+	createdInfo, statErr := rehearsalCreatedGSIStat(out)
 	if statErr != nil {
 		_ = out.Close()
-		return RehearsalArmV1{}, errors.Join(errors.New("created rehearsal GSI identity unavailable"), removeCreatedGSI(target, 0, 0))
+		return RehearsalArmV1{}, errors.New("created rehearsal GSI identity unavailable; entry retained because physical identity was not proven")
 	}
 	createdStat, statOK := createdInfo.Sys().(*syscall.Stat_t)
 	if !statOK {
 		_ = out.Close()
-		return RehearsalArmV1{}, errors.Join(errors.New("created rehearsal GSI identity unavailable"), removeCreatedGSI(target, 0, 0))
+		return RehearsalArmV1{}, errors.New("created rehearsal GSI identity unavailable; entry retained because physical identity was not proven")
 	}
 	createdDevice, createdInode := uint64(createdStat.Dev), createdStat.Ino
 	_, copyErr := io.Copy(out, in)
@@ -112,6 +121,9 @@ func armRehearsalGSI(root string, preflight RehearsalPreflightV1) (RehearsalArmV
 	if err != nil {
 		return RehearsalArmV1{}, errors.Join(err, rollbackArmedGSI(root, arm))
 	}
+	if err := persistInstalledArmRecovery(root, arm); err != nil {
+		return RehearsalArmV1{}, errors.Join(fmt.Errorf("rehearsal recovery intent persistence failed: %w", err), rollbackArmedGSI(root, arm))
+	}
 	if err := rehearsalArmFault("arm_content_id"); err != nil {
 		return RehearsalArmV1{}, errors.Join(err, rollbackArmedGSI(root, arm))
 	}
@@ -125,6 +137,9 @@ func armRehearsalGSI(root string, preflight RehearsalPreflightV1) (RehearsalArmV
 }
 
 func removeCreatedGSI(target string, device, inode uint64) error {
+	if device == 0 || inode == 0 {
+		return errors.New("created rehearsal GSI cleanup identity invalid; entry retained")
+	}
 	quarantine := fmt.Sprintf("%s.creating-%d", target, os.Getpid())
 	if _, err := os.Lstat(quarantine); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return errors.New("created rehearsal GSI quarantine occupied")
@@ -144,7 +159,7 @@ func removeCreatedGSI(target string, device, inode uint64) error {
 		return statErr
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || (device != 0 && (uint64(stat.Dev) != device || stat.Ino != inode)) {
+	if !ok || uint64(stat.Dev) != device || stat.Ino != inode {
 		_ = restoreQuarantinedEntry(quarantine, target)
 		return errors.New("created rehearsal GSI entry was substituted")
 	}
@@ -223,18 +238,20 @@ func cleanupRehearsalArm(root string, preflight RehearsalPreflightV1, token stri
 	if token == "" || token != arm.ArmToken {
 		return errors.New("rehearsal arm cleanup token mismatch")
 	}
-	return removeArmedGSI(arm)
+	if err := removeArmedGSI(root, arm); err != nil {
+		return err
+	}
+	if err := rootRemove(filepath.Join(root, "rehearsal", "arm-recovery.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
-func removeArmedGSI(arm RehearsalArmV1) error {
+func removeArmedGSI(root string, arm RehearsalArmV1) error {
 	if !filepath.IsAbs(arm.ConfigTargetPath) || !validLowerSHA256(arm.ConfigSHA256) || arm.ConfigBytes <= 0 || arm.ConfigDevice == 0 || arm.ConfigInode == 0 {
 		return errors.New("armed GSI cleanup identity invalid")
 	}
-	suffix := arm.ArmToken
-	if suffix == "" {
-		suffix = arm.ConfigSHA256
-	}
-	quarantine := filepath.Join(filepath.Dir(arm.ConfigTargetPath), ".dota2-ob-cleanup-"+suffix[:16])
+	quarantine := armedGSIQuarantinePath(arm)
 	if _, err := os.Lstat(quarantine); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return errors.New("armed GSI cleanup quarantine occupied")
 	}
@@ -242,30 +259,57 @@ func removeArmedGSI(arm RehearsalArmV1) error {
 		return err
 	}
 	if err := rehearsalAfterGSIQuarantine(arm.ConfigTargetPath); err != nil {
-		_ = restoreQuarantinedEntry(quarantine, arm.ConfigTargetPath)
+		restoreErr := restoreQuarantinedEntry(quarantine, arm.ConfigTargetPath)
+		if restoreErr != nil {
+			recoveryErr := persistRetainedCleanupRecovery(root, arm, quarantine)
+			return errors.Join(err, restoreErr, recoveryErr)
+		}
 		return err
 	}
 	identity, inspectErr := inspectArmedGSI(quarantine)
 	if inspectErr != nil || identity.hash != arm.ConfigSHA256 || identity.bytes != arm.ConfigBytes || identity.device != arm.ConfigDevice || identity.inode != arm.ConfigInode {
 		restoreErr := restoreQuarantinedEntry(quarantine, arm.ConfigTargetPath)
-		return errors.Join(errors.New("armed GSI cleanup encountered substituted entry"), restoreErr)
+		if restoreErr != nil {
+			recoveryErr := persistRetainedCleanupRecovery(root, arm, quarantine)
+			return errors.Join(errors.New("armed GSI cleanup encountered substituted entry; machine-checkable recovery retained"), inspectErr, restoreErr, recoveryErr)
+		}
+		return errors.Join(errors.New("armed GSI cleanup encountered substituted entry"), inspectErr)
+	}
+	if err := rehearsalBeforeGSIRemove(quarantine); err != nil {
+		return errors.Join(err, persistOwnedCleanupRecovery(root, arm, quarantine))
 	}
 	return os.Remove(quarantine)
 }
 
 func restoreQuarantinedEntry(quarantine, target string) error {
-	if err := os.Link(quarantine, target); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Link(quarantine, target); err != nil {
 		return err
 	}
 	return os.Remove(quarantine)
 }
 
-func rollbackArmedGSI(root string, arm RehearsalArmV1) error {
-	if err := removeArmedGSI(arm); err != nil {
-		_ = writeJSON(filepath.Join(root, "rehearsal", "arm-recovery.json"), arm, 0o600)
-		return fmt.Errorf("armed GSI rollback failed; recovery token %s: %w", arm.ArmToken, err)
+func armedGSIQuarantinePath(arm RehearsalArmV1) string {
+	suffix := arm.ArmToken
+	if suffix == "" {
+		suffix = arm.ConfigSHA256
 	}
-	return nil
+	return filepath.Join(filepath.Dir(arm.ConfigTargetPath), ".dota2-ob-cleanup-"+suffix[:16])
+}
+
+func rollbackArmedGSI(root string, arm RehearsalArmV1) error {
+	recoveryErr := verifyInstalledArmRecovery(root, arm)
+	removeErr := removeArmedGSI(root, arm)
+	if removeErr != nil {
+		if recoveryErr != nil {
+			return errors.Join(fmt.Errorf("armed GSI rollback failed and durable recovery verification failed: %w", removeErr), recoveryErr)
+		}
+		return fmt.Errorf("armed GSI rollback failed; durable recovery token %s: %w", arm.ArmToken, removeErr)
+	}
+	removeRecoveryErr := rootRemove(filepath.Join(root, "rehearsal", "arm-recovery.json"))
+	if errors.Is(removeRecoveryErr, os.ErrNotExist) {
+		removeRecoveryErr = nil
+	}
+	return errors.Join(recoveryErr, removeRecoveryErr)
 }
 
 func DisarmRehearsal(dataRoot, repoRoot, token string) error {
@@ -277,6 +321,21 @@ func DisarmRehearsal(dataRoot, repoRoot, token string) error {
 	if preflight, preflightErr := readRehearsalPreflight(lease.abs); preflightErr == nil && preflight.ConsoleState == RehearsalReady {
 		return cleanupRehearsalArm(lease.abs, preflight, token)
 	}
+	if recovery, recoveryErr := readArmRecovery(lease.abs, "arm-cleanup-recovery.json"); recoveryErr == nil {
+		if token == "" || token != recovery.Arm.ArmToken {
+			return errors.New("rehearsal arm cleanup token mismatch")
+		}
+		return restoreRetainedCleanupRecovery(lease.abs, recovery)
+	}
+	if recovery, recoveryErr := readArmRecovery(lease.abs, "arm-recovery.json"); recoveryErr == nil {
+		if token == "" || token != recovery.Arm.ArmToken {
+			return errors.New("rehearsal arm cleanup token mismatch")
+		}
+		if err := disarmInstalledRecovery(lease.abs, recovery); err != nil {
+			return err
+		}
+		return rootRemove(filepath.Join(lease.abs, "rehearsal", "arm-recovery.json"))
+	}
 	for _, name := range []string{"arm-recovery.json", "arm.json"} {
 		arm, err := readStandaloneRehearsalArm(lease.abs, name)
 		if err != nil {
@@ -285,9 +344,181 @@ func DisarmRehearsal(dataRoot, repoRoot, token string) error {
 		if token == "" || token != arm.ArmToken {
 			return errors.New("rehearsal arm cleanup token mismatch")
 		}
-		return removeArmedGSI(arm)
+		return removeArmedGSI(lease.abs, arm)
 	}
 	return errors.New("recoverable rehearsal arm unavailable")
+}
+
+func armRecoveryContentID(value RehearsalArmRecoveryV1) (string, error) {
+	value.RecoverySHA256 = ""
+	return payloadSHAFromCanonical(value)
+}
+
+func newInstalledArmRecovery(arm RehearsalArmV1) (RehearsalArmRecoveryV1, error) {
+	value := RehearsalArmRecoveryV1{SchemaVersion: rehearsalArmRecoverySchemaV1, Purpose: RehearsalPurpose, State: rehearsalRecoveryInstalled, Arm: arm, QuarantinePath: armedGSIQuarantinePath(arm)}
+	var err error
+	value.RecoverySHA256, err = armRecoveryContentID(value)
+	return value, err
+}
+
+func persistInstalledArmRecovery(root string, arm RehearsalArmV1) error {
+	if err := rehearsalArmFault("recovery_persist"); err != nil {
+		return err
+	}
+	value, err := newInstalledArmRecovery(arm)
+	if err != nil {
+		return err
+	}
+	if err := writeArmRecovery(root, "arm-recovery.json", value); err != nil {
+		return err
+	}
+	return verifyInstalledArmRecovery(root, arm)
+}
+
+func verifyInstalledArmRecovery(root string, arm RehearsalArmV1) error {
+	value, err := readArmRecovery(root, "arm-recovery.json")
+	if err != nil {
+		return err
+	}
+	if value.State != rehearsalRecoveryInstalled || value.Arm.ArmToken != arm.ArmToken || value.Arm.ConfigDevice != arm.ConfigDevice || value.Arm.ConfigInode != arm.ConfigInode || value.QuarantinePath != armedGSIQuarantinePath(arm) {
+		return errors.New("installed rehearsal arm recovery mismatch")
+	}
+	return nil
+}
+
+func disarmInstalledRecovery(root string, recovery RehearsalArmRecoveryV1) error {
+	if recovery.State != rehearsalRecoveryInstalled || recovery.QuarantinePath != armedGSIQuarantinePath(recovery.Arm) {
+		return errors.New("installed rehearsal recovery path mismatch")
+	}
+	if _, err := os.Lstat(recovery.Arm.ConfigTargetPath); err == nil {
+		return removeArmedGSI(root, recovery.Arm)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	identity, err := inspectArmedGSI(recovery.QuarantinePath)
+	if err != nil || identity.hash != recovery.Arm.ConfigSHA256 || identity.bytes != recovery.Arm.ConfigBytes || identity.device != recovery.Arm.ConfigDevice || identity.inode != recovery.Arm.ConfigInode {
+		return errors.New("installed rehearsal recovery cannot prove target or quarantine identity")
+	}
+	return os.Remove(recovery.QuarantinePath)
+}
+
+func persistRetainedCleanupRecovery(root string, arm RehearsalArmV1, quarantine string) error {
+	quarantineIdentity, err := inspectArmedGSI(quarantine)
+	if err != nil {
+		return err
+	}
+	targetIdentity, err := inspectArmedGSI(arm.ConfigTargetPath)
+	if err != nil {
+		return err
+	}
+	value := RehearsalArmRecoveryV1{
+		SchemaVersion: rehearsalArmRecoverySchemaV1, Purpose: RehearsalPurpose, State: rehearsalRecoveryRetained, Arm: arm,
+		QuarantinePath: quarantine, QuarantineSHA256: quarantineIdentity.hash, QuarantineBytes: quarantineIdentity.bytes,
+		QuarantineDevice: quarantineIdentity.device, QuarantineInode: quarantineIdentity.inode,
+		OccupiedTargetSHA256: targetIdentity.hash, OccupiedTargetBytes: targetIdentity.bytes,
+		OccupiedTargetDevice: targetIdentity.device, OccupiedTargetInode: targetIdentity.inode,
+	}
+	value.RecoverySHA256, err = armRecoveryContentID(value)
+	if err != nil {
+		return err
+	}
+	if err := writeArmRecovery(root, "arm-cleanup-recovery.json", value); err != nil {
+		return err
+	}
+	_, err = readArmRecovery(root, "arm-cleanup-recovery.json")
+	return err
+}
+
+func writeArmRecovery(root, name string, value RehearsalArmRecoveryV1) error {
+	path := filepath.Join(root, "rehearsal", name)
+	if err := rootMkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	payload, err := canonical(value)
+	if err != nil {
+		return err
+	}
+	file, err := rootOpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(payload)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	dirSyncErr := dir.Sync()
+	dirCloseErr := dir.Close()
+	return errors.Join(dirSyncErr, dirCloseErr)
+}
+
+func readArmRecovery(root, name string) (RehearsalArmRecoveryV1, error) {
+	var value RehearsalArmRecoveryV1
+	payload, err := rootReadFile(filepath.Join(root, "rehearsal", name))
+	if err != nil || json.Unmarshal(payload, &value) != nil {
+		return value, errors.New("rehearsal arm recovery unavailable")
+	}
+	want, contentErr := armRecoveryContentID(value)
+	armWant, armErr := rehearsalArmContentID(value.Arm)
+	if contentErr != nil || armErr != nil || value.RecoverySHA256 != want || value.Arm.ArmToken != armWant || value.SchemaVersion != rehearsalArmRecoverySchemaV1 || value.Purpose != RehearsalPurpose || (value.State != rehearsalRecoveryInstalled && value.State != rehearsalRecoveryRetained && value.State != rehearsalRecoveryOwnedQuarantine) {
+		return value, errors.New("rehearsal arm recovery mismatch")
+	}
+	return value, nil
+}
+
+func restoreRetainedCleanupRecovery(root string, recovery RehearsalArmRecoveryV1) error {
+	if (recovery.State != rehearsalRecoveryRetained && recovery.State != rehearsalRecoveryOwnedQuarantine) || !filepath.IsAbs(recovery.QuarantinePath) {
+		return errors.New("retained rehearsal cleanup recovery invalid")
+	}
+	quarantine, quarantineErr := inspectArmedGSI(recovery.QuarantinePath)
+	if quarantineErr != nil || quarantine.hash != recovery.QuarantineSHA256 || quarantine.bytes != recovery.QuarantineBytes || quarantine.device != recovery.QuarantineDevice || quarantine.inode != recovery.QuarantineInode {
+		return errors.New("retained rehearsal cleanup quarantine changed")
+	}
+	if _, err := os.Lstat(recovery.Arm.ConfigTargetPath); err == nil {
+		return errors.New("retained rehearsal cleanup target remains occupied; both entries preserved")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if recovery.State == rehearsalRecoveryOwnedQuarantine {
+		if quarantine.hash != recovery.Arm.ConfigSHA256 || quarantine.bytes != recovery.Arm.ConfigBytes || quarantine.device != recovery.Arm.ConfigDevice || quarantine.inode != recovery.Arm.ConfigInode {
+			return errors.New("retained owned rehearsal cleanup identity mismatch")
+		}
+		if err := os.Remove(recovery.QuarantinePath); err != nil {
+			return err
+		}
+	} else if err := restoreQuarantinedEntry(recovery.QuarantinePath, recovery.Arm.ConfigTargetPath); err != nil {
+		return err
+	}
+	return rootRemove(filepath.Join(root, "rehearsal", "arm-cleanup-recovery.json"))
+}
+
+func persistOwnedCleanupRecovery(root string, arm RehearsalArmV1, quarantine string) error {
+	identity, err := inspectArmedGSI(quarantine)
+	if err != nil {
+		return err
+	}
+	value := RehearsalArmRecoveryV1{
+		SchemaVersion: rehearsalArmRecoverySchemaV1, Purpose: RehearsalPurpose, State: rehearsalRecoveryOwnedQuarantine, Arm: arm,
+		QuarantinePath: quarantine, QuarantineSHA256: identity.hash, QuarantineBytes: identity.bytes,
+		QuarantineDevice: identity.device, QuarantineInode: identity.inode,
+	}
+	value.RecoverySHA256, err = armRecoveryContentID(value)
+	if err != nil {
+		return err
+	}
+	return writeArmRecovery(root, "arm-cleanup-recovery.json", value)
+}
+
+func commitArmedGSI(root string, arm RehearsalArmV1) error {
+	if err := verifyInstalledArmRecovery(root, arm); err != nil {
+		return err
+	}
+	return rootRemove(filepath.Join(root, "rehearsal", "arm-recovery.json"))
 }
 
 func readStandaloneRehearsalArm(root, name string) (RehearsalArmV1, error) {

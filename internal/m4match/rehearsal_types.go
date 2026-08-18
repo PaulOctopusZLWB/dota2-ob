@@ -112,6 +112,23 @@ type RehearsalArmV1 struct {
 	ArmToken         string `json:"arm_token,omitempty"`
 }
 
+type RehearsalArmRecoveryV1 struct {
+	SchemaVersion        string         `json:"schema_version"`
+	Purpose              string         `json:"purpose"`
+	State                string         `json:"state"`
+	Arm                  RehearsalArmV1 `json:"arm"`
+	QuarantinePath       string         `json:"quarantine_path,omitempty"`
+	QuarantineSHA256     string         `json:"quarantine_sha256,omitempty"`
+	QuarantineBytes      int64          `json:"quarantine_bytes,omitempty"`
+	QuarantineDevice     uint64         `json:"quarantine_device,omitempty"`
+	QuarantineInode      uint64         `json:"quarantine_inode,omitempty"`
+	OccupiedTargetSHA256 string         `json:"occupied_target_sha256,omitempty"`
+	OccupiedTargetBytes  int64          `json:"occupied_target_bytes,omitempty"`
+	OccupiedTargetDevice uint64         `json:"occupied_target_device,omitempty"`
+	OccupiedTargetInode  uint64         `json:"occupied_target_inode,omitempty"`
+	RecoverySHA256       string         `json:"recovery_sha256"`
+}
+
 type RehearsalRootOwnerV1 struct {
 	SchemaVersion   string `json:"schema_version"`
 	Purpose         string `json:"purpose"`

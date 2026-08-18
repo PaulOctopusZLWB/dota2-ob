@@ -12,7 +12,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-const requiredRehearsalParent = "d2d5b569abf56f0412926fd5c100cb254842a215"
+const requiredRehearsalParent = "799d05c4b71552a8fe8f872132ee6e95f6933b6d"
 
 type rehearsalPreflightProbe struct {
 	commit, parent, branch, remoteHead, prHead             string
@@ -156,6 +156,11 @@ func RehearsalPreflight(ctx context.Context, config RehearsalPreflightConfig) (R
 	}
 	if err := writePrivate(filepath.Join(lease.abs, "rehearsal", "preflight.sha256"), []byte(preflight.PreflightSHA256+"\n")); err != nil {
 		return rollback(err)
+	}
+	if armed != nil {
+		if err := commitArmedGSI(lease.abs, *armed); err != nil {
+			return rollback(err)
+		}
 	}
 	return preflight, nil
 }
