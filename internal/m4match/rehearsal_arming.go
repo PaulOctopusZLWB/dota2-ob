@@ -11,10 +11,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"unsafe"
 )
 
 const rehearsalArmSchemaV1 = "rehearsal_arm.v1"
 const rehearsalArmRecoverySchemaV1 = "rehearsal_arm_recovery.v1"
+
+const (
+	rehearsalOTmpfile    = 020000000 | syscall.O_DIRECTORY
+	rehearsalATEmptyPath = 0x1000
+)
 
 const (
 	rehearsalRecoveryInstalled       = "installed_owned"
@@ -89,40 +95,66 @@ func armRehearsalGSI(root string, preflight RehearsalPreflightV1) (RehearsalArmV
 		return RehearsalArmV1{}, err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	fd, err := syscall.Open(filepath.Dir(target), syscall.O_RDWR|syscall.O_CLOEXEC|rehearsalOTmpfile, 0o600)
 	if err != nil {
-		return RehearsalArmV1{}, err
+		return RehearsalArmV1{}, fmt.Errorf("create anonymous rehearsal GSI: %w", err)
 	}
+	out := os.NewFile(uintptr(fd), "anonymous-rehearsal-gsi")
 	createdInfo, statErr := rehearsalCreatedGSIStat(out)
 	if statErr != nil {
 		_ = out.Close()
-		return RehearsalArmV1{}, errors.New("created rehearsal GSI identity unavailable; entry retained because physical identity was not proven")
+		return RehearsalArmV1{}, errors.New("created anonymous rehearsal GSI identity unavailable; unpublished inode discarded")
 	}
 	createdStat, statOK := createdInfo.Sys().(*syscall.Stat_t)
 	if !statOK {
 		_ = out.Close()
-		return RehearsalArmV1{}, errors.New("created rehearsal GSI identity unavailable; entry retained because physical identity was not proven")
+		return RehearsalArmV1{}, errors.New("created anonymous rehearsal GSI Stat_t unavailable; unpublished inode discarded")
 	}
 	createdDevice, createdInode := uint64(createdStat.Dev), createdStat.Ino
 	_, copyErr := io.Copy(out, in)
 	syncErr := out.Sync()
-	closeErr := out.Close()
-	if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
-		return RehearsalArmV1{}, errors.Join(err, removeCreatedGSI(target, createdDevice, createdInode))
+	if err := errors.Join(copyErr, syncErr); err != nil {
+		_ = out.Close()
+		return RehearsalArmV1{}, err
 	}
-	identity, err := inspectArmedGSI(target)
-	if err != nil || identity.hash != sourceHash || identity.bytes != sourceBytes {
-		return RehearsalArmV1{}, errors.Join(errors.New("installed rehearsal GSI identity mismatch"), removeCreatedGSI(target, createdDevice, createdInode))
+	if _, err := out.Seek(0, io.SeekStart); err != nil {
+		_ = out.Close()
+		return RehearsalArmV1{}, err
+	}
+	hash := sha256.New()
+	writtenBytes, hashErr := io.Copy(hash, out)
+	if hashErr != nil || hex.EncodeToString(hash.Sum(nil)) != sourceHash || writtenBytes != sourceBytes {
+		_ = out.Close()
+		return RehearsalArmV1{}, errors.Join(errors.New("anonymous rehearsal GSI content mismatch"), hashErr)
 	}
 	arm := RehearsalArmV1{SchemaVersion: rehearsalArmSchemaV1, Purpose: RehearsalPurpose, SessionID: preflight.SessionID,
 		CandidateCommit: preflight.CandidateCommit, RootOwnerSHA256: preflight.RootOwnerSHA256, ConfigSourcePath: sourceRelative,
-		ConfigTargetPath: target, ConfigSHA256: sourceHash, ConfigBytes: sourceBytes, ConfigDevice: identity.device, ConfigInode: identity.inode}
+		ConfigTargetPath: target, ConfigSHA256: sourceHash, ConfigBytes: sourceBytes, ConfigDevice: createdDevice, ConfigInode: createdInode}
 	arm.ArmToken, err = rehearsalArmContentID(arm)
 	if err != nil {
-		return RehearsalArmV1{}, errors.Join(err, rollbackArmedGSI(root, arm))
+		_ = out.Close()
+		return RehearsalArmV1{}, err
 	}
 	if err := persistInstalledArmRecovery(root, arm); err != nil {
-		return RehearsalArmV1{}, errors.Join(fmt.Errorf("rehearsal recovery intent persistence failed: %w", err), rollbackArmedGSI(root, arm))
+		_ = out.Close()
+		return RehearsalArmV1{}, fmt.Errorf("rehearsal recovery intent persistence failed before publication: %w", err)
+	}
+	if err := publishAnonymousGSI(out, target); err != nil {
+		closeErr := out.Close()
+		recoveryErr := rootRemove(filepath.Join(root, "rehearsal", "arm-recovery.json"))
+		return RehearsalArmV1{}, errors.Join(fmt.Errorf("publish anonymous rehearsal GSI: %w", err), closeErr, recoveryErr)
+	}
+	if err := syncRehearsalGSIDirectory(target); err != nil {
+		closeErr := out.Close()
+		return RehearsalArmV1{}, errors.Join(err, closeErr, rollbackArmedGSI(root, arm))
+	}
+	identity, inspectErr := inspectArmedGSI(target)
+	if inspectErr != nil || identity.hash != sourceHash || identity.bytes != sourceBytes || identity.device != createdDevice || identity.inode != createdInode {
+		closeErr := out.Close()
+		return RehearsalArmV1{}, errors.Join(errors.New("installed rehearsal GSI identity mismatch"), inspectErr, closeErr, rollbackArmedGSI(root, arm))
+	}
+	if err := out.Close(); err != nil {
+		return RehearsalArmV1{}, errors.Join(err, rollbackArmedGSI(root, arm))
 	}
 	if err := rehearsalArmFault("arm_content_id"); err != nil {
 		return RehearsalArmV1{}, errors.Join(err, rollbackArmedGSI(root, arm))
@@ -134,6 +166,31 @@ func armRehearsalGSI(root string, preflight RehearsalPreflightV1) (RehearsalArmV
 		return RehearsalArmV1{}, errors.Join(err, rollbackArmedGSI(root, arm))
 	}
 	return arm, nil
+}
+
+func publishAnonymousGSI(file *os.File, target string) error {
+	empty, err := syscall.BytePtrFromString("")
+	if err != nil {
+		return err
+	}
+	targetBytes, err := syscall.BytePtrFromString(target)
+	if err != nil {
+		return err
+	}
+	atFDCWD := ^uintptr(99) // Linux AT_FDCWD (-100) represented as uintptr.
+	_, _, errno := syscall.Syscall6(syscall.SYS_LINKAT, file.Fd(), uintptr(unsafe.Pointer(empty)), atFDCWD, uintptr(unsafe.Pointer(targetBytes)), rehearsalATEmptyPath, 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func syncRehearsalGSIDirectory(target string) error {
+	dir, err := os.Open(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	return errors.Join(dir.Sync(), dir.Close())
 }
 
 func removeCreatedGSI(target string, device, inode uint64) error {

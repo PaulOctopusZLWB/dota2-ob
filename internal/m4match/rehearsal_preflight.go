@@ -12,7 +12,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/session"
 )
 
-const requiredRehearsalParent = "799d05c4b71552a8fe8f872132ee6e95f6933b6d"
+const requiredRehearsalParent = "86a91b827e861703908843d0ccff4a8ef46a316e"
 
 type rehearsalPreflightProbe struct {
 	commit, parent, branch, remoteHead, prHead             string

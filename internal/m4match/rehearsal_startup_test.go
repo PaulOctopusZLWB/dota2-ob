@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,23 +96,84 @@ func TestRehearsalCleanupRetainsMismatchedQuarantineAndOccupiedTarget(t *testing
 	}
 }
 
-func TestRehearsalCreatedGSIStatFailureNeverDeletesWithoutIdentity(t *testing.T) {
-	root := t.TempDir()
-	if _, err := Prepare(root, 1920, 1080); err != nil {
-		t.Fatal(err)
+type rehearsalMissingStatT struct{ os.FileInfo }
+
+func (rehearsalMissingStatT) Sys() any { return nil }
+
+func TestRehearsalPostCreateIdentityFailuresNeverExposeConfiguredPath(t *testing.T) {
+	for _, fault := range []string{"descriptor_stat", "missing_stat_t"} {
+		for _, replacement := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/replacement_%t", fault, replacement), func(t *testing.T) {
+				root := t.TempDir()
+				if _, err := Prepare(root, 1920, 1080); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+				priorTarget, priorStat := rehearsalGSITarget, rehearsalCreatedGSIStat
+				rehearsalGSITarget = func() string { return target }
+				replacementBytes := []byte("unrelated replacement remains exact\n")
+				rehearsalCreatedGSIStat = func(file *os.File) (os.FileInfo, error) {
+					if replacement {
+						if err := os.WriteFile(target, replacementBytes, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if fault == "descriptor_stat" {
+						return nil, errors.New("injected descriptor stat failure")
+					}
+					info, err := file.Stat()
+					return rehearsalMissingStatT{FileInfo: info}, err
+				}
+				t.Cleanup(func() { rehearsalGSITarget, rehearsalCreatedGSIStat = priorTarget, priorStat })
+				preflight := RehearsalPreflightV1{SessionID: "session", CandidateCommit: strings.Repeat("a", 40), RootOwnerSHA256: strings.Repeat("b", 64)}
+				if _, err := armRehearsalGSI(root, preflight); err == nil || !strings.Contains(err.Error(), "unpublished inode discarded") {
+					t.Fatalf("arm error=%v", err)
+				}
+				if replacement {
+					before, err := inspectArmedGSI(target)
+					if err != nil || before.hash != payloadSHA(replacementBytes) || before.bytes != int64(len(replacementBytes)) {
+						t.Fatalf("replacement changed: %+v err=%v", before, err)
+					}
+					if _, err := armRehearsalGSI(root, preflight); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+						t.Fatalf("later ARM did not preserve unrelated replacement: %v", err)
+					}
+					after, err := inspectArmedGSI(target)
+					if err != nil || after != before {
+						t.Fatalf("later ARM changed replacement: before=%+v after=%+v err=%v", before, after, err)
+					}
+					return
+				}
+				if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("identity failure exposed configured path: %v", err)
+				}
+				rehearsalCreatedGSIStat = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
+				arm, err := armRehearsalGSI(root, preflight)
+				if err != nil {
+					t.Fatal("later ARM remained wedged:", err)
+				}
+				preflight.ArmSHA256, _ = rehearsalArmBindingID(arm)
+				if err := cleanupRehearsalArm(root, preflight, "wrong"); err == nil {
+					t.Fatal("wrong cleanup token accepted")
+				}
+				if err := cleanupRehearsalArm(root, preflight, arm.ArmToken); err != nil {
+					t.Fatal("token-gated cleanup failed:", err)
+				}
+				if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("later ARM cleanup left target: %v", err)
+				}
+			})
+		}
 	}
-	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
-	priorTarget, priorStat := rehearsalGSITarget, rehearsalCreatedGSIStat
-	rehearsalGSITarget = func() string { return target }
-	rehearsalCreatedGSIStat = func(*os.File) (os.FileInfo, error) { return nil, errors.New("injected stat failure") }
-	t.Cleanup(func() { rehearsalGSITarget, rehearsalCreatedGSIStat = priorTarget, priorStat })
-	preflight := RehearsalPreflightV1{SessionID: "session", CandidateCommit: strings.Repeat("a", 40), RootOwnerSHA256: strings.Repeat("b", 64)}
-	if _, err := armRehearsalGSI(root, preflight); err == nil || !strings.Contains(err.Error(), "entry retained") {
-		t.Fatalf("arm error=%v", err)
+}
+
+func TestRemoveCreatedGSIRejectsZeroIdentity(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "unrelated.cfg")
+	if err := os.WriteFile(target, []byte("unrelated\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	before, err := os.Lstat(target)
 	if err != nil {
-		t.Fatal("unidentified created entry was deleted:", err)
+		t.Fatal(err)
 	}
 	if err := removeCreatedGSI(target, 0, 0); err == nil {
 		t.Fatal("zero identity cleanup was accepted")
@@ -119,6 +181,35 @@ func TestRehearsalCreatedGSIStatFailureNeverDeletesWithoutIdentity(t *testing.T)
 	after, err := os.Lstat(target)
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatalf("zero identity cleanup changed entry: %v", err)
+	}
+}
+
+func TestRehearsalAnonymousPublishNeverOverwritesRacingEntry(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Prepare(root, 1920, 1080); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "gamestate_integration_dota2_ob_dot87_rehearsal.cfg")
+	priorTarget, priorStat := rehearsalGSITarget, rehearsalCreatedGSIStat
+	rehearsalGSITarget = func() string { return target }
+	replacement := []byte("racing unrelated final entry\n")
+	rehearsalCreatedGSIStat = func(file *os.File) (os.FileInfo, error) {
+		if err := os.WriteFile(target, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return file.Stat()
+	}
+	t.Cleanup(func() { rehearsalGSITarget, rehearsalCreatedGSIStat = priorTarget, priorStat })
+	preflight := RehearsalPreflightV1{SessionID: "session", CandidateCommit: strings.Repeat("a", 40), RootOwnerSHA256: strings.Repeat("b", 64)}
+	if _, err := armRehearsalGSI(root, preflight); err == nil || !strings.Contains(err.Error(), "file exists") {
+		t.Fatalf("publication race error=%v", err)
+	}
+	identity, err := inspectArmedGSI(target)
+	if err != nil || identity.hash != payloadSHA(replacement) || identity.bytes != int64(len(replacement)) {
+		t.Fatalf("racing entry changed: %+v err=%v", identity, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "rehearsal", "arm-recovery.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed publication left installed recovery intent: %v", err)
 	}
 }
 
