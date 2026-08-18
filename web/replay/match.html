@@ -219,7 +219,7 @@ function render(r) {
         `<td class="num">${esc(v.denominator)}</td><td class="num">${esc(v.opportunity_count)}</td><td class="num">${esc(v.excluded_count)}</td>`+
         `<td class="hint">${lineageCell(v)}</td></tr>`;
     }).join("");
-    const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li>${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
+    const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li data-unavailable-metric="${esc(v.metric_id)}" data-unavailable-account="${esc(v.account_id || "match")}">${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">V1 直接事实（原始值）</h3>

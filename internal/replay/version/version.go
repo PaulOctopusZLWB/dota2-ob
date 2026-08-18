@@ -27,7 +27,7 @@ const (
 	// EpisodeSchema is the behavior episode schema version.
 	EpisodeSchema = "replay.episodes.v1"
 	// MetricsSchema is the V1/V2/V3 metric publication schema version.
-	MetricsSchema = "replay.metrics.v4"
+	MetricsSchema = "replay.metrics.v5"
 	// ClosureSchema is the 52-row metric closure contract version.
 	ClosureSchema = "ti2026.metric-closure.v1"
 	// ScoreSchema v4 retains per-match role provenance in match and tournament
@@ -53,7 +53,7 @@ const (
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
 	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v10"
+	MetricsRuleVersion = "ti2026.metrics.v11"
 	// ScoreRuleVersion identifies the radar/score computation and complete
 	// structured aggregation-lineage rule set.
 	ScoreRuleVersion = "ti2026.scoring.v4"

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -337,6 +338,38 @@ func TestEveryReviewMutationCorruptOrUnwritableAuditIsAtomic(t *testing.T) {
 	}
 }
 
+func TestEveryReviewMutationJournalDirectorySyncFailureIsAtomic(t *testing.T) {
+	for name, mutate := range atomicMutators() {
+		t.Run(name, func(t *testing.T) {
+			s, root := seededAtomicStore(t)
+			beforeReview, beforeAudit := authoritativeBytes(t, s)
+			calls := 0
+			s.removeAtomicLog = func(path string) error {
+				calls++
+				if calls == 1 {
+					// Model unlink succeeding but its parent-directory fsync
+					// failing. commitReviewAndAudit must not acknowledge or
+					// leave the promoted pair split.
+					if err := os.Remove(path); err != nil {
+						return err
+					}
+					return fmt.Errorf("injected journal parent sync failure")
+				}
+				return store.RemoveDurable(path)
+			}
+			if err := mutate(s); !IsStorageError(err) {
+				t.Fatalf("err=%v want storage error", err)
+			}
+			assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+			restarted, err := New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+		})
+	}
+}
+
 func TestReviewStatusStaleRevisionIsMutationFree(t *testing.T) {
 	s, _ := seededAtomicStore(t)
 	current, _ := s.Load("m1")
@@ -349,6 +382,187 @@ func TestReviewStatusStaleRevisionIsMutationFree(t *testing.T) {
 		t.Fatalf("err=%v want stale", err)
 	}
 	assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+}
+
+func TestReviewCrashBarrierChild(t *testing.T) {
+	root := os.Getenv("DOT75_REVIEW_CRASH_ROOT")
+	if root == "" {
+		return
+	}
+	barrier := os.Getenv("DOT75_REVIEW_CRASH_BARRIER")
+	mutation := os.Getenv("DOT75_REVIEW_CRASH_MUTATION")
+	mode := os.Getenv("DOT75_REVIEW_CRASH_MODE")
+	crash := func(name string) {
+		if name == barrier {
+			os.Exit(77)
+		}
+	}
+	var s *Store
+	var err error
+	if mode == "recovery" {
+		s = &Store{Root: root, crashBarrier: crash}
+		err = s.recoverPending()
+	} else {
+		s, err = New(root)
+		if err == nil {
+			s.crashBarrier = crash
+		}
+	}
+	if err != nil {
+		t.Fatalf("child open/recover: %v", err)
+	}
+	if mode == "recovery" {
+		t.Fatalf("recovery barrier %q was not reached", barrier)
+	}
+	mutate := atomicMutators()[mutation]
+	if mutate == nil {
+		t.Fatalf("unknown mutation %q", mutation)
+	}
+	if mode == "rollback" {
+		s.writeAtomic = func(path string, b []byte) error {
+			if path == s.Path("m1") {
+				return fmt.Errorf("subprocess failed second promotion")
+			}
+			return store.WriteAtomic(path, b)
+		}
+	}
+	_ = mutate(s)
+	if barrier != "" {
+		t.Fatalf("commit/rollback barrier %q was not reached", barrier)
+	}
+}
+
+func runCrashChild(t *testing.T, root, mutation, mode, barrier string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReviewCrashBarrierChild$")
+	cmd.Env = append(os.Environ(),
+		"DOT75_REVIEW_CRASH_ROOT="+root,
+		"DOT75_REVIEW_CRASH_MUTATION="+mutation,
+		"DOT75_REVIEW_CRASH_MODE="+mode,
+		"DOT75_REVIEW_CRASH_BARRIER="+barrier,
+	)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 77 {
+		t.Fatalf("child mode=%s mutation=%s barrier=%s: err=%v", mode, mutation, barrier, err)
+	}
+}
+
+func assertFullyCommittedMutation(t *testing.T, s *Store, mutation string, beforeReview, beforeAudit []byte) {
+	t.Helper()
+	gotReview, gotAudit := authoritativeBytes(t, s)
+	if string(gotReview) == string(beforeReview) || string(gotAudit) == string(beforeAudit) {
+		t.Fatalf("%s did not promote both authoritative documents", mutation)
+	}
+	var audit Audit
+	if err := json.Unmarshal(gotAudit, &audit); err != nil || len(audit.Entries) != 2 {
+		t.Fatalf("%s audit is not the fully committed pair: entries=%d err=%v", mutation, len(audit.Entries), err)
+	}
+	var review Review
+	if err := json.Unmarshal(gotReview, &review); err != nil || review.ReviewRevision == "" {
+		t.Fatalf("%s review is not the fully committed pair: revision=%q err=%v", mutation, review.ReviewRevision, err)
+	}
+	switch mutation {
+	case "phase_op":
+		if len(review.PhaseCorrections) != 2 {
+			t.Fatalf("phase operation not committed: %+v", review.PhaseCorrections)
+		}
+	case "review_status":
+		if review.ReviewStatus != "reviewed" {
+			t.Fatalf("review status=%q", review.ReviewStatus)
+		}
+	case "effective_overlay":
+		if len(review.EffectivePhaseIntervals) != 1 {
+			t.Fatalf("effective overlay not committed: %+v", review.EffectivePhaseIntervals)
+		}
+	}
+}
+
+func TestReviewCrashBarrierSubprocessMatrix(t *testing.T) {
+	commitBarriers := []string{
+		"commit_after_durable_prepare",
+		"commit_after_audit_promotion",
+		"commit_after_review_promotion",
+		"commit_before_journal_remove",
+		"commit_after_journal_remove",
+	}
+	rollbackBarriers := []string{
+		"rollback_begin",
+		"rollback_after_review_restore",
+		"rollback_after_audit_restore",
+		"rollback_before_journal_remove",
+		"rollback_after_journal_remove",
+	}
+	recoveryBarriers := []string{
+		"recovery_begin",
+		"recovery_after_review_restore",
+		"recovery_after_audit_restore",
+		"recovery_before_journal_remove",
+		"recovery_after_journal_remove",
+	}
+	for mutation := range atomicMutators() {
+		mutation := mutation
+		t.Run(mutation, func(t *testing.T) {
+			for _, barrier := range commitBarriers {
+				barrier := barrier
+				t.Run(barrier, func(t *testing.T) {
+					s, root := seededAtomicStore(t)
+					beforeReview, beforeAudit := authoritativeBytes(t, s)
+					runCrashChild(t, root, mutation, "commit", barrier)
+					restarted, err := New(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if barrier == "commit_after_journal_remove" {
+						assertFullyCommittedMutation(t, restarted, mutation, beforeReview, beforeAudit)
+					} else {
+						assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+					}
+				})
+			}
+			for _, barrier := range rollbackBarriers {
+				barrier := barrier
+				t.Run(barrier, func(t *testing.T) {
+					s, root := seededAtomicStore(t)
+					beforeReview, beforeAudit := authoritativeBytes(t, s)
+					runCrashChild(t, root, mutation, "rollback", barrier)
+					restarted, err := New(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+				})
+			}
+			for _, barrier := range recoveryBarriers {
+				barrier := barrier
+				t.Run(barrier, func(t *testing.T) {
+					s, root := seededAtomicStore(t)
+					beforeReview, beforeAudit := authoritativeBytes(t, s)
+					// Crash at rollback start to leave a durable prepared journal
+					// and a split promotion for the recovery subprocess to repair.
+					runCrashChild(t, root, mutation, "rollback", "rollback_begin")
+					runCrashChild(t, root, mutation, "recovery", barrier)
+					restarted, err := New(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+				})
+			}
+			// A returned mutation is acknowledged only after durable journal
+			// removal. Restart must preserve that fully committed pair.
+			s, root := seededAtomicStore(t)
+			beforeReview, beforeAudit := authoritativeBytes(t, s)
+			if err := atomicMutators()[mutation](s); err != nil {
+				t.Fatalf("acknowledged mutation: %v", err)
+			}
+			restarted, err := New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertFullyCommittedMutation(t, restarted, mutation, beforeReview, beforeAudit)
+		})
+	}
 }
 
 // TestPhaseOverlayTypedOps exercises accept/move/relabel/add/delete/split/

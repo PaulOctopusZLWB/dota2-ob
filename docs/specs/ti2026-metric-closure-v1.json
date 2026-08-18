@@ -126,9 +126,9 @@
       "capability_level": "V1",
       "report_level": "player",
       "resolved": "published",
-      "accepted_source_fields": "death_respawn_buyback_event.kind=death.account_id|participant_binding|calibrated_clock",
-      "publication_gate": "publish when a resolved alive-to-dead transition exists",
-      "unavailable_gate": "death_respawn_buyback_event_missing"
+      "accepted_source_fields": "hero_state_sample.alive with bound real-hero identity|death_respawn_buyback_event.kind=respawn/death.account_id+hero_name|participant_binding|calibrated_clock|official_phase",
+      "publication_gate": "publish per subject/window only when at least one gap-free typed alive/respawn-to-dead/death life interval has a positive intersection; numerator death ends are evaluated independently",
+      "unavailable_gate": "bound_real_hero_life_interval_not_proven_for_subject_window"
     },
     {
       "metric_id": "death_prevented_by_save",

@@ -166,6 +166,7 @@ type Store struct {
 	writeAtomic     func(string, []byte) error // test injection; nil uses store.WriteAtomic
 	recoveryAtomic  func(string, []byte) error // test injection for rollback/recovery
 	removeAtomicLog func(string) error         // test injection for journal removal
+	crashBarrier    func(string)               // subprocess crash injection
 }
 
 // transactionJournal is a durable prepare record for one review+audit commit.
@@ -803,11 +804,7 @@ func (s *Store) removeJournal() error {
 	if s.removeAtomicLog != nil {
 		return s.removeAtomicLog(s.journalPath())
 	}
-	err := os.Remove(s.journalPath())
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return store.RemoveDurable(s.journalPath())
 }
 
 func readPrior(path string) ([]byte, bool, error) {
@@ -825,26 +822,33 @@ func (s *Store) restoreFile(path string, existed bool, b []byte) error {
 	if existed {
 		return s.recoveryWrite(path, b)
 	}
-	err := os.Remove(path)
-	if os.IsNotExist(err) {
-		return nil
+	return store.RemoveDurable(path)
+}
+
+func (s *Store) hitCrashBarrier(name string) {
+	if s.crashBarrier != nil {
+		s.crashBarrier(name)
 	}
-	return err
 }
 
 // restoreTransaction rolls both authoritative documents back to the exact
 // prepared bytes. The journal is removed only after both restorations succeed;
 // otherwise it remains durable for the next restart/recovery attempt.
-func (s *Store) restoreTransaction(tx *transactionJournal) error {
+func (s *Store) restoreTransaction(tx *transactionJournal, context string) error {
+	s.hitCrashBarrier(context + "_begin")
 	if err := s.restoreFile(tx.ReviewPath, tx.ReviewExisted, tx.PriorReview); err != nil {
 		return fmt.Errorf("restore review: %w", err)
 	}
+	s.hitCrashBarrier(context + "_after_review_restore")
 	if err := s.restoreFile(tx.AuditPath, tx.AuditExisted, tx.PriorAudit); err != nil {
 		return fmt.Errorf("restore audit: %w", err)
 	}
+	s.hitCrashBarrier(context + "_after_audit_restore")
+	s.hitCrashBarrier(context + "_before_journal_remove")
 	if err := s.removeJournal(); err != nil {
 		return fmt.Errorf("remove transaction journal: %w", err)
 	}
+	s.hitCrashBarrier(context + "_after_journal_remove")
 	return nil
 }
 
@@ -870,7 +874,7 @@ func (s *Store) recoverPending() error {
 	if len(tx.ReviewPath) <= len(reviewRoot) || tx.ReviewPath[:len(reviewRoot)] != reviewRoot {
 		return fmt.Errorf("transaction review path outside store")
 	}
-	return s.restoreTransaction(&tx)
+	return s.restoreTransaction(&tx, "recovery")
 }
 
 // commitReviewAndAudit prepares both complete documents and durably records
@@ -923,9 +927,10 @@ func (s *Store) commitReviewAndAudit(matchID string, r *Review, e AuditEntry) er
 	if err := s.writeBytes(s.journalPath(), journalBytes); err != nil {
 		return &storageError{fmt.Errorf("prepare transaction journal: %w", err)}
 	}
+	s.hitCrashBarrier("commit_after_durable_prepare")
 	promote := func(label, path string, b []byte) error {
 		if err := s.writeBytes(path, b); err != nil {
-			if restoreErr := s.restoreTransaction(&tx); restoreErr != nil {
+			if restoreErr := s.restoreTransaction(&tx, "rollback"); restoreErr != nil {
 				return &storageError{fmt.Errorf("%s promotion: %v; durable recovery pending: %w", label, err, restoreErr)}
 			}
 			return &storageError{fmt.Errorf("%s promotion: %w", label, err)}
@@ -935,15 +940,19 @@ func (s *Store) commitReviewAndAudit(matchID string, r *Review, e AuditEntry) er
 	if err := promote("audit", auditPath, auditBytes); err != nil {
 		return err
 	}
+	s.hitCrashBarrier("commit_after_audit_promotion")
 	if err := promote("review", reviewPath, reviewBytes); err != nil {
 		return err
 	}
+	s.hitCrashBarrier("commit_after_review_promotion")
+	s.hitCrashBarrier("commit_before_journal_remove")
 	if err := s.removeJournal(); err != nil {
-		if restoreErr := s.restoreTransaction(&tx); restoreErr != nil {
+		if restoreErr := s.restoreTransaction(&tx, "rollback"); restoreErr != nil {
 			return &storageError{fmt.Errorf("commit journal removal: %v; durable recovery pending: %w", err, restoreErr)}
 		}
 		return &storageError{fmt.Errorf("commit journal removal: %w", err)}
 	}
+	s.hitCrashBarrier("commit_after_journal_remove")
 	return nil
 }
 

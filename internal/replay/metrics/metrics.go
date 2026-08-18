@@ -10,6 +10,7 @@ package metrics
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -60,6 +61,23 @@ type EvidenceRef struct {
 	SourceFactSeq int64  `json:"source_fact_seq,omitempty"`
 }
 
+// LifeInterval is a positively proven bound-real-hero life. Its two boundary
+// facts are retained verbatim so an opportunity can be reconstructed without
+// inferring liveness from match-wide capability flags or phase duration.
+type LifeInterval struct {
+	ID                  string        `json:"id"`
+	AccountID           string        `json:"account_id"`
+	HeroName            string        `json:"hero_name"`
+	StartGameSecond     float64       `json:"start_game_second"`
+	EndGameSecond       float64       `json:"end_game_second"`
+	LifeStartGameSecond float64       `json:"life_start_game_second"`
+	LifeEndGameSecond   float64       `json:"life_end_game_second"`
+	StartKind           string        `json:"start_kind"`
+	EndKind             string        `json:"end_kind"`
+	ParticipantBinding  EvidenceRef   `json:"participant_binding"`
+	BoundaryFacts       []EvidenceRef `json:"boundary_facts"`
+}
+
 // Evidence ref kinds.
 const (
 	EvidenceFact              = "fact"
@@ -93,15 +111,16 @@ type Value struct {
 	Coverage         float64  `json:"coverage"`
 	// ExcludedDamage is the magnitude of excluded (non-objective) damage
 	// preserved separately; it is distinct from excluded_count (record count).
-	ExcludedDamage            *float64      `json:"excluded_damage,omitempty"`
-	SampleCount               int64         `json:"sample_count"`
-	EvidenceCount             int64         `json:"evidence_count"`
-	Evidence                  []EvidenceRef `json:"evidence,omitempty"`
-	UnavailableReason         string        `json:"unavailable_reason,omitempty"`
-	Confidence                float64       `json:"confidence"`
-	Direction                 string        `json:"direction"`
-	OfficialScoreEligible     bool          `json:"official_score_eligible"`
-	ExperimentalScoreEligible bool          `json:"experimental_score_eligible"`
+	ExcludedDamage            *float64       `json:"excluded_damage,omitempty"`
+	SampleCount               int64          `json:"sample_count"`
+	EvidenceCount             int64          `json:"evidence_count"`
+	Evidence                  []EvidenceRef  `json:"evidence,omitempty"`
+	LifeIntervals             []LifeInterval `json:"life_intervals,omitempty"`
+	UnavailableReason         string         `json:"unavailable_reason,omitempty"`
+	Confidence                float64        `json:"confidence"`
+	Direction                 string         `json:"direction"`
+	OfficialScoreEligible     bool           `json:"official_score_eligible"`
+	ExperimentalScoreEligible bool           `json:"experimental_score_eligible"`
 }
 
 // Output is the metrics artifact for one match.
@@ -218,6 +237,12 @@ type Calculator struct {
 	// opportunities contains independently evaluated opportunity facts for
 	// count metrics whose opportunity differs from their numerator.
 	opportunities map[string][]EvidenceRef
+	// lifeEvents are typed per-account liveness boundaries. Only a paired
+	// alive/respawn -> dead/death sequence for one bound real hero proves a
+	// life interval; null state samples are retained as gaps.
+	lifeEvents          map[string][]lifeEvent
+	participantHero     map[string]string
+	participantEvidence map[string]EvidenceRef
 
 	// factsCoverage is the per-family availability from the match's facts
 	// summary, used to resolve per-metric field gates precisely.
@@ -245,6 +270,14 @@ type damageEvent struct {
 	FactSeq    int64
 }
 
+type lifeEvent struct {
+	GameSecond float64
+	Kind       string
+	Alive      *bool
+	HeroName   string
+	Fact       EvidenceRef
+}
+
 // xpDeltaEvt is one non-negative XP award delta at a calibrated game second.
 type xpDeltaEvt struct {
 	GameSecond float64
@@ -265,15 +298,17 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		goldEarned: map[string]float64{}, firstItemSec: map[string]float64{},
 		heroDamage: map[string]float64{}, heroHealing: map[string]float64{},
 		objectiveDamage: map[string]float64{}, objectiveExcl: map[string]float64{},
-		objectiveExclN: map[string]int64{},
-		controlSeconds: map[string]float64{},
-		heroStateSecs:  map[string]map[int64]struct{}{},
-		teams:          map[string]map[string]float64{},
-		evidence:       map[string][]EvidenceRef{},
-		samples:        map[string]int64{},
-		opportunities:  map[string][]EvidenceRef{},
-		factsCoverage:  map[string]bool{},
-		healCasts:      map[string]int64{}, smokeParticles: map[string]int64{},
+		objectiveExclN:  map[string]int64{},
+		controlSeconds:  map[string]float64{},
+		heroStateSecs:   map[string]map[int64]struct{}{},
+		teams:           map[string]map[string]float64{},
+		evidence:        map[string][]EvidenceRef{},
+		samples:         map[string]int64{},
+		opportunities:   map[string][]EvidenceRef{},
+		lifeEvents:      map[string][]lifeEvent{},
+		participantHero: map[string]string{}, participantEvidence: map[string]EvidenceRef{},
+		factsCoverage: map[string]bool{},
+		healCasts:     map[string]int64{}, smokeParticles: map[string]int64{},
 		buybackRoundPart: map[string]int64{}, buybackTotal: map[string]int64{},
 		excluded: map[string]int64{},
 	}
@@ -392,6 +427,12 @@ func (c *Calculator) Feed(f *facts.Fact) {
 // and official-phase gates.
 func (c *Calculator) feedAccepted(f *facts.Fact) {
 	switch f.Family {
+	case facts.FamilyParticipant:
+		var participant facts.ParticipantFact
+		if json.Unmarshal(f.Payload, &participant) == nil && participant.AccountID != "" && strings.HasPrefix(participant.HeroName, "npc_dota_hero_") {
+			c.participantHero[participant.AccountID] = participant.HeroName
+			c.participantEvidence[participant.AccountID] = EvidenceRef{MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", f.Seq), RuleVersion: version.FactsSchema, SourceFactSeq: f.Seq}
+		}
 	case facts.FamilyDeathRespawn:
 		var drb facts.DeathRespawnBuyback
 		if err := json.Unmarshal(f.Payload, &drb); err != nil {
@@ -402,6 +443,7 @@ func (c *Calculator) feedAccepted(f *facts.Fact) {
 		}
 		switch drb.Kind {
 		case "death":
+			c.addLifeEvent(drb.AccountID, drb.HeroName, "death", nil, f)
 			victimTeam := c.teamByAcct[drb.AccountID]
 			killerTeam := c.teamByAcct[drb.KillerAccount]
 			// Opportunities are every verified opposing-hero death, evaluated
@@ -433,6 +475,8 @@ func (c *Calculator) feedAccepted(f *facts.Fact) {
 			c.buybacks[drb.AccountID]++
 			c.buybackSeconds[drb.AccountID] = append(c.buybackSeconds[drb.AccountID], f.GameSecond)
 			c.addEvidence(drb.AccountID, "buyback_use_count", f.Seq)
+		case "respawn":
+			c.addLifeEvent(drb.AccountID, drb.HeroName, "respawn", nil, f)
 		}
 	case facts.FamilyCombat:
 		var cf facts.CombatFact
@@ -531,6 +575,9 @@ func (c *Calculator) feedAccepted(f *facts.Fact) {
 		if err := json.Unmarshal(f.Payload, &hs); err != nil {
 			return
 		}
+		if hs.AccountID != "" {
+			c.addLifeEvent(hs.AccountID, hs.HeroName, "liveness", hs.Alive, f)
+		}
 		if hs.AccountID != "" && hs.PosX != nil && hs.PosY != nil {
 			// Count distinct calibrated second-grid bins, not raw samples:
 			// samples arrive at ~0.5s cadence but the metric is seconds.
@@ -555,6 +602,83 @@ func (c *Calculator) feedAccepted(f *facts.Fact) {
 			c.addEvidence(mf.AccountID, "smoke_activation_participation", f.Seq)
 		}
 	}
+}
+
+func (c *Calculator) addLifeEvent(account, hero, kind string, alive *bool, f *facts.Fact) {
+	if account == "" || c.teamByAcct[account] == "" || !strings.HasPrefix(hero, "npc_dota_hero_") {
+		return
+	}
+	var copied *bool
+	if alive != nil {
+		v := *alive
+		copied = &v
+	}
+	c.lifeEvents[account] = append(c.lifeEvents[account], lifeEvent{
+		GameSecond: f.GameSecond, Kind: kind, Alive: copied, HeroName: hero,
+		Fact: EvidenceRef{MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", f.Seq), RuleVersion: version.FactsSchema, SourceFactSeq: f.Seq},
+	})
+}
+
+// provenLifeIntervals pairs typed liveness boundaries for one bound real
+// hero. Null samples inside an open interval invalidate it: they are an
+// explicit coverage gap, not evidence that the prior state continued.
+func (c *Calculator) provenLifeIntervals(account string) ([]LifeInterval, int64) {
+	events := append([]lifeEvent(nil), c.lifeEvents[account]...)
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].GameSecond != events[j].GameSecond {
+			return events[i].GameSecond < events[j].GameSecond
+		}
+		return events[i].Fact.SourceFactSeq < events[j].Fact.SourceFactSeq
+	})
+	var out []LifeInterval
+	var start *lifeEvent
+	var gaps int64
+	openGap := false
+	lastState := "unknown"
+	for i := range events {
+		e := &events[i]
+		if e.Kind == "liveness" && e.Alive == nil {
+			if start != nil {
+				openGap = true
+				gaps++
+			}
+			continue
+		}
+		alive := e.Kind == "respawn" || (e.Kind == "liveness" && e.Alive != nil && *e.Alive)
+		dead := e.Kind == "death" || (e.Kind == "liveness" && e.Alive != nil && !*e.Alive)
+		if alive {
+			if lastState == "alive" {
+				continue // duplicate state sample/transition
+			}
+			copy := *e
+			start = &copy
+			openGap = false
+			lastState = "alive"
+			continue
+		}
+		if !dead {
+			continue
+		}
+		if lastState == "dead" {
+			continue // duplicate death transition
+		}
+		binding, bound := c.participantEvidence[account]
+		if start != nil && !openGap && bound && c.participantHero[account] == e.HeroName && e.GameSecond > start.GameSecond && e.HeroName == start.HeroName {
+			out = append(out, LifeInterval{
+				ID:        fmt.Sprintf("life:%s:%d-%d", account, start.Fact.SourceFactSeq, e.Fact.SourceFactSeq),
+				AccountID: account, HeroName: e.HeroName,
+				StartGameSecond: start.GameSecond, EndGameSecond: e.GameSecond,
+				LifeStartGameSecond: start.GameSecond, LifeEndGameSecond: e.GameSecond,
+				StartKind: start.Kind, EndKind: e.Kind,
+				ParticipantBinding: binding,
+				BoundaryFacts:      []EvidenceRef{start.Fact, e.Fact},
+			})
+		}
+		start = nil
+		openGap = false
+		lastState = "dead"
+	}
+	return out, gaps
 }
 
 // officialPhaseAt returns the single official causal phase containing sec.
@@ -676,6 +800,14 @@ func (c *Calculator) prepareFacts(ph *phase.Output) map[string]*Calculator {
 		}
 		c.feedAccepted(f)
 		pcs[phaseName].feedAccepted(f)
+	}
+	// A life can cross an official-phase boundary. Phase calculators retain
+	// phase-local numerators, but opportunity proof must intersect the complete
+	// match-level interval rather than fabricate or truncate a life at a phase.
+	for _, pc := range pcs {
+		pc.lifeEvents = c.lifeEvents
+		pc.participantHero = c.participantHero
+		pc.participantEvidence = c.participantEvidence
 	}
 	return pcs
 }
@@ -874,6 +1006,62 @@ func phaseEvidence(matchID, phaseName string, ph *phase.Output) []EvidenceRef {
 	return out
 }
 
+func (c *Calculator) lifeIntersections(account, phaseName string, ph *phase.Output) ([]LifeInterval, float64, int64) {
+	intervals, gaps := c.provenLifeIntervals(account)
+	var out []LifeInterval
+	var duration float64
+	for _, life := range intervals {
+		for _, piv := range ph.Intervals {
+			if !piv.GlobalPhase.Official() || (phaseName != "whole_match" && string(piv.GlobalPhase) != phaseName) {
+				continue
+			}
+			start := math.Max(life.StartGameSecond, float64(piv.StartGameSecond))
+			end := math.Min(life.EndGameSecond, float64(piv.EndGameSecond))
+			if end <= start {
+				continue
+			}
+			part := life
+			part.StartGameSecond = start
+			part.EndGameSecond = end
+			out = append(out, part)
+			duration += end - start
+		}
+	}
+	return out, duration, gaps
+}
+
+func deathIntervalEvidence(intervals []LifeInterval) []EvidenceRef {
+	var refs []EvidenceRef
+	for _, iv := range intervals {
+		refs = append(refs, iv.ParticipantBinding)
+		refs = append(refs, iv.BoundaryFacts...)
+	}
+	return dedupeEvidence(refs)
+}
+
+func deathNumerator(intervals []LifeInterval, phaseName string, ph *phase.Output) (int64, []EvidenceRef) {
+	seen := map[string]bool{}
+	var n int64
+	var refs []EvidenceRef
+	for _, iv := range intervals {
+		if seen[iv.ID] || iv.EndKind != "death" {
+			continue
+		}
+		if phaseName != "whole_match" {
+			p, ok := officialPhaseAt(ph, iv.LifeEndGameSecond)
+			if !ok || p != phaseName {
+				continue
+			}
+		}
+		seen[iv.ID] = true
+		n++
+		if len(iv.BoundaryFacts) > 1 {
+			refs = append(refs, iv.BoundaryFacts[len(iv.BoundaryFacts)-1])
+		}
+	}
+	return n, dedupeEvidence(refs)
+}
+
 func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role, phaseName string, duration float64, ph *phase.Output, excluded int64) (Value, bool, string) {
 	v = decorateValue(v, m, acct, team, role)
 	contributors := dedupeEvidence(calc.evidenceFor(acct, m.ID))
@@ -894,18 +1082,32 @@ func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role,
 			return v, false, "eligible_opposing_hero_death_opportunity_not_proven"
 		}
 	case "death_count":
-		if !calc.factsCoverage[facts.FamilyDeathRespawn] {
-			return v, false, "bound_real_hero_life_interval_not_proven"
+		lifeIntervals, lifeDuration, lifeGaps := calc.lifeIntersections(acct, phaseName, ph)
+		if len(lifeIntervals) == 0 {
+			if lifeGaps > 0 {
+				return v, false, "bound_real_hero_life_interval_liveness_gap"
+			}
+			return v, false, "bound_real_hero_life_interval_not_proven_for_subject_window"
 		}
-		// Positive duration plus participant binding prove one intersecting
-		// bound-real-hero life interval even when its death numerator is zero.
-		// Each verified death proves its own completed life interval; without
-		// an emitted respawn transition we do not fabricate a post-death one.
-		opportunity = calc.deaths[acct]
-		if opportunity == 0 {
-			opportunity = 1
+		unique := map[string]bool{}
+		for _, iv := range lifeIntervals {
+			unique[iv.ID] = true
 		}
-		opportunityEvidence = contributors
+		opportunity = int64(len(unique))
+		if opportunity == 0 || lifeDuration <= 0 {
+			return v, false, "bound_real_hero_life_interval_positive_duration_not_proven"
+		}
+		n, deathRefs := deathNumerator(lifeIntervals, phaseName, ph)
+		fv := float64(n)
+		v.Value, v.Numerator = &fv, &fv
+		iv := n
+		v.IntValue = &iv
+		samples = n
+		contributors = deathRefs
+		opportunityEvidence = deathIntervalEvidence(lifeIntervals)
+		duration = lifeDuration
+		v.LifeIntervals = lifeIntervals
+		v.GapCount = lifeGaps
 	case "hero_damage_total", "objective_damage_total":
 		opportunity = samples
 		if opportunity == 0 {
@@ -921,6 +1123,14 @@ func finalizeDirectValue(calc *Calculator, v Value, m *Metric, acct, team, role,
 	v.EvidenceCount = samples
 	v.ExcludedCount += excluded
 	v.Coverage = 1.0
+	if m.ID == "death_count" && phaseDurationMap(ph)[phaseName] > 0 {
+		v.Coverage = duration / phaseDurationMap(ph)[phaseName]
+	} else if m.ID == "death_count" && phaseName == "whole_match" {
+		total := phaseDurationMap(ph)["laning"] + phaseDurationMap(ph)["midgame"] + phaseDurationMap(ph)["decisive"]
+		if total > 0 {
+			v.Coverage = duration / total
+		}
+	}
 	chain := append([]EvidenceRef(nil), contributors...)
 	chain = append(chain, opportunityEvidence...)
 	chain = append(chain, phaseEvidence(calc.matchID, phaseName, ph)...)

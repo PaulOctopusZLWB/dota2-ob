@@ -167,6 +167,7 @@ function assertCoverage(stream, eligible) {
 async function assertFrozenOpportunityAndLineage(page, base, render) {
   const m8107 = await api(page, `${base}/api/replay/v1/matches/8946228107`);
   const rows8107 = m8107.data.metrics.values;
+  const unavailable8107 = m8107.data.metrics.unavailable;
   const metric = (account, id) => rows8107.find(v => v.account_id === account && v.metric_id === id && v.official_phase === "whole_match");
   for (const account of ["145957968", "170896543"]) {
     const row = metric(account, "kill_count");
@@ -177,8 +178,20 @@ async function assertFrozenOpportunityAndLineage(page, base, render) {
   }
   for (const account of ["312436974", "56351509"]) {
     const row = metric(account, "death_count");
-    assert.ok(row && row.value === 0, `observed-zero death row missing for ${account}`);
-    assert.ok(row.opportunity_count > 0 && row.denominator === 1103, `${account} life-interval/duration proof`);
+    assert.strictEqual(row, undefined, `${account} fabricated death zero still published`);
+    const unavailable = unavailable8107.find(v => v.account_id === account && v.metric_id === "death_count");
+    assert.ok(unavailable, `${account} death_count unavailable row missing`);
+    assert.strictEqual(unavailable.unavailable_reason, "bound_real_hero_life_interval_not_proven_for_subject_window", `${account} precise life-interval reason`);
+    assert.strictEqual(unavailable.value, null, `${account} unavailable value`);
+    if (render) {
+      await page.goto(`${base}/match.html?id=8946228107`, { waitUntil: "domcontentloaded" });
+      const selector = `li[data-unavailable-metric='death_count'][data-unavailable-account='${account}']`;
+      await page.waitForSelector(selector, { state: "attached", timeout: 15000 });
+      await page.$eval(selector, el => el.closest("details").querySelector("summary").click());
+      await page.waitForSelector(selector, { state: "visible", timeout: 15000 });
+      const text = await page.$eval(selector, el => el.innerText);
+      assert.ok(text.includes("bound_real_hero_life_interval_not_proven_for_subject_window"), `${account} rendered reason`);
+    }
   }
   const nonzero = metric("315272623", "kill_count");
   assert.ok(nonzero && nonzero.value === 1 && nonzero.opportunity_count === 5, "nonzero kill opportunity is not the opposing-death set");
@@ -501,7 +514,7 @@ async function main() {
 
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen observed-zero/opportunity rows, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

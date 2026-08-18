@@ -324,9 +324,15 @@ func TestCalculatorAggregation(t *testing.T) {
 	calc.SetRoles(map[string]string{"a1": "1", "a2": "1"})
 	calc.SetTeamOfSide(map[string]string{"radiant": "T1", "dire": "T2"})
 	feed := func(f *facts.Fact) { f.GameSecondOK = true; calc.Feed(f) }
-	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 10, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a1", KillerAccount: "a2"})})
-	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 20, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a1", KillerAccount: "a2"})})
-	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 30, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a2", KillerAccount: "a1"})})
+	feed(&facts.Fact{Seq: 100, Family: facts.FamilyParticipant, GameSecond: 0, Payload: mustJSON(&facts.ParticipantFact{AccountID: "a1", HeroName: "npc_dota_hero_axe"})})
+	feed(&facts.Fact{Seq: 101, Family: facts.FamilyParticipant, GameSecond: 0, Payload: mustJSON(&facts.ParticipantFact{AccountID: "a2", HeroName: "npc_dota_hero_lina"})})
+	alive := true
+	feed(&facts.Fact{Seq: 1, Family: facts.FamilyHeroState, GameSecond: 1, Payload: mustJSON(&facts.HeroStateSample{AccountID: "a1", HeroName: "npc_dota_hero_axe", Alive: &alive})})
+	feed(&facts.Fact{Seq: 2, Family: facts.FamilyDeathRespawn, GameSecond: 10, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a1", HeroName: "npc_dota_hero_axe", KillerAccount: "a2"})})
+	feed(&facts.Fact{Seq: 3, Family: facts.FamilyDeathRespawn, GameSecond: 11, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "respawn", AccountID: "a1", HeroName: "npc_dota_hero_axe"})})
+	feed(&facts.Fact{Seq: 4, Family: facts.FamilyDeathRespawn, GameSecond: 20, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a1", HeroName: "npc_dota_hero_axe", KillerAccount: "a2"})})
+	feed(&facts.Fact{Seq: 5, Family: facts.FamilyHeroState, GameSecond: 1, Payload: mustJSON(&facts.HeroStateSample{AccountID: "a2", HeroName: "npc_dota_hero_lina", Alive: &alive})})
+	feed(&facts.Fact{Seq: 6, Family: facts.FamilyDeathRespawn, GameSecond: 30, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a2", HeroName: "npc_dota_hero_lina", KillerAccount: "a1"})})
 	feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 40, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "buyback", AccountID: "a1"})})
 	v := int64(50)
 	feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 15, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: &v})})
@@ -461,6 +467,8 @@ func TestFrozenPregameFactsRejectedAndPerPhaseReconcile(t *testing.T) {
 	calc.SetClosure(cl)
 	calc.SetRoles(map[string]string{"312436974": "1", "victim": "2", "assist1": "3", "assist2": "4", "assist3": "5", "assist4": "1"})
 	calc.SetFactsCoverage([]string{facts.FamilyCombat, facts.FamilyDeathRespawn})
+	calc.Feed(&facts.Fact{Seq: 698, Family: facts.FamilyParticipant, GameSecond: 0, GameSecondOK: true,
+		Payload: mustJSON(&facts.ParticipantFact{AccountID: "victim", HeroName: "npc_dota_hero_axe"})})
 
 	// Reviewer-reproduced frozen pregame/uncalibrated facts. These exact seqs
 	// must never enter any published numerator or lineage.
@@ -482,8 +490,11 @@ func TestFrozenPregameFactsRejectedAndPerPhaseReconcile(t *testing.T) {
 	dmg := int64(1000)
 	calc.Feed(&facts.Fact{Seq: 700, Family: facts.FamilyCombat, GameSecond: 120, GameSecondOK: true,
 		Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "312436974", TargetAccount: "victim", Value: &dmg})})
+	alive := true
+	calc.Feed(&facts.Fact{Seq: 699, Family: facts.FamilyHeroState, GameSecond: 100, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "victim", HeroName: "npc_dota_hero_axe", Alive: &alive})})
 	calc.Feed(&facts.Fact{Seq: 701, Family: facts.FamilyDeathRespawn, GameSecond: 130, GameSecondOK: true,
-		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "victim", KillerAccount: "312436974", AssistAccounts: []string{"assist1"}})})
+		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "victim", HeroName: "npc_dota_hero_axe", KillerAccount: "312436974", AssistAccounts: []string{"assist1"}})})
 	calc.Feed(&facts.Fact{Seq: 702, Family: facts.FamilyDeathRespawn, GameSecond: 190, GameSecondOK: true,
 		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "buyback", AccountID: "victim"})})
 	ph := &phase.Output{EligibleSeconds: 200, Intervals: []phase.Interval{
@@ -495,7 +506,7 @@ func TestFrozenPregameFactsRejectedAndPerPhaseReconcile(t *testing.T) {
 
 	for _, v := range out.Values {
 		if directPhaseMetric(v.MetricID) {
-			if v.OfficialPhase == "" || v.Numerator == nil || v.Denominator == nil || v.OpportunityCount <= 0 || v.SampleCount < 0 || v.EvidenceCount < 0 || v.Coverage != 1 || v.GapCount != 0 {
+			if v.OfficialPhase == "" || v.Numerator == nil || v.Denominator == nil || v.OpportunityCount <= 0 || v.SampleCount < 0 || v.EvidenceCount < 0 || v.Coverage <= 0 || v.Coverage > 1 || v.GapCount != 0 {
 				t.Fatalf("published direct row missing exact fields: %+v", v)
 			}
 			seenPhase, seenCanonicalObs := false, false
@@ -623,7 +634,7 @@ func TestDirectContributorLineageIsComplete(t *testing.T) {
 	t.Fatal("whole-match hero_damage_total not published")
 }
 
-func TestDeclaredOpportunitiesPublishObservedZeroes(t *testing.T) {
+func TestDeclaredOpportunitiesUsePerAccountLifeIntervals(t *testing.T) {
 	reg := testRegistry(t)
 	accounts := []string{"r1", "r2", "r3", "r4", "r5", "d1", "d2", "d3", "d4", "d5"}
 	team := map[string]string{}
@@ -640,18 +651,59 @@ func TestDeclaredOpportunitiesPublishObservedZeroes(t *testing.T) {
 	calc.SetRegistry(reg)
 	calc.SetRoles(roles)
 	calc.SetFactsCoverage([]string{facts.FamilyDeathRespawn})
+	for i, account := range accounts {
+		hero := "npc_dota_hero_" + account
+		calc.Feed(&facts.Fact{Seq: int64(100 + i), Family: facts.FamilyParticipant, GameSecond: 0, GameSecondOK: true,
+			Payload: mustJSON(&facts.ParticipantFact{AccountID: account, HeroName: hero})})
+	}
 	for seq := int64(1); seq <= 5; seq++ {
 		killer := "r1"
 		if seq > 1 {
 			killer = "r2"
 		}
 		calc.Feed(&facts.Fact{Seq: seq, Family: facts.FamilyDeathRespawn, GameSecond: float64(seq * 10), GameSecondOK: true,
-			Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "d1", KillerAccount: killer, AssistAccounts: []string{}})})
+			Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "d1", HeroName: "npc_dota_hero_axe", KillerAccount: killer, AssistAccounts: []string{}})})
 	}
-	out := calc.Result(nil, testOfficialPhases(1103))
-	find := func(metric, account string) Value {
+	// r3 has one positively proven life crossing the laning/midgame boundary.
+	// Its laning death numerator is legitimately zero, independently of the
+	// opportunity and 50-second eligible-life denominator.
+	alive, dead := true, false
+	calc.Feed(&facts.Fact{Seq: 10, Family: facts.FamilyHeroState, GameSecond: 50, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r3", HeroName: "npc_dota_hero_r3", Alive: &alive})})
+	calc.Feed(&facts.Fact{Seq: 11, Family: facts.FamilyHeroState, GameSecond: 50, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r3", HeroName: "npc_dota_hero_r3", Alive: &alive})}) // duplicate
+	calc.Feed(&facts.Fact{Seq: 12, Family: facts.FamilyDeathRespawn, GameSecond: 150, GameSecondOK: true,
+		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "r3", HeroName: "npc_dota_hero_r3", KillerAccount: "d2"})})
+	// r2 has a complete alive->dead state interval but no death event. This is
+	// a legitimate observed zero and must survive as numeric zero, never null
+	// or a neutral score placeholder.
+	calc.Feed(&facts.Fact{Seq: 13, Family: facts.FamilyHeroState, GameSecond: 60, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r2", HeroName: "npc_dota_hero_r2", Alive: &alive})})
+	calc.Feed(&facts.Fact{Seq: 14, Family: facts.FamilyHeroState, GameSecond: 80, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r2", HeroName: "npc_dota_hero_r2", Alive: &dead})})
+	// r4 has apparent boundaries but a null-liveness gap, so it must fail
+	// closed. r5 proves respawn->death and includes a duplicate death.
+	calc.Feed(&facts.Fact{Seq: 20, Family: facts.FamilyHeroState, GameSecond: 10, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r4", HeroName: "npc_dota_hero_r4", Alive: &alive})})
+	calc.Feed(&facts.Fact{Seq: 21, Family: facts.FamilyHeroState, GameSecond: 20, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r4", HeroName: "npc_dota_hero_r4", Alive: nil})})
+	calc.Feed(&facts.Fact{Seq: 22, Family: facts.FamilyHeroState, GameSecond: 30, GameSecondOK: true,
+		Payload: mustJSON(&facts.HeroStateSample{AccountID: "r4", HeroName: "npc_dota_hero_r4", Alive: &dead})})
+	calc.Feed(&facts.Fact{Seq: 30, Family: facts.FamilyDeathRespawn, GameSecond: 210, GameSecondOK: true,
+		Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "respawn", AccountID: "r5", HeroName: "npc_dota_hero_r5"})})
+	for _, seq := range []int64{31, 32} {
+		calc.Feed(&facts.Fact{Seq: seq, Family: facts.FamilyDeathRespawn, GameSecond: 250, GameSecondOK: true,
+			Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "r5", HeroName: "npc_dota_hero_r5", KillerAccount: "d2"})})
+	}
+	ph := &phase.Output{EligibleSeconds: 300, Intervals: []phase.Interval{
+		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 100, RuleVersion: "test.phase.v1"},
+		{GlobalPhase: phase.Midgame, StartGameSecond: 100, EndGameSecond: 200, RuleVersion: "test.phase.v1"},
+		{GlobalPhase: phase.Decisive, StartGameSecond: 200, EndGameSecond: 300, RuleVersion: "test.phase.v1"},
+	}}
+	out := calc.Result(nil, ph)
+	find := func(metric, account, phaseName string) Value {
 		for _, v := range out.Values {
-			if v.MetricID == metric && v.AccountID == account && v.OfficialPhase == "whole_match" {
+			if v.MetricID == metric && v.AccountID == account && v.OfficialPhase == phaseName {
 				return v
 			}
 		}
@@ -659,20 +711,39 @@ func TestDeclaredOpportunitiesPublishObservedZeroes(t *testing.T) {
 		return Value{}
 	}
 	for _, account := range []string{"r3", "r4"} {
-		v := find("kill_count", account)
-		if *v.Value != 0 || *v.Numerator != 0 || v.SampleCount != 0 || v.EvidenceCount != 0 || v.OpportunityCount != 5 || *v.Denominator != 1103 {
+		v := find("kill_count", account, "whole_match")
+		if *v.Value != 0 || *v.Numerator != 0 || v.SampleCount != 0 || v.EvidenceCount != 0 || v.OpportunityCount != 5 || *v.Denominator != 300 {
 			t.Fatalf("%s zero kill row=%+v", account, v)
 		}
 	}
-	nonzero := find("kill_count", "r1")
+	nonzero := find("kill_count", "r1", "whole_match")
 	if *nonzero.Value != 1 || nonzero.OpportunityCount != 5 {
 		t.Fatalf("nonzero kill numerator/opportunity=%v/%d want 1/5", *nonzero.Value, nonzero.OpportunityCount)
 	}
-	for _, account := range []string{"r3", "r4"} {
-		v := find("death_count", account)
-		if *v.Value != 0 || v.OpportunityCount != 1 || *v.Denominator != 1103 {
-			t.Fatalf("%s zero death row=%+v", account, v)
+	laning := find("death_count", "r3", "laning")
+	whole := find("death_count", "r3", "whole_match")
+	if *laning.Value != 0 || laning.OpportunityCount != 1 || *laning.Denominator != 50 || len(laning.LifeIntervals) != 1 {
+		t.Fatalf("r3 phase zero/life intersection=%+v", laning)
+	}
+	if *whole.Value != 1 || whole.OpportunityCount != 1 || *whole.Denominator != 100 || len(whole.LifeIntervals) != 2 {
+		t.Fatalf("r3 whole reconciliation=%+v", whole)
+	}
+	legitimateZero := find("death_count", "r2", "whole_match")
+	if *legitimateZero.Value != 0 || legitimateZero.OpportunityCount != 1 || *legitimateZero.Denominator != 20 {
+		t.Fatalf("r2 legitimate observed zero=%+v", legitimateZero)
+	}
+	decisive := find("death_count", "r5", "decisive")
+	if *decisive.Value != 1 || decisive.OpportunityCount != 1 || *decisive.Denominator != 40 {
+		t.Fatalf("duplicate transition changed r5=%+v", decisive)
+	}
+	foundGap := false
+	for _, v := range out.Unavailable {
+		if v.MetricID == "death_count" && v.AccountID == "r4" && v.UnavailableReason == "bound_real_hero_life_interval_liveness_gap" {
+			foundGap = true
 		}
+	}
+	if !foundGap {
+		t.Fatal("r4 null-liveness gap did not fail closed")
 	}
 }
 

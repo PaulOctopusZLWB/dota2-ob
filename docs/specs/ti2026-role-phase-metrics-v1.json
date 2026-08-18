@@ -4195,7 +4195,7 @@
       "business_meaning": "Verified deaths of the player's real hero.",
       "target_class": "direct",
       "numerator": "Count of verified death transitions for the player's real hero.",
-      "denominator": "Eligible phase or match duration, reported separately; raw value is a count.",
+      "denominator": "Duration of positively proven bound-real-hero life-interval intersections with the eligible phase or match window; raw value is a count.",
       "opportunity": "Each bound real-hero life interval.",
       "phases": [
         "laning",
@@ -4206,9 +4206,10 @@
         "participant binding",
         "calibrated clock",
         "real hero entity",
+        "typed alive/respawn life start",
         "death transition"
       ],
-      "algorithm": "Count alive-to-dead transitions of the bound real hero, excluding illusions and duplicate combat-log records.",
+      "algorithm": "Pair typed alive/respawn starts with dead/death ends for the same bound real hero, reject null-liveness gaps and duplicate transitions, intersect proven lives with each official phase and whole match, then count verified death ends in the window.",
       "radar_axis": "fight",
       "roles": [
         "1",
@@ -4240,7 +4241,7 @@
       "description": "Verified deaths of the player's real hero.",
       "domain": "fight",
       "epistemic_class": "direct",
-      "metric_version": "1.0.0",
+      "metric_version": "1.1.0",
       "report_level": "player",
       "unit": "count",
       "direction": "context_only",
@@ -4251,6 +4252,7 @@
         "participant binding",
         "calibrated clock",
         "real hero entity",
+        "alive state",
         "death transition"
       ],
       "field_quality_gates": [

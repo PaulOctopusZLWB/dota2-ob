@@ -204,7 +204,39 @@ func WriteAtomic(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("store: promote %s: %w", path, err)
 	}
+	if err := SyncParent(path); err != nil {
+		return fmt.Errorf("store: sync promoted parent %s: %w", path, err)
+	}
 	return nil
+}
+
+// SyncParent durably records directory metadata after a rename or unlink.
+// On Linux, fsync of the file alone does not make the directory entry crash-
+// durable; callers must not acknowledge a promotion/removal before this
+// succeeds.
+func SyncParent(path string) error {
+	dir := filepath.Dir(path)
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open parent %s: %w", dir, err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync parent %s: %w", dir, err)
+	}
+	return nil
+}
+
+// RemoveDurable unlinks path and fsyncs its parent before returning success.
+func RemoveDurable(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return SyncParent(path)
 }
 
 // StreamWriter writes a large artifact atomically: bytes go to a temporary
@@ -260,6 +292,9 @@ func (w *StreamWriter) Close() error {
 	}
 	if err := os.Rename(name, w.path); err != nil {
 		return fmt.Errorf("store: promote %s: %w", w.path, err)
+	}
+	if err := SyncParent(w.path); err != nil {
+		return fmt.Errorf("store: sync promoted parent %s: %w", w.path, err)
 	}
 	w.done = true
 	return nil
