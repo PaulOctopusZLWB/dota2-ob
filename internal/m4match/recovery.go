@@ -109,6 +109,10 @@ func captureFinalEndpoints(root, tokenPath string) ([]Artifact, error) {
 }
 
 func validateCompletedAttempt(root, sessionID string, productClean, obsClean bool) (attemptValidation, []Artifact, error) {
+	return validateCompletedAttemptObserved(root, sessionID, productClean, obsClean, nil)
+}
+
+func validateCompletedAttemptObserved(root, sessionID string, productClean, obsClean bool, observe func(string, RehearsalOwnedProcessIdentityV1)) (attemptValidation, []Artifact, error) {
 	sessionDir := filepath.Join(root, "data/sessions", sessionID)
 	validation, err := summarizeAttempt(sessionDir)
 	if err != nil {
@@ -126,7 +130,7 @@ func validateCompletedAttempt(root, sessionID string, productClean, obsClean boo
 	for _, input := range operatorInputs {
 		validation.OperatorInputBounds = validation.OperatorInputBounds && len(input) <= 16<<10
 	}
-	proof, recoveryArtifacts, recoveryErr := performRawOnlyRecovery(context.Background(), root, sessionID)
+	proof, recoveryArtifacts, recoveryErr := performRawOnlyRecoveryObserved(context.Background(), root, sessionID, observe)
 	validation.RecoveryCursorSHA256 = proof.CursorSHA256
 	validation.RecoveryPolicySHA256 = proof.PolicySHA256
 	validation.RecoveryAuditSHA256 = proof.AuditSHA256
@@ -197,6 +201,10 @@ func summarizeAttempt(sessionDir string) (attemptValidation, error) {
 }
 
 func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recoveryProof, []Artifact, error) {
+	return performRawOnlyRecoveryObserved(ctx, root, sessionID, nil)
+}
+
+func performRawOnlyRecoveryObserved(ctx context.Context, root, sessionID string, observe func(string, RehearsalOwnedProcessIdentityV1)) (recoveryProof, []Artifact, error) {
 	var proof recoveryProof
 	sourceSession := filepath.Join(root, "data/sessions", sessionID)
 	inputRoot := filepath.Join(root, "evidence/recovery-input", sessionID)
@@ -274,6 +282,15 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 		_ = logFile.Close()
 		return proof, nil, err
 	}
+	startIdentity, identityErr := readRehearsalOwnedProcessIdentity(process.Process.Pid)
+	if identityErr != nil {
+		_ = process.Process.Kill()
+		_ = logFile.Close()
+		return proof, nil, errors.New("recovery process identity unavailable")
+	}
+	if observe != nil {
+		observe("recovery_start", startIdentity)
+	}
 	done := make(chan error, 1)
 	go func() { done <- process.Wait() }()
 	clean := false
@@ -337,6 +354,13 @@ func performRawOnlyRecovery(ctx context.Context, root, sessionID string) (recove
 	}
 	if _, err := captureFinalEndpoints(recoveryRoot, tokenPath); err != nil {
 		return proof, nil, err
+	}
+	terminalIdentity, identityErr := readRehearsalOwnedProcessIdentity(process.Process.Pid)
+	if identityErr != nil || !sameRehearsalOwnedProcessIdentity(startIdentity, terminalIdentity) {
+		return proof, nil, errors.New("recovery process identity changed")
+	}
+	if observe != nil {
+		observe("recovery_terminal", terminalIdentity)
 	}
 	if err := process.Process.Signal(syscall.SIGTERM); err != nil {
 		return proof, nil, err
