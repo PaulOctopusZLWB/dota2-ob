@@ -16,6 +16,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/facts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/phase"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/report"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/review"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
@@ -1133,3 +1134,531 @@ func mustJSON(v interface{}) json.RawMessage {
 }
 
 func int64p(v int64) *int64 { return &v }
+
+// frozenRoleRegistry returns a role registry matching the frozen probe match
+// 8944521919 (10 participants, one of each role 1-5 per side) so the exact
+// frozen override regression can run against it.
+func frozenRoleRegistry() *roles.Registry {
+	return &roles.Registry{
+		SchemaVersion: "ti2026.roles.v1",
+		TournamentID:  "ti2026",
+		Matches: []roles.RoleMatch{{
+			MatchID: "8944521919",
+			Teams: []roles.RoleTeam{
+				{
+					TeamID: "726228", TeamName: "Vici Gaming", Side: "radiant",
+					SourceKind: "reliable_public_database", SourceURL: "https://example.com/vg",
+					SourceLocator: "Recent lineup table with explicit Role 1-5 rows", RetrievedAt: "2026-08-17T04:15:00Z",
+					Participants: []roles.RoleRecord{
+						{RoleRecordID: "8944521919:320252024", AccountID: "320252024", PlayerName: "shiro", NominalRole: "1", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:137129583", AccountID: "137129583", PlayerName: "Xm", NominalRole: "2", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:118134220", AccountID: "118134220", PlayerName: "Bach", NominalRole: "3", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:157475523", AccountID: "157475523", PlayerName: "XinQ", NominalRole: "4", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:111114687", AccountID: "111114687", PlayerName: "y`", NominalRole: "5", RoleConfidence: "high"},
+					},
+				},
+				{
+					TeamID: "10149530", TeamName: "HULIGANI", Side: "dire",
+					SourceKind: "reliable_public_tournament_roster", SourceURL: "https://example.com/huligani",
+					SourceLocator: "HULIGANI player roster table with explicit Position 1-5 rows", RetrievedAt: "2026-08-17T04:15:00Z",
+					Participants: []roles.RoleRecord{
+						{RoleRecordID: "8944521919:320017600", AccountID: "320017600", PlayerName: "ssnovv1", NominalRole: "1", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:140251702", AccountID: "140251702", PlayerName: "Mirage", NominalRole: "2", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:92487440", AccountID: "92487440", PlayerName: "Corrupted", NominalRole: "3", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:145065875", AccountID: "145065875", PlayerName: "sayuw", NominalRole: "4", RoleConfidence: "high"},
+						{RoleRecordID: "8944521919:123787715", AccountID: "123787715", PlayerName: "RESPECT", NominalRole: "5", RoleConfidence: "high"},
+					},
+				},
+			},
+		}},
+	}
+}
+
+// testFrozenOverrideStore builds a disposable store for match 8944521919 with
+// the frozen 10-participant identity, phases, metrics, persisted report, and
+// score corpus, so role overrides can be exercised end to end.
+func testFrozenOverrideStore(t *testing.T, roleReg *roles.Registry) *store.Store {
+	t.Helper()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := []struct {
+		acct string
+		name string
+		side string
+		team string
+	}{
+		{"320252024", "shiro", "radiant", "726228"},
+		{"137129583", "Xm", "radiant", "726228"},
+		{"118134220", "Bach", "radiant", "726228"},
+		{"157475523", "XinQ", "radiant", "726228"},
+		{"111114687", "y`", "radiant", "726228"},
+		{"320017600", "ssnovv1", "dire", "10149530"},
+		{"140251702", "Mirage", "dire", "10149530"},
+		{"92487440", "Corrupted", "dire", "10149530"},
+		{"145065875", "sayuw", "dire", "10149530"},
+		{"123787715", "RESPECT", "dire", "10149530"},
+	}
+	parts := []map[string]interface{}{}
+	for i, a := range accounts {
+		parts = append(parts, map[string]interface{}{
+			"slot": i, "account_id": a.acct, "player_name": a.name,
+			"hero_name": "npc_dota_hero_kez", "hero_id": 145, "side": a.side, "team": int32(2),
+		})
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactVerification, map[string]string{
+		"state": "verified", "reason": "ok", "demo_sha256_actual": "8944521919-replay-sha256",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactIdentity, map[string]interface{}{
+		"state": "verified", "match_id": "8944521919",
+		"participants": parts,
+		"teams": []map[string]interface{}{
+			{"team_id": "726228", "team_name": "Vici Gaming", "side": "radiant"},
+			{"team_id": "10149530", "team_name": "HULIGANI", "side": "dire"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactClock, map[string]interface{}{"state": "calibrated", "game_duration_seconds": 2705}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactFactsSummary, map[string]interface{}{"families": []interface{}{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactPhases, map[string]interface{}{
+		"schema_version": "replay.phase.v1", "rule_version": "ti2026.phase.v1",
+		"state": "complete", "eligible_seconds": 2705, "covered_seconds": 2705,
+		"intervals": cumulativePhaseIntervals(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactEpisodes, map[string]interface{}{"episodes": []interface{}{}, "unavailable": []interface{}{}}); err != nil {
+		t.Fatal(err)
+	}
+	// Give every player a published metric so scores/corpus/percentiles build.
+	vals := []interface{}{}
+	for _, a := range accounts {
+		vals = append(vals, map[string]interface{}{"metric_id": "hero_damage_total", "account_id": a.acct, "value": 1000, "unit": "damage", "report_level": "player"})
+		vals = append(vals, map[string]interface{}{"metric_id": "kill_count", "account_id": a.acct, "value": 5, "unit": "count", "report_level": "player"})
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactMetrics, map[string]interface{}{"values": vals, "unavailable": []interface{}{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactInput, map[string]interface{}{"category": "probe"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("8944521919", store.ArtifactCanonical, map[string]interface{}{
+		"schema_version": "replay.report.v1", "tree_sha256": "frozen-tree", "input_fingerprint": map[string]interface{}{"match_id": "8944521919"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Persist an initial report built with the SOURCE roles.
+	rep, err := report.Build(st, "8944521919", roleReg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep.SortParticipants()
+	if err := st.WriteJSON("8944521919", store.ArtifactReport, rep); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteStatus("8944521919", &store.StatusRecord{
+		SchemaVersion: store.StatusSchema, MatchID: "8944521919", Status: rep.Status,
+		Publication: rep.Publication, Reason: rep.Reason, ArchiveState: "verified",
+		IdentityState: "verified", ClockState: "calibrated", ParseState: "complete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RebuildCatalog("2026-08-18T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// Build the initial score corpus from source roles.
+	mreg, sc := testContracts(t)
+	if _, err := scoring.ComputeAndPersist(st, sc, testTeamContract(t), mreg, roleReg, nil); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// overrideRole posts a role override and returns the HTTP status.
+func overrideRole(t *testing.T, baseURL, matchID, acct, role, author, reason string) int {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"match_id": matchID, "account_id": acct, "nominal_role": role,
+		"author": author, "reason": reason,
+	})
+	req, _ := http.NewRequest(http.MethodPost, baseURL+Version+"/roles/overrides", bytes.NewReader(body))
+	req.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// effectiveRoleInMatch reads /matches/{id} and returns the effective + source
+// role for the account.
+func effectiveRoleInMatch(t *testing.T, baseURL, matchID, acct string) (string, string) {
+	t.Helper()
+	var rep struct {
+		Data struct {
+			Participants []struct {
+				AccountID         string  `json:"account_id"`
+				SourceNominalRole string  `json:"source_nominal_role"`
+				NominalRole       string  `json:"nominal_role"`
+				OverrideApplied   bool    `json:"override_applied"`
+				OverrideAuthor    *string `json:"override_author"`
+			} `json:"participants"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, baseURL+Version+"/matches/"+matchID, &rep); code != 200 {
+		t.Fatalf("match status %d", code)
+	}
+	for _, p := range rep.Data.Participants {
+		if p.AccountID == acct {
+			return p.NominalRole, p.SourceNominalRole
+		}
+	}
+	t.Fatalf("account %s not in match report", acct)
+	return "", ""
+}
+
+// TestRoleOverrideFrozenSequenceEndToEnd runs the exact frozen regression:
+// 8944521919 / 111114687 source role 5; apply 5->1; restart; apply 1->2;
+// restart; apply 2->3. At every step every view must agree on the effective
+// role, the source role must remain 5, and correction previous values must be
+// 5, 1, 2 respectively.
+func TestRoleOverrideFrozenSequenceEndToEnd(t *testing.T) {
+	roleReg := frozenRoleRegistry()
+	st := testFrozenOverrideStore(t, roleReg)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ACCT := "111114687"
+
+	startServer := func() (*httptest.Server, *Server) {
+		srv := testServerWithContracts(t, st, roleReg).WithReviews(rv).WithSessionToken("tok")
+		return httptest.NewServer(srv.Handler()), srv
+	}
+	ts, _ := startServer()
+	defer ts.Close()
+
+	assertConsistent := func(baseURL string, wantEffective string, step interface{}) {
+		t.Helper()
+		// /matches/{id} report agrees.
+		eff, src := effectiveRoleInMatch(t, baseURL, "8944521919", ACCT)
+		if eff != wantEffective {
+			t.Fatalf("step %d match report effective=%s want %s", step, eff, wantEffective)
+		}
+		if src != "5" {
+			t.Fatalf("step %d match report source=%s want 5", step, src)
+		}
+		// Player per-match profile row agrees.
+		var pl struct {
+			Data struct {
+				Matches []struct {
+					MatchID           string `json:"match_id"`
+					SourceNominalRole string `json:"source_nominal_role"`
+					NominalRole       string `json:"nominal_role"`
+				} `json:"matches"`
+			} `json:"data"`
+		}
+		if code := getJSON(t, baseURL+Version+"/players/"+ACCT, &pl); code != 200 {
+			t.Fatalf("player status %d", code)
+		}
+		found := false
+		for _, m := range pl.Data.Matches {
+			if m.MatchID == "8944521919" {
+				found = true
+				if m.NominalRole != wantEffective {
+					t.Fatalf("step %d player match row effective=%s want %s", step, m.NominalRole, wantEffective)
+				}
+				if m.SourceNominalRole != "5" {
+					t.Fatalf("step %d player match row source=%s want 5", step, m.SourceNominalRole)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("step %d player has no 8944521919 match row", step)
+		}
+		// /matches/{id}/scores agrees.
+		var ms struct {
+			Data struct {
+				Players []struct {
+					AccountID   string `json:"account_id"`
+					NominalRole string `json:"nominal_role"`
+				} `json:"players"`
+			} `json:"data"`
+		}
+		if code := getJSON(t, baseURL+Version+"/matches/8944521919/scores", &ms); code != 200 {
+			t.Fatalf("scores status %d", code)
+		}
+		for _, p := range ms.Data.Players {
+			if p.AccountID == ACCT && p.NominalRole != wantEffective {
+				t.Fatalf("step %d match scores effective=%s want %s", step, p.NominalRole, wantEffective)
+			}
+		}
+		// Corpus / player tournament score agrees and cohort is recomputed.
+		var cs struct {
+			Data struct {
+				Players []struct {
+					AccountID   string `json:"account_id"`
+					NominalRole string `json:"nominal_role"`
+				} `json:"players"`
+			} `json:"data"`
+		}
+		if code := getJSON(t, baseURL+Version+"/scores/corpus", &cs); code != 200 {
+			t.Fatalf("corpus status %d", code)
+		}
+		for _, p := range cs.Data.Players {
+			if p.AccountID == ACCT && p.NominalRole != wantEffective {
+				t.Fatalf("step %d corpus effective=%s want %s", step, p.NominalRole, wantEffective)
+			}
+		}
+		// Persisted report agrees (on-read overlay applies even to the file).
+		var repFile report.Report
+		if err := st.ReadJSON("8944521919", store.ArtifactReport, &repFile); err != nil {
+			t.Fatalf("step %d read persisted report: %v", step, err)
+		}
+		report.OverlayRoles(&repFile, "8944521919", roleReg, loadOverrideFileHelper(t, st))
+		for _, p := range repFile.Participants {
+			if p.AccountID == ACCT && p.NominalRole != wantEffective {
+				t.Fatalf("step %d persisted report effective=%s want %s", step, p.NominalRole, wantEffective)
+			}
+			if p.AccountID == ACCT && p.SourceNominalRole != "5" {
+				t.Fatalf("step %d persisted report source=%s want 5", step, p.SourceNominalRole)
+			}
+		}
+	}
+
+	// Step 0: initial state — effective == source == 5.
+	assertConsistent(ts.URL, "5", 0)
+
+	// Step 1: apply 5 -> 1.
+	if code := overrideRole(t, ts.URL, "8944521919", ACCT, "1", "reviewerA", "observed role 1 on evidence"); code != 200 {
+		t.Fatalf("override 5->1 status=%d", code)
+	}
+	assertConsistent(ts.URL, "1", 1)
+
+	// Restart 1: fresh server, same store.
+	ts2, _ := startServer()
+	defer ts2.Close()
+	assertConsistent(ts2.URL, "1", "restart1")
+
+	// Step 2: apply 1 -> 2 after restart (previous_value must be 1, the
+	// persisted effective value, not the source 5).
+	if code := overrideRole(t, ts2.URL, "8944521919", ACCT, "2", "reviewerB", "further evidence"); code != 200 {
+		t.Fatalf("override 1->2 status=%d", code)
+	}
+	assertConsistent(ts2.URL, "2", 2)
+
+	// Restart 2.
+	ts3, _ := startServer()
+	defer ts3.Close()
+	assertConsistent(ts3.URL, "2", "restart2")
+
+	// Step 3: apply 2 -> 3 (previous_value must be 2).
+	if code := overrideRole(t, ts3.URL, "8944521919", ACCT, "3", "reviewerC", "final adjudication"); code != 200 {
+		t.Fatalf("override 2->3 status=%d", code)
+	}
+	assertConsistent(ts3.URL, "3", 3)
+
+	// Correction previous values must be 5, 1, 2; effective 1, 2, 3.
+	loaded, err := rv.Load("8944521919")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Corrections) != 3 {
+		t.Fatalf("corrections=%d want 3", len(loaded.Corrections))
+	}
+	wantPrev := []string{"5", "1", "2"}
+	wantEff := []string{"1", "2", "3"}
+	for i, c := range loaded.Corrections {
+		if c.Kind != review.KindRoleOverride {
+			t.Fatalf("correction %d kind=%s", i, c.Kind)
+		}
+		var prev, eff struct {
+			NominalRole string `json:"nominal_role"`
+		}
+		_ = json.Unmarshal(c.PreviousValue, &prev)
+		_ = json.Unmarshal(c.EffectiveValue, &eff)
+		if prev.NominalRole != wantPrev[i] {
+			t.Fatalf("correction %d previous=%s want %s", i, prev.NominalRole, wantPrev[i])
+		}
+		if eff.NominalRole != wantEff[i] {
+			t.Fatalf("correction %d effective=%s want %s", i, eff.NominalRole, wantEff[i])
+		}
+	}
+	// Audit has 3 role-override entries.
+	audit, err := rv.LoadAudit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roleAudits := 0
+	for _, e := range audit.Entries {
+		if e.Action == "correction_added" && strings.Contains(e.Summary, "role_override") {
+			roleAudits++
+		}
+	}
+	if roleAudits != 3 {
+		t.Fatalf("role override audit entries=%d want 3", roleAudits)
+	}
+	// Effective override file holds the latest value (3).
+	of := loadOverrideFileHelper(t, st)
+	if len(of.Overrides) != 1 || of.Overrides[0].NominalRole != "3" {
+		t.Fatalf("effective override file=%+v", of.Overrides)
+	}
+	// Immutable artifacts and the frozen role registry stay byte-identical
+	// through the whole override sequence.
+	for _, art := range []string{store.ArtifactPhases, store.ArtifactEpisodes, store.ArtifactMetrics} {
+		b, err := os.ReadFile(st.ArtifactPath("8944521919", art))
+		if err != nil {
+			t.Fatalf("read immutable %s: %v", art, err)
+		}
+		var v interface{}
+		if err := json.Unmarshal(b, &v); err != nil {
+			t.Fatalf("immutable %s unreadable: %v", art, err)
+		}
+	}
+	regBytesBefore, _ := json.Marshal(frozenRoleRegistry())
+	regBytesAfter, _ := json.Marshal(roleReg)
+	if string(regBytesBefore) != string(regBytesAfter) {
+		t.Fatal("frozen role registry mutated")
+	}
+}
+
+func loadOverrideFileHelper(t *testing.T, st *store.Store) *roles.OverrideFile {
+	t.Helper()
+	var of roles.OverrideFile
+	if err := st.ReadJSONFile(st.Root+"/role-overrides-effective.json", &of); err != nil {
+		if os.IsNotExist(err) {
+			return &roles.OverrideFile{SchemaVersion: "ti2026.roles.v1", Overrides: []roles.Override{}}
+		}
+		t.Fatalf("read override file: %v", err)
+	}
+	return &of
+}
+
+// TestRoleOverrideNegativeAndAtomicity proves rejected/injected-failure
+// mutations leave all authoritative files byte-unchanged: invalid role,
+// unknown match, unknown account, and staged report/score/correction failures
+// must not advance the effective override, report, scores, correction history,
+// or audit.
+func TestRoleOverrideNegativeAndAtomicity(t *testing.T) {
+	roleReg := frozenRoleRegistry()
+	st := testFrozenOverrideStore(t, roleReg)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ACCT := "111114687"
+
+	// Snapshot helper: returns byte hashes of the authoritative files.
+	hashPath := func(p string) [32]byte {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return [32]byte{}
+			}
+			t.Fatalf("read %s: %v", p, err)
+		}
+		return sha256.Sum256(b)
+	}
+	snapshot := func() map[string][32]byte {
+		paths := []string{
+			filepath.Join(st.Root, "role-overrides-effective.json"),
+			st.ArtifactPath("8944521919", store.ArtifactReport),
+			st.ArtifactPath("8944521919", store.ArtifactStatus),
+			st.ArtifactPath("8944521919", store.ArtifactScores),
+			filepath.Join(st.Root, "scores-corpus.json"),
+			rv.Path("8944521919"),
+			rv.AuditPath(),
+		}
+		m := map[string][32]byte{}
+		for _, p := range paths {
+			m[p] = hashPath(p)
+		}
+		return m
+	}
+	assertUnchanged := func(before map[string][32]byte) {
+		t.Helper()
+		for p, h := range before {
+			if got := hashPath(p); got != h {
+				t.Fatalf("file changed after rejected/failed mutation: %s", p)
+			}
+		}
+	}
+
+	startServer := func(inject string) *httptest.Server {
+		srv := testServerWithContracts(t, st, roleReg).WithReviews(rv).WithSessionToken("tok")
+		srv.injectFail = inject
+		return httptest.NewServer(srv.Handler())
+	}
+
+	// Case 1: invalid role (400) — nothing changes.
+	before := snapshot()
+	ts := startServer("")
+	defer ts.Close()
+	if code := overrideRole(t, ts.URL, "8944521919", ACCT, "9", "a", "bad role"); code != http.StatusBadRequest {
+		t.Fatalf("invalid role status=%d want 400", code)
+	}
+	assertUnchanged(before)
+
+	// Case 2: unknown match (400) — nothing changes.
+	if code := overrideRole(t, ts.URL, "9999999999", ACCT, "1", "a", "x"); code != http.StatusBadRequest {
+		t.Fatalf("unknown match status=%d want 400", code)
+	}
+	assertUnchanged(before)
+
+	// Case 3: unknown account in a known match (400) — nothing changes.
+	if code := overrideRole(t, ts.URL, "8944521919", "999999999", "1", "a", "x"); code != http.StatusBadRequest {
+		t.Fatalf("unknown account status=%d want 400", code)
+	}
+	assertUnchanged(before)
+
+	// Case 4: injected report persistence failure (500) — rollback restores
+	// every file, including the override file written just before the failure.
+	tsFail := startServer("report")
+	defer tsFail.Close()
+	if code := overrideRole(t, tsFail.URL, "8944521919", ACCT, "1", "a", "x"); code != http.StatusInternalServerError {
+		t.Fatalf("injected report failure status=%d want 500", code)
+	}
+	assertUnchanged(before)
+
+	// Case 5: injected score recompute failure (500) — rollback restores.
+	tsFail2 := startServer("score")
+	defer tsFail2.Close()
+	if code := overrideRole(t, tsFail2.URL, "8944521919", ACCT, "1", "a", "x"); code != http.StatusInternalServerError {
+		t.Fatalf("injected score failure status=%d want 500", code)
+	}
+	assertUnchanged(before)
+
+	// Case 6: injected correction persistence failure (500) — rollback
+	// restores override file, report, scores, corrections, and audit.
+	tsFail3 := startServer("correction")
+	defer tsFail3.Close()
+	if code := overrideRole(t, tsFail3.URL, "8944521919", ACCT, "1", "a", "x"); code != http.StatusInternalServerError {
+		t.Fatalf("injected correction failure status=%d want 500", code)
+	}
+	assertUnchanged(before)
+
+	// Audit and correction history were never advanced.
+	audit, err := rv.LoadAudit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.Entries) != 0 {
+		t.Fatalf("audit entries=%d want 0 after all failures", len(audit.Entries))
+	}
+	loaded, err := rv.Load("8944521919")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Corrections) != 0 {
+		t.Fatalf("corrections=%d want 0 after all failures", len(loaded.Corrections))
+	}
+}

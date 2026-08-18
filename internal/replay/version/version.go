@@ -40,8 +40,10 @@ const (
 	CorrectionSchema = "replay.corrections.v2"
 	// RoleSchema is the nominal role registry schema version.
 	RoleSchema = "ti2026.roles.v1"
-	// ReportSchema is the match report schema version.
-	ReportSchema = "replay.report.v2"
+	// ReportSchema is the match report schema version. v3 adds the immutable
+	// source_nominal_role and override provenance (author/version) fields so a
+	// report can carry both the public-source role and the effective role.
+	ReportSchema = "replay.report.v3"
 
 	// PhaseRuleVersion identifies the phase-engine rule set.
 	PhaseRuleVersion = "ti2026.phase.v1"

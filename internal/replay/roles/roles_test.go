@@ -34,6 +34,9 @@ func TestEffectiveNoOverride(t *testing.T) {
 	if eff.NominalRole != "1" {
 		t.Fatalf("role=%s", eff.NominalRole)
 	}
+	if eff.SourceNominalRole != "1" {
+		t.Fatalf("source role=%s want 1", eff.SourceNominalRole)
+	}
 	if eff.SourceKind != "reliable_public_tournament_roster" {
 		t.Fatalf("source=%s", eff.SourceKind)
 	}
@@ -45,7 +48,7 @@ func TestEffectiveNoOverride(t *testing.T) {
 func TestEffectiveOverride(t *testing.T) {
 	r := testRegistry()
 	o := &OverrideFile{Overrides: []Override{
-		{MatchID: "1000000001", AccountID: "1000", NominalRole: "5", Reason: "manual adjudication"},
+		{MatchID: "1000000001", AccountID: "1000", NominalRole: "5", Reason: "manual adjudication", Author: "reviewer1"},
 	}}
 	eff, ok := r.Effective("1000000001", "1000", o)
 	if !ok {
@@ -54,11 +57,24 @@ func TestEffectiveOverride(t *testing.T) {
 	if eff.NominalRole != "5" {
 		t.Fatalf("role=%s want 5", eff.NominalRole)
 	}
+	// Immutable source role preserved alongside the effective override.
+	if eff.SourceNominalRole != "1" {
+		t.Fatalf("source role=%s want 1", eff.SourceNominalRole)
+	}
 	if !eff.OverrideApplied {
 		t.Fatal("override not applied")
 	}
 	if eff.OverrideReason == nil || *eff.OverrideReason != "manual adjudication" {
 		t.Fatalf("override reason=%v", eff.OverrideReason)
+	}
+	if eff.OverrideAuthor == nil || *eff.OverrideAuthor != "reviewer1" {
+		t.Fatalf("override author=%v want reviewer1", eff.OverrideAuthor)
+	}
+	if eff.OverrideVersion == nil || *eff.OverrideVersion == "" {
+		t.Fatalf("override version unset: %v", eff.OverrideVersion)
+	}
+	if eff.SourceKind != "reliable_public_tournament_roster" {
+		t.Fatalf("source kind must remain base: %s", eff.SourceKind)
 	}
 }
 

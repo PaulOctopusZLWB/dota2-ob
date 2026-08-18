@@ -50,6 +50,10 @@ type Server struct {
 	// SessionToken is the local anti-CSRF/session token required by all
 	// mutation endpoints. Empty means mutations are rejected.
 	SessionToken string
+	// injectFail, when non-empty, forces a role-override mutation to fail at a
+	// staged write point ("report", "score", or "correction") to prove the
+	// rollback path leaves all authoritative files byte-unchanged. Test-only.
+	injectFail string
 }
 
 // New creates an API server. The role registry is a publication gate: when it
@@ -341,12 +345,19 @@ func (s *Server) handleAlgorithmDetail(w http.ResponseWriter, matchID string, pa
 // loadReport returns the authoritative persisted report artifact when present.
 // The persisted report carries the gated status/reason written by the runner;
 // the API consumes that durable state rather than independently re-deriving
-// publication from source artifacts. The canonical record (written after the
-// report) is attached for display. Only when no persisted report exists (e.g.
-// pre-existing data root) does it fall back to a rebuild.
+// publication from source artifacts. An on-read compatibility overlay re-
+// resolves every participant's role from the frozen registry plus the current
+// persisted effective override store, so older reports (or reports persisted
+// before an override) reflect the effective role without rewriting any
+// immutable artifact. The canonical record (written after the report) is
+// attached for display. Only when no persisted report exists does it fall back
+// to a rebuild.
 func (s *Server) loadReport(matchID string) (*report.Report, error) {
 	var rep report.Report
 	if err := s.Store.ReadJSON(matchID, store.ArtifactReport, &rep); err == nil {
+		// On-read compatibility overlay: apply current effective roles
+		// (registry + persisted effective override store) deterministically.
+		report.OverlayRoles(&rep, matchID, s.RoleReg, s.effectiveOverrides())
 		var can store.Canonical
 		if err := s.Store.ReadJSON(matchID, store.ArtifactCanonical, &can); err == nil {
 			rep.Canonical = &can
@@ -500,9 +511,17 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 			entry := map[string]interface{}{
 				"match_id": row.MatchID, "status": rep.Status, "publication": rep.Publication,
 				"team_id": p.TeamID, "team_name": p.TeamName, "side": p.Side,
-				"hero": p.HeroName, "nominal_role": p.NominalRole,
-				"role_source": p.RoleSourceKind, "role_source_url": p.RoleSourceURL,
-				"override_applied": p.OverrideApplied, "override_reason": p.OverrideReason, "override_at": p.OverrideAt,
+				"hero":                p.HeroName,
+				"source_nominal_role": p.SourceNominalRole,
+				"nominal_role":        p.NominalRole,
+				"role_source":         p.RoleSourceKind, "role_source_url": p.RoleSourceURL,
+				"role_source_retrieved_at": p.RoleSourceRetrievedAt,
+				"role_confidence":          p.RoleConfidence,
+				"role_record_version":      p.RoleRecordVersion,
+				"override_applied":         p.OverrideApplied,
+				"override_reason":          p.OverrideReason,
+				"override_at":              p.OverrideAt,
+				"override_author":          p.OverrideAuthor,
 			}
 			if rep.Phases != nil {
 				entry["phase_intervals"] = len(rep.Phases.Intervals)

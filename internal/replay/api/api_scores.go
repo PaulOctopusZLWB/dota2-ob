@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/archive"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/episodes"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/phase"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/report"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/review"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
@@ -333,6 +336,13 @@ type roleOverrideReq struct {
 // reason. The frozen registry is untouched; the override is written to the
 // authoritative data-root override store (consumed by report/scoring) and
 // audited, so the effective role actually takes effect.
+//
+// The mutation is transactional: the override file, the affected report, the
+// score corpus, the correction record, and the audit are persisted together
+// under staged atomic writes, and any failure restores every touched file to
+// its pre-mutation bytes so no visible mixed successful state can remain.
+// Reads and the correction previous_value always resolve from the persisted
+// effective override store (never a stale serve-time snapshot).
 func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -363,12 +373,34 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "nominal_role_must_be_1_5")
 		return
 	}
-	prevRole := ""
-	if s.RoleReg != nil {
-		if eff, ok := s.RoleReg.Effective(req.MatchID, req.AccountID, s.Overrides); ok {
-			prevRole = eff.NominalRole
-		}
+	// Resolve the current effective role from the PERSISTED effective override
+	// store (never the serve-time snapshot) so a later override after restart
+	// continues from the persisted effective value, and the correction's
+	// previous_value records that effective role.
+	if s.RoleReg == nil {
+		writeErr(w, http.StatusInternalServerError, "role_registry_unavailable")
+		return
 	}
+	eff, ok := s.RoleReg.Effective(req.MatchID, req.AccountID, s.effectiveOverrides())
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "account_not_in_role_registry:"+req.AccountID)
+		return
+	}
+	prevRole := eff.NominalRole
+	sourceRole := eff.SourceNominalRole
+
+	// Snapshot every authoritative file this mutation may touch so a failure
+	// can roll back to the exact pre-mutation bytes.
+	paths := s.roleMutationPaths(req.MatchID)
+	snaps, err := snapshotFiles(paths)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "override_snapshot_failed")
+		return
+	}
+	rollback := func() {
+		_ = restoreSnapshots(snaps)
+	}
+
 	// Persist to the authoritative override file under the data root. The
 	// latest override for a (match, account) pair REPLACES any earlier one so
 	// a new review decision always takes effect (roles.Effective applies the
@@ -376,6 +408,7 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 	override := roles.Override{
 		MatchID: req.MatchID, AccountID: req.AccountID, NominalRole: req.NominalRole,
 		Reason: req.Reason, AppliedAt: time.Now().UTC().Format(time.RFC3339),
+		Author: req.Author,
 	}
 	of := s.loadOverrideFile()
 	kept := make([]roles.Override, 0, len(of.Overrides)+1)
@@ -389,14 +422,54 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 	of.Overrides = kept
 	of.SchemaVersion = version.RoleSchema
 	if err := s.Store.WriteRootJSON("role-overrides-effective.json", of); err != nil {
+		rollback()
 		writeErr(w, http.StatusInternalServerError, "override_persist_failed")
 		return
 	}
-	prevB, _ := json.Marshal(map[string]interface{}{"account_id": req.AccountID, "nominal_role": prevRole})
+	if s.injectFail == "report" {
+		rollback()
+		writeErr(w, http.StatusInternalServerError, "injected_report_failure")
+		return
+	}
+	// Rebuild + persist the authoritative affected report with the current
+	// effective roles (gate evaluated on immutable source roles). Preserve
+	// report/status as the gate determines; a failure restores everything.
+	if err := s.rebuildAndPersistReport(req.MatchID); err != nil {
+		rollback()
+		writeErr(w, http.StatusInternalServerError, "override_report_rebuild_failed")
+		return
+	}
+	if s.injectFail == "score" {
+		rollback()
+		writeErr(w, http.StatusInternalServerError, "injected_score_failure")
+		return
+	}
+	// Synchronously recompute the corpus scores so match/tournament APIs
+	// immediately reflect the effective role, and so same-role cohorts and
+	// percentiles are recomputed from the effective roles.
+	if s.ScoringContract != nil {
+		cs, err := scoring.ComputeAndPersist(s.Store, s.ScoringContract, s.TeamContract, s.MetricReg, s.RoleReg, s.effectiveOverrides())
+		if err != nil {
+			rollback()
+			writeErr(w, http.StatusInternalServerError, "override_recompute_failed")
+			return
+		}
+		_ = cs
+	}
+	if s.injectFail == "correction" {
+		rollback()
+		writeErr(w, http.StatusInternalServerError, "injected_correction_failure")
+		return
+	}
+	prevB, _ := json.Marshal(map[string]interface{}{
+		"account_id": req.AccountID, "nominal_role": prevRole, "source_nominal_role": sourceRole,
+	})
 	effB, _ := json.Marshal(map[string]interface{}{
 		"match_id": req.MatchID, "account_id": req.AccountID,
-		"nominal_role": req.NominalRole, "source_kind": "manual_override",
-		"author": req.Author, "reason": req.Reason, "applied_at": override.AppliedAt,
+		"nominal_role": req.NominalRole, "source_nominal_role": sourceRole,
+		"source_kind": "manual_override",
+		"author":      req.Author, "reason": req.Reason, "applied_at": override.AppliedAt,
+		"schema_version": version.RoleSchema,
 	})
 	rv, err := s.Reviews.AddAuthoritative(req.MatchID, review.Correction{
 		MatchID: req.MatchID, Kind: review.KindRoleOverride, Author: req.Author,
@@ -408,21 +481,104 @@ func (s *Server) handleRoleOverrides(w http.ResponseWriter, r *http.Request) {
 		MachineValue:     prevB,
 	})
 	if err != nil {
+		rollback()
 		writeErr(w, http.StatusInternalServerError, "override_correction_failed")
 		return
 	}
-	// Synchronously recompute the corpus scores so match/tournament APIs
-	// immediately reflect the effective role. A recompute failure is returned
-	// as an error; success is only reported after durable recomputation.
-	if s.ScoringContract != nil {
-		cs, err := scoring.ComputeAndPersist(s.Store, s.ScoringContract, s.TeamContract, s.MetricReg, s.RoleReg, s.effectiveOverrides())
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "override_recompute_failed")
-			return
-		}
-		rv.RecomputeVersion = cs.ContractVersion
-	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
+}
+
+// roleMutationPaths returns every authoritative file a role override may touch.
+func (s *Server) roleMutationPaths(matchID string) []string {
+	root := s.Store.Root
+	paths := []string{
+		filepath.Join(root, "role-overrides-effective.json"),
+		s.Store.ArtifactPath(matchID, store.ArtifactReport),
+		s.Store.ArtifactPath(matchID, store.ArtifactStatus),
+		s.Store.ArtifactPath(matchID, store.ArtifactScores),
+		filepath.Join(root, "scores-corpus.json"),
+	}
+	if s.Reviews != nil {
+		paths = append(paths, s.Reviews.Path(matchID), s.Reviews.AuditPath())
+	}
+	return paths
+}
+
+// rebuildAndPersistReport rebuilds the report with the current effective roles
+// and atomically persists report.json (and status.json when the gate outcome
+// changes) for the affected match.
+func (s *Server) rebuildAndPersistReport(matchID string) error {
+	rep, err := report.Build(s.Store, matchID, s.RoleReg, s.effectiveOverrides())
+	if err != nil {
+		return err
+	}
+	rep.SortParticipants()
+	if err := s.Store.WriteJSON(matchID, store.ArtifactReport, rep); err != nil {
+		return err
+	}
+	// Keep status.json authoritative and in agreement with the rebuilt report.
+	var prev store.StatusRecord
+	havePrev := s.Store.ReadJSON(matchID, store.ArtifactStatus, &prev) == nil
+	if !havePrev || prev.Status != rep.Status || prev.Publication != rep.Publication || prev.Reason != rep.Reason {
+		sr := &store.StatusRecord{
+			SchemaVersion: store.StatusSchema,
+			MatchID:       matchID,
+			Status:        rep.Status,
+			Publication:   rep.Publication,
+			Reason:        rep.Reason,
+		}
+		if havePrev {
+			sr.ArchiveState = prev.ArchiveState
+			sr.IdentityState = prev.IdentityState
+			sr.ClockState = prev.ClockState
+			sr.InputHash = prev.InputHash
+			sr.ParseState = prev.ParseState
+			sr.DurationSec = prev.DurationSec
+			sr.GameStartUnix = prev.GameStartUnix
+		}
+		if err := s.Store.WriteStatus(matchID, sr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fileSnapshot is the pre-mutation bytes of one authoritative file.
+type fileSnapshot struct {
+	path    string
+	data    []byte
+	existed bool
+}
+
+// snapshotFiles reads the bytes of a set of paths (missing -> nil, existed=false).
+func snapshotFiles(paths []string) ([]fileSnapshot, error) {
+	snaps := make([]fileSnapshot, 0, len(paths))
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				snaps = append(snaps, fileSnapshot{path: p})
+				continue
+			}
+			return nil, err
+		}
+		snaps = append(snaps, fileSnapshot{path: p, data: b, existed: true})
+	}
+	return snaps, nil
+}
+
+// restoreSnapshots restores each snapshot path to its pre-mutation bytes.
+func restoreSnapshots(snaps []fileSnapshot) error {
+	for _, sn := range snaps {
+		if !sn.existed {
+			_ = os.Remove(sn.path)
+			continue
+		}
+		if err := store.WriteAtomic(sn.path, sn.data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // loadOverrideFile loads the effective override store (data root), falling
