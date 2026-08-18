@@ -84,6 +84,10 @@ type roleInputs struct {
 	MetricRegistry     *metrics.Registry
 	MetricRegistrySHA  string
 	MetricRegistryPath string
+	// MetricClosure is the frozen 52-row metric closure contract.
+	MetricClosure     *metrics.Closure
+	MetricClosureSHA  string
+	MetricClosurePath string
 	// ScoringContract is the frozen radar/score contract.
 	ScoringContract     *scoring.Contract
 	ScoringContractSHA  string
@@ -147,6 +151,23 @@ func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metric_registry_hash_failed: %w", err)
 	}
+	// The frozen metric closure contract is a hard requirement alongside the
+	// registry: every metric must resolve through a definition-specific entry.
+	closureFile := filepath.Join(dir, "ti2026-metric-closure-v1.json")
+	if _, err := os.Stat(closureFile); err != nil {
+		return nil, fmt.Errorf("metric_closure_missing (expected %s): %w", closureFile, err)
+	}
+	mclosure, err := metrics.LoadClosure(closureFile)
+	if err != nil {
+		return nil, fmt.Errorf("metric_closure_load_failed (%s): %w", closureFile, err)
+	}
+	if err := mclosure.ValidateAgainstRegistry(mreg); err != nil {
+		return nil, fmt.Errorf("metric_closure_registry_mismatch: %w", err)
+	}
+	mclosureSHA, err := fileSHA256(closureFile)
+	if err != nil {
+		return nil, fmt.Errorf("metric_closure_hash_failed: %w", err)
+	}
 
 	scoringFile := filepath.Join(dir, "ti2026-radar-scoring-v1.json")
 	if _, err := os.Stat(scoringFile); err != nil {
@@ -180,6 +201,7 @@ func loadRoleInputs(manifestPath, dataRoot string) (*roleInputs, error) {
 		RegistrySHA: regSHA, OverridesSHA: ovrSHA,
 		RegistryPath: roleFile, OverridesPath: overrideFile,
 		MetricRegistry: mreg, MetricRegistrySHA: mregSHA, MetricRegistryPath: metricFile,
+		MetricClosure: mclosure, MetricClosureSHA: mclosureSHA, MetricClosurePath: closureFile,
 		ScoringContract: sc, ScoringContractSHA: scSHA, ScoringContractPath: scoringFile,
 		TeamContract: tc, TeamContractSHA: tcSHA, TeamContractPath: teamFile,
 	}, nil
@@ -243,6 +265,7 @@ func runnerOptions(ri *roleInputs) runner.Options {
 		RoleRegistry: ri.Registry, Overrides: ri.Overrides,
 		RoleRegistrySHA256: ri.RegistrySHA, RoleOverridesSHA256: ri.OverridesSHA,
 		MetricRegistry: ri.MetricRegistry, MetricRegistrySHA256: ri.MetricRegistrySHA,
+		MetricClosure: ri.MetricClosure, MetricClosureSHA256: ri.MetricClosureSHA,
 	}
 }
 
@@ -573,6 +596,7 @@ func runServe(args []string, output io.Writer) int {
 	}
 	srv := api.New(st, ri.Registry, ri.Overrides, ri.RegistryPath).
 		WithContracts(ri.MetricRegistry, ri.ScoringContract).
+		WithMetricClosure(ri.MetricClosure).
 		WithTeamContract(ri.TeamContract).
 		WithReviews(rv).
 		WithSessionToken(*sessionToken)

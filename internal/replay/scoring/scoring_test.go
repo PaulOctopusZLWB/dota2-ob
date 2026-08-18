@@ -293,6 +293,40 @@ func TestLineagePreservedThroughAggregation(t *testing.T) {
 	}
 }
 
+// TestAggregationDedupMatchQualified proves equal entity ids from different
+// matches never collapse during aggregation: the dedup key includes match id,
+// so two identical fact/episode ids from distinct matches both survive.
+func TestAggregationDedupMatchQualified(t *testing.T) {
+	c := testContract(t)
+	mreg := testMetricReg(t)
+	players := []*PlayerMatch{
+		// Same account/role, same metric, SAME entity id (fact:7) and SAME
+		// episode id across two different matches.
+		mkPlayerWithLineage("m1", "a1", "T1", "1", "hero_damage_total", 500, 500, 1, []EvidenceRef{{MatchID: "m1", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}}),
+		mkPlayerWithLineage("m2", "a1", "T1", "1", "hero_damage_total", 800, 800, 1, []EvidenceRef{{MatchID: "m2", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}}),
+	}
+	cor := NewCorpus(c, mreg, players)
+	pt := cor.Tournament("a1", "1")
+	if pt == nil {
+		t.Fatal("tournament nil")
+	}
+	agg := pt.Metrics["hero_damage_total"]
+	if len(agg.Lineage) != 2 {
+		t.Fatalf("lineage len=%d want 2 (equal entity ids from different matches must stay distinct)", len(agg.Lineage))
+	}
+	seen := map[string]bool{}
+	for _, ref := range agg.Lineage {
+		if ref.MatchID == "" || ref.Kind == "" || ref.ID == "" {
+			t.Fatalf("lineage ref malformed: %+v", ref)
+		}
+		k := ref.MatchID + "\x00" + ref.Kind + "\x00" + ref.ID
+		if seen[k] {
+			t.Fatalf("lineage dedup collapsed a match-qualified ref: %+v", ref)
+		}
+		seen[k] = true
+	}
+}
+
 func mkPlayerWithLineage(match, acct, team, role, mid string, val, num, den float64, lineage []EvidenceRef) *PlayerMatch {
 	pm := mkPlayer(match, acct, team, role,
 		map[string]float64{mid: val},

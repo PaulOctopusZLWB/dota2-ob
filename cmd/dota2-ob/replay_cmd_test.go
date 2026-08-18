@@ -51,7 +51,7 @@ func writeTestRoleRegistry(t *testing.T, dir string) string {
 func copyContractFiles(t *testing.T, dir string) {
 	t.Helper()
 	specsDir := "../../docs/specs"
-	for _, name := range []string{"ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json", "ti2026-team-scoring-v1.json"} {
+	for _, name := range []string{"ti2026-role-phase-metrics-v1.json", "ti2026-metric-closure-v1.json", "ti2026-radar-scoring-v1.json", "ti2026-team-scoring-v1.json"} {
 		b, err := os.ReadFile(filepath.Join(specsDir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -128,7 +128,7 @@ func TestLoadRoleInputs(t *testing.T) {
 	copyContractFiles(t, dir)
 	manDir := filepath.Join(dir, "man")
 	os.MkdirAll(manDir, 0o755)
-	for _, name := range []string{"ti2026-five-replay-role-registry-v1.json", "ti2026-role-phase-metrics-v1.json", "ti2026-radar-scoring-v1.json", "ti2026-team-scoring-v1.json"} {
+	for _, name := range []string{"ti2026-five-replay-role-registry-v1.json", "ti2026-role-phase-metrics-v1.json", "ti2026-metric-closure-v1.json", "ti2026-radar-scoring-v1.json", "ti2026-team-scoring-v1.json"} {
 		os.Rename(filepath.Join(dir, name), filepath.Join(manDir, name))
 	}
 	manifest := filepath.Join(manDir, "manifest.json")

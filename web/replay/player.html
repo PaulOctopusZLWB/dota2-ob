@@ -74,6 +74,24 @@ function safeUrl(v) {
   return null;
 }
 
+// lineageLink renders one typed, match-qualified lineage ref as a deep link to
+// the referenced evidence entity. Kinds: fact -> /matches/{id}/facts/{seq},
+// episode -> /matches/{id}/episodes/{id}, phase -> /matches/{id}/phases/{ref},
+// metric_observation -> /matches/{id}/metrics/{metric}, algorithm ->
+// /matches/{id}/algorithms/{evaluator}. A ref without a match id renders as an
+// explicit unavailable marker instead of a misleading link.
+function lineageLink(ref) {
+  if (!ref || !ref.kind) return "-";
+  const label = `${ref.kind}:${ref.id}`;
+  if (!ref.match_id) return `<span class="hint" title="缺少 match_id，无法定位证据">不可用:${esc(label)}</span>`;
+  let href = `match.html?id=${encodeURIComponent(ref.match_id)}`;
+  let kind = String(ref.kind);
+  if (kind === "fact" || kind === "episode" || kind === "phase" || kind === "metric_observation" || kind === "algorithm") {
+    href += `&evidence=${encodeURIComponent(kind)}:${encodeURIComponent(ref.id)}`;
+  }
+  return `<a href="${href}" title="match ${esc(ref.match_id)} · ${esc(ref.rule_version || "")}">${esc(label)}</a>`;
+}
+
 const AXES = ["laning","resources","tempo","map","vision","fight","objectives","endgame"];
 const AXIS_ZH = { laning:"对线", resources:"资源", tempo:"节奏", map:"地图", vision:"视野", fight:"团战", objectives:"目标转化", endgame:"终局决策" };
 
@@ -183,9 +201,7 @@ function metricDrilldown(ps) {
       const agg = ps.aggregated_metrics && ps.aggregated_metrics[mid];
       let lineage = "-";
       if (agg && agg.lineage && agg.lineage.length) {
-        lineage = agg.lineage.map(ref =>
-          `<a href="match.html?id=${esc(ref.match_id || "")}" title="来源事实序列 ${esc(ref.source_fact_seq)}">${esc(ref.kind)}:${esc(ref.id)}</a>`
-        ).join(" ");
+        lineage = agg.lineage.map(ref => lineageLink(ref)).join(" ");
       }
       rows += `<tr><td>${esc(mid)}</td><td class="num">${esc(raw)}</td><td class="num">${esc(pct)}</td><td class="num">${esc(c.weight)}</td><td>${st}${reason}</td><td class="hint">${lineage}</td></tr>`;
     }

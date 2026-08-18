@@ -209,6 +209,45 @@ function render(r) {
 
 // 评分与雷达（官方实线 + V3 虚线）
 loadScores(r);
+renderEvidenceTarget(r);
+}
+
+// renderEvidenceTarget renders the deep-linked evidence entity when the page
+// is opened with ?evidence=kind:id. It fetches the match-qualified detail
+// route and renders the referenced fact/episode/phase/metric/algorithm, or an
+// explicit unavailable reason when the ref is stale/invalid.
+async function renderEvidenceTarget(r) {
+  const ev = new URLSearchParams(location.search).get("evidence");
+  if (!ev) return;
+  const [kind, ...rest] = ev.split(":");
+  const id = rest.join(":");
+  if (!kind || !id) return;
+  const c = document.getElementById("content");
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">载入中…</p>`;
+  c.appendChild(panel);
+  let path = "";
+  if (kind === "fact") path = `/api/replay/v1/matches/${r.match_id}/facts/${encodeURIComponent(id)}`;
+  else if (kind === "episode") path = `/api/replay/v1/matches/${r.match_id}/episodes/${encodeURIComponent(id)}`;
+  else if (kind === "phase") path = `/api/replay/v1/matches/${r.match_id}/phases/${encodeURIComponent(id)}`;
+  else if (kind === "metric_observation") path = `/api/replay/v1/matches/${r.match_id}/metrics/${encodeURIComponent(id)}`;
+  else if (kind === "algorithm") path = `/api/replay/v1/matches/${r.match_id}/algorithms/${encodeURIComponent(id)}`;
+  else {
+    panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">不可用: 未知证据类型 ${esc(kind)}</p>`;
+    return;
+  }
+  try {
+    const resp = await fetch(path);
+    const env = await resp.json();
+    if (!resp.ok) {
+      panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">不可用: ${esc(env && env.reason ? env.reason : resp.status)}</p>`;
+      return;
+    }
+    panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><pre class="mono">${esc(JSON.stringify(env.data, null, 2))}</pre>`;
+  } catch (e) {
+    panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">不可用: ${esc(String(e))}</p>`;
+  }
 }
 
 async function loadScores(r) {

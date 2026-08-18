@@ -78,6 +78,12 @@ type Options struct {
 	MetricRegistry *metrics.Registry
 	// MetricRegistrySHA256 is the content hash of the metric registry file.
 	MetricRegistrySHA256 string
+	// MetricClosure is the frozen 52-row metric closure contract (required
+	// for definition-specific resolution; a nil closure fails every metric
+	// closed with no_closure_entry).
+	MetricClosure *metrics.Closure
+	// MetricClosureSHA256 is the content hash of the metric closure file.
+	MetricClosureSHA256 string
 }
 
 // RunMatch executes the full pipeline for one manifest entry. replayRoot is
@@ -325,7 +331,7 @@ func RunMatch(st *store.Store, mt *archive.Match, replayRoot string, opts Option
 		return nil, err
 	}
 
-	metOut, err := buildMetrics(factsPath, mt.MatchID, accounts, accountName, teamByAcct, roleByAcct, teamOfSide, opts.MetricRegistry, epOut, phaseOut, factsSummary)
+	metOut, err := buildMetrics(factsPath, mt.MatchID, accounts, accountName, teamByAcct, roleByAcct, teamOfSide, opts.MetricRegistry, opts.MetricClosure, epOut, phaseOut, factsSummary)
 	if err != nil {
 		return nil, fmt.Errorf("runner: metrics: %w", err)
 	}
@@ -669,7 +675,7 @@ func floatValue(p *int64) float64 {
 	return float64(*p)
 }
 
-func buildMetrics(factsPath, matchID string, accounts []string, accountName, teamByAcct map[string]string, roleByAcct, teamOfSide map[string]string, reg *metrics.Registry, epOut *episodes.Output, phaseOut *phase.Output, fs *facts.Summary) (*metrics.Output, error) {
+func buildMetrics(factsPath, matchID string, accounts []string, accountName, teamByAcct map[string]string, roleByAcct, teamOfSide map[string]string, reg *metrics.Registry, cl *metrics.Closure, epOut *episodes.Output, phaseOut *phase.Output, fs *facts.Summary) (*metrics.Output, error) {
 	rf, err := os.Open(factsPath)
 	if err != nil {
 		return nil, err
@@ -677,6 +683,7 @@ func buildMetrics(factsPath, matchID string, accounts []string, accountName, tea
 	defer rf.Close()
 	calc := metrics.NewCalculator(matchID, accounts, accountName, teamByAcct)
 	calc.SetRegistry(reg)
+	calc.SetClosure(cl)
 	calc.SetRoles(roleByAcct)
 	calc.SetTeamOfSide(teamOfSide)
 	if fs != nil {

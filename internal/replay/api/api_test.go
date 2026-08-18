@@ -12,7 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/episodes"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/facts"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/metrics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/phase"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/review"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/roles"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/scoring"
@@ -48,7 +51,11 @@ func testServerWithContracts(t *testing.T, st *store.Store, reg *roles.Registry)
 	t.Helper()
 	mreg, sc := testContracts(t)
 	tc := testTeamContract(t)
-	return New(st, reg, nil, "").WithContracts(mreg, sc).WithTeamContract(tc)
+	cl, err := metrics.LoadClosure("../../../docs/specs/ti2026-metric-closure-v1.json")
+	if err != nil {
+		t.Fatalf("load closure: %v", err)
+	}
+	return New(st, reg, nil, "").WithContracts(mreg, sc).WithMetricClosure(cl).WithTeamContract(tc)
 }
 
 func testStore(t *testing.T) *store.Store {
@@ -142,6 +149,9 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 	srv := New(st, reg, nil, "")
 	mreg, sc := testContracts(t)
 	srv.WithContracts(mreg, sc).WithTeamContract(testTeamContract(t))
+	if cl, cerr := metrics.LoadClosure("../../../docs/specs/ti2026-metric-closure-v1.json"); cerr == nil {
+		srv.WithMetricClosure(cl)
+	}
 	ts := httptest.NewServer(srv.Handler())
 	return srv, ts
 }
@@ -924,3 +934,202 @@ func testRoleRegistry(t *testing.T) *roles.Registry {
 	}
 	return reg
 }
+
+// writeFactLine appends one JSONL fact to a match's facts artifact.
+func writeFactLine(t *testing.T, st *store.Store, matchID string, f *facts.Fact) {
+	t.Helper()
+	fh, err := os.OpenFile(filepath.Join(st.Root, "matches", matchID, store.ArtifactFacts), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	b, _ := json.Marshal(f)
+	if _, err := fh.Write(append(b, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNavigableTypedLineageRoutes proves every typed lineage ref resolves to a
+// stable match-qualified detail route (fact, episode, phase, metric
+// observation, algorithm) and that stale/invalid refs render an explicit
+// unavailable reason rather than a misleading success.
+func TestNavigableTypedLineageRoutes(t *testing.T) {
+	st := testStore(t)
+	reg := testRoleRegistry(t)
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, reg).WithReviews(rv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Write a facts.jsonl with one combat fact (seq 7), phases, episodes, and
+	// metrics artifacts so the detail routes resolve.
+	writeFactLine(t, st, "m1", &facts.Fact{Seq: 7, Family: facts.FamilyCombat, MatchID: "m1", GameSecond: 100, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "1000", TargetAccount: "1001", Value: int64p(500)})})
+	st.WriteJSON("m1", store.ArtifactEpisodes, &episodes.Output{SchemaVersion: "replay.episodes.v1", MatchID: "m1", Episodes: []episodes.Episode{
+		{ID: "m1:fight:90:0", MatchID: "m1", Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"1000"}, EvidenceIDs: []int64{7}},
+	}})
+	st.WriteJSON("m1", store.ArtifactPhases, &phase.Output{SchemaVersion: "replay.phase.v1", EligibleSeconds: 100, Intervals: []phase.Interval{
+		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 100, EvidenceSeqs: []int64{7}},
+	}})
+	st.WriteJSON("m1", store.ArtifactMetrics, &metrics.Output{SchemaVersion: "replay.metrics.v3", MatchID: "m1", Values: []metrics.Value{{
+		MetricID: "hero_damage_total", Name: "Hero damage", ReportLevel: "player", AccountID: "1000",
+		EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
+		Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}},
+	}}})
+
+	// Fact route resolves.
+	var factEnv struct {
+		Data struct {
+			Seq int64 `json:"seq"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/matches/m1/facts/7", &factEnv); code != 200 || factEnv.Data.Seq != 7 {
+		t.Fatalf("fact route status=%d seq=%d", code, factEnv.Data.Seq)
+	}
+	// Episode route resolves.
+	var epEnv struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/matches/m1/episodes/m1%3Afight%3A90%3A0", &epEnv); code != 200 || epEnv.Data.ID == "" {
+		t.Fatalf("episode route status=%d", code)
+	}
+	// Phase route resolves.
+	var phEnv struct {
+		Data struct {
+			StartGameSecond int `json:"start_game_second"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/matches/m1/phases/interval%400-100", &phEnv); code != 200 || phEnv.Data.StartGameSecond != 0 {
+		t.Fatalf("phase route status=%d", code)
+	}
+	// Metric observation route resolves.
+	var metEnv struct {
+		Data struct {
+			MetricID string `json:"metric_id"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/matches/m1/metrics/hero_damage_total", &metEnv); code != 200 || metEnv.Data.MetricID != "hero_damage_total" {
+		t.Fatalf("metric observation route status=%d", code)
+	}
+	// Algorithm route resolves (closure evaluator).
+	var algEnv struct {
+		Data struct {
+			EvaluatorID string `json:"evaluator_id"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts.URL+Version+"/matches/m1/algorithms/ev.hero_damage_total.v1.atomic", &algEnv); code != 200 || algEnv.Data.EvaluatorID == "" {
+		t.Fatalf("algorithm route status=%d", code)
+	}
+	// Stale fact renders an explicit unavailable reason (404 + reason), never
+	// a misleading 200.
+	resp, err := http.Get(ts.URL + Version + "/matches/m1/facts/999999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("stale fact status=%d want 404", resp.StatusCode)
+	}
+	var errEnv struct {
+		Err string `json:"error"`
+	}
+	json.NewDecoder(resp.Body).Decode(&errEnv)
+	if !strings.Contains(errEnv.Err, "fact_not_found") {
+		t.Fatalf("stale fact reason=%q", errEnv.Err)
+	}
+}
+
+// TestTwoMatchesLineageDistinctThroughAPI proves equal entity ids from two
+// matches remain distinct through the persisted metrics artifact and the API
+// match reports (match-qualified lineage identity).
+func TestTwoMatchesLineageDistinctThroughAPI(t *testing.T) {
+	st := testStore(t)
+	// m1 (from testStore) keeps its default metrics; give it a
+	// hero_damage_total row with fact:7 evidence so both matches share the
+	// same entity id.
+	st.WriteJSON("m1", store.ArtifactMetrics, &metrics.Output{SchemaVersion: "replay.metrics.v3", MatchID: "m1", Values: []metrics.Value{{
+		MetricID: "hero_damage_total", Name: "Hero damage", ReportLevel: "player", AccountID: "1000",
+		EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
+		Evidence: []metrics.EvidenceRef{{MatchID: "m1", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}},
+	}}})
+	// Add a second verified match m2 with the same fact seq 7.
+	st.WriteJSON("m2", store.ArtifactVerification, map[string]string{"state": "verified", "reason": "ok"})
+	st.WriteJSON("m2", store.ArtifactIdentity, map[string]interface{}{
+		"state": "verified", "match_id": "m2",
+		"participants": []map[string]interface{}{{"slot": 0, "account_id": "1000", "player_name": "p0", "hero_name": "npc_dota_hero_kez", "hero_id": 145, "side": "radiant", "team": 2}},
+		"teams":        []map[string]interface{}{{"team_id": "T1", "team_name": "Team One", "side": "radiant"}},
+	})
+	st.WriteJSON("m2", store.ArtifactPhases, map[string]interface{}{
+		"state": "complete", "eligible_seconds": 100,
+		"intervals": []map[string]interface{}{{"global_phase": "laning", "start_game_second": 0, "end_game_second": 100}},
+	})
+	st.WriteJSON("m2", store.ArtifactMetrics, &metrics.Output{SchemaVersion: "replay.metrics.v3", MatchID: "m2", Values: []metrics.Value{{
+		MetricID: "hero_damage_total", Name: "Hero damage", ReportLevel: "player", AccountID: "1000",
+		EpistemicClass: "derived", CapabilityLevel: "V1", MetricVersion: "1.0.0",
+		Evidence: []metrics.EvidenceRef{{MatchID: "m2", Kind: "fact", ID: "fact:7", SourceFactSeq: 7}},
+	}}})
+	st.WriteStatus("m2", &store.StatusRecord{
+		SchemaVersion: store.StatusSchema, MatchID: "m2", Status: store.StatusVerified,
+		Publication: "published", Reason: "all_gates_pass", ArchiveState: "verified",
+		IdentityState: "verified", ClockState: "calibrated",
+	})
+	if _, err := st.RebuildCatalog("2026-08-17T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	reg := testRoleRegistry(t)
+	srv := testServerWithContracts(t, st, reg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Each match's report preserves its own match-qualified lineage.
+	for _, mid := range []string{"m1", "m2"} {
+		var rep struct {
+			Data struct {
+				Metrics struct {
+					Values []struct {
+						MetricID string `json:"metric_id"`
+						Evidence []struct {
+							MatchID string `json:"match_id"`
+							Kind    string `json:"kind"`
+							ID      string `json:"id"`
+						} `json:"evidence"`
+					} `json:"values"`
+				} `json:"metrics"`
+			} `json:"data"`
+		}
+		if code := getJSON(t, ts.URL+Version+"/matches/"+mid, &rep); code != 200 {
+			t.Fatalf("match %s report status %d", mid, code)
+		}
+		found := false
+		for _, v := range rep.Data.Metrics.Values {
+			if v.MetricID != "hero_damage_total" {
+				continue
+			}
+			for _, e := range v.Evidence {
+				if e.Kind == "fact" && e.ID == "fact:7" {
+					if e.MatchID != mid {
+						t.Fatalf("match %s lineage ref match=%s want %s", mid, e.MatchID, mid)
+					}
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("match %s missing fact:7 lineage", mid)
+		}
+	}
+}
+
+func mustJSON(v interface{}) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func int64p(v int64) *int64 { return &v }

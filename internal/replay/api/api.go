@@ -37,6 +37,9 @@ type Server struct {
 	RoleFile  string
 	// MetricReg is the frozen metric registry (full V1/V2/V3 contract).
 	MetricReg *metrics.Registry
+	// MetricClosure is the frozen 52-row metric closure contract (definition-
+	// specific evaluator/gate mapping, served for algorithm drilldown).
+	MetricClosure *metrics.Closure
 	// ScoringContract is the frozen radar/score contract.
 	ScoringContract *scoring.Contract
 	// TeamContract is the frozen team scoring registry.
@@ -61,6 +64,12 @@ func New(st *store.Store, roleReg *roles.Registry, overrides *roles.OverrideFile
 func (s *Server) WithContracts(mreg *metrics.Registry, sc *scoring.Contract) *Server {
 	s.MetricReg = mreg
 	s.ScoringContract = sc
+	return s
+}
+
+// WithMetricClosure binds the frozen 52-row metric closure contract.
+func (s *Server) WithMetricClosure(cl *metrics.Closure) *Server {
+	s.MetricClosure = cl
 	return s
 }
 
@@ -180,9 +189,153 @@ func (s *Server) handleMatchDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		SortScores(ms)
 		writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ScoreSchema, Data: ms})
+	case len(parts) >= 2 && parts[1] == "facts":
+		s.handleFactDetail(w, matchID, parts)
+	case len(parts) >= 2 && parts[1] == "episodes":
+		s.handleEpisodeDetail(w, matchID, parts)
+	case len(parts) >= 2 && parts[1] == "phases":
+		s.handlePhaseIntervalDetail(w, matchID, parts)
+	case len(parts) >= 2 && parts[1] == "metrics":
+		s.handleMetricObservationDetail(w, matchID, parts)
+	case len(parts) >= 2 && parts[1] == "algorithms":
+		s.handleAlgorithmDetail(w, matchID, parts)
 	default:
 		writeErr(w, http.StatusNotFound, "not_found")
 	}
+}
+
+// handleFactDetail serves one match-qualified fact by seq. Stale/unknown refs
+// render an explicit unavailable reason, never a misleading link target.
+func (s *Server) handleFactDetail(w http.ResponseWriter, matchID string, parts []string) {
+	if len(parts) != 3 {
+		writeErr(w, http.StatusBadRequest, "fact_seq_required")
+		return
+	}
+	seq, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || seq < 1 {
+		writeErr(w, http.StatusBadRequest, "invalid_fact_seq")
+		return
+	}
+	rf, err := s.Store.OpenArtifact(matchID, store.ArtifactFacts)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "facts_unavailable")
+		return
+	}
+	defer rf.Close()
+	r := facts.NewReader(rf)
+	for {
+		f, err := r.Next()
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "fact_not_found:seq="+parts[2])
+			return
+		}
+		if f.Seq == seq {
+			writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.FactsSchema, Data: f})
+			return
+		}
+	}
+}
+
+// handleEpisodeDetail serves one match-qualified episode by its stable id.
+func (s *Server) handleEpisodeDetail(w http.ResponseWriter, matchID string, parts []string) {
+	if len(parts) != 3 {
+		writeErr(w, http.StatusBadRequest, "episode_id_required")
+		return
+	}
+	id := parts[2]
+	var ep episodes.Output
+	if err := s.Store.ReadJSON(matchID, store.ArtifactEpisodes, &ep); err != nil {
+		writeErr(w, http.StatusNotFound, "episodes_unavailable")
+		return
+	}
+	for i := range ep.Episodes {
+		if ep.Episodes[i].ID == id {
+			writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.EpisodeSchema, Data: ep.Episodes[i]})
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "episode_not_found:"+id)
+}
+
+// handlePhaseIntervalDetail serves one match-qualified phase interval by
+// canonical ref (interval@START-END or START-END).
+func (s *Server) handlePhaseIntervalDetail(w http.ResponseWriter, matchID string, parts []string) {
+	if len(parts) != 3 {
+		writeErr(w, http.StatusBadRequest, "phase_ref_required")
+		return
+	}
+	st, en, ok := review.ParseEventRef(parts[2])
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_phase_ref")
+		return
+	}
+	var ph phase.Output
+	if err := s.Store.ReadJSON(matchID, store.ArtifactPhases, &ph); err != nil {
+		writeErr(w, http.StatusNotFound, "phases_unavailable")
+		return
+	}
+	for i := range ph.Intervals {
+		iv := &ph.Intervals[i]
+		if iv.StartGameSecond == st && (en < 0 || iv.EndGameSecond == en) {
+			writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.PhaseSchema, Data: iv})
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "phase_interval_not_found:"+parts[2])
+}
+
+// handleMetricObservationDetail serves one match-qualified metric observation
+// (all rows for the metric id in this match, published and unavailable).
+func (s *Server) handleMetricObservationDetail(w http.ResponseWriter, matchID string, parts []string) {
+	if len(parts) != 3 {
+		writeErr(w, http.StatusBadRequest, "metric_id_required")
+		return
+	}
+	metricID := parts[2]
+	var met metrics.Output
+	if err := s.Store.ReadJSON(matchID, store.ArtifactMetrics, &met); err != nil {
+		writeErr(w, http.StatusNotFound, "metrics_unavailable")
+		return
+	}
+	rows := []metrics.Value{}
+	for _, v := range met.Values {
+		if v.MetricID == metricID {
+			rows = append(rows, v)
+		}
+	}
+	for _, v := range met.Unavailable {
+		if v.MetricID == metricID {
+			rows = append(rows, v)
+		}
+	}
+	if len(rows) == 0 {
+		writeErr(w, http.StatusNotFound, "metric_observation_not_found:"+metricID)
+		return
+	}
+	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.MetricsSchema, Data: map[string]interface{}{
+		"match_id": matchID, "metric_id": metricID, "rows": rows,
+	}})
+}
+
+// handleAlgorithmDetail serves the closure-contract evaluator entry for a
+// metric's algorithm/evaluator id (match-qualified for audit stability).
+func (s *Server) handleAlgorithmDetail(w http.ResponseWriter, matchID string, parts []string) {
+	if len(parts) != 3 {
+		writeErr(w, http.StatusBadRequest, "evaluator_id_required")
+		return
+	}
+	if s.MetricClosure == nil {
+		writeErr(w, http.StatusNotFound, "metric_closure_unavailable")
+		return
+	}
+	for i := range s.MetricClosure.Metrics {
+		row := &s.MetricClosure.Metrics[i]
+		if row.EvaluatorID == parts[2] {
+			writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.ClosureSchema, Data: row})
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "algorithm_not_found:"+parts[2])
 }
 
 // loadReport returns the authoritative persisted report artifact when present.

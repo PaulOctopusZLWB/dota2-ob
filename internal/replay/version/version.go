@@ -27,7 +27,9 @@ const (
 	// EpisodeSchema is the behavior episode schema version.
 	EpisodeSchema = "replay.episodes.v1"
 	// MetricsSchema is the V1/V2/V3 metric publication schema version.
-	MetricsSchema = "replay.metrics.v2"
+	MetricsSchema = "replay.metrics.v3"
+	// ClosureSchema is the 52-row metric closure contract version.
+	ClosureSchema = "ti2026.metric-closure.v1"
 	// ScoreSchema is the radar/score snapshot schema version.
 	ScoreSchema = "replay.score.v2"
 	// CorrectionSchemaV1 is the legacy review/correction overlay schema
@@ -48,7 +50,7 @@ const (
 	// LaneRuleVersion identifies the lane-assignment rule set.
 	LaneRuleVersion = "ti2026.lanes.v1"
 	// MetricsRuleVersion identifies the V1/V2/V3 metric computation rule set.
-	MetricsRuleVersion = "ti2026.metrics.v5"
+	MetricsRuleVersion = "ti2026.metrics.v6"
 	// ScoreRuleVersion identifies the radar/score computation rule set.
 	ScoreRuleVersion = "ti2026.scoring.v2"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.

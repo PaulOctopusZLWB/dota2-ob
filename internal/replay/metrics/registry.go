@@ -28,6 +28,8 @@ const (
 
 	// RegistrySchemaVersion is the version of the frozen metric registry file.
 	RegistrySchemaVersion = "ti2026.role-phase-metrics.v1"
+	// ClosureSchemaVersion is the version of the frozen metric closure file.
+	ClosureSchemaVersion = "ti2026.metric-closure.v1"
 )
 
 // Metric is the full machine-readable contract for one registry entry.

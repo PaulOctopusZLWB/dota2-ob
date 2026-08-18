@@ -550,9 +550,11 @@ func (c *Corpus) aggregateValues(mid string, vals []MetricValue) (AggregatedMetr
 			maxV = v.Value
 		}
 		sumV += v.Value
-		// Preserve typed lineage through aggregation (deduplicated).
+		// Preserve typed lineage through aggregation (deduplicated by
+		// match+kind+id so equal entity ids from different matches never
+		// collapse).
 		for _, ref := range v.Lineage {
-			key := ref.Kind + "\x00" + ref.ID
+			key := ref.MatchID + "\x00" + ref.Kind + "\x00" + ref.ID
 			if !seenLineage[key] {
 				seenLineage[key] = true
 				agg.Lineage = append(agg.Lineage, ref)

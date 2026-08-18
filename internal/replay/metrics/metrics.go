@@ -47,6 +47,29 @@ type Definition struct {
 	ScorePublicationGate      string   `json:"score_publication_gate"`
 }
 
+// EvidenceRef is a typed, match-qualified lineage reference. Identity is
+// (MatchID, Kind, ID, RuleVersion): equal entity ids from different matches
+// never collapse, and a ref always names the rule/algorithm version that
+// produced the referenced entity. Kinds: fact, episode, phase,
+// metric_observation, aggregation, algorithm.
+type EvidenceRef struct {
+	MatchID       string `json:"match_id,omitempty"`
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	RuleVersion   string `json:"rule_version,omitempty"`
+	SourceFactSeq int64  `json:"source_fact_seq,omitempty"`
+}
+
+// Evidence ref kinds.
+const (
+	EvidenceFact              = "fact"
+	EvidenceEpisode           = "episode"
+	EvidencePhase             = "phase"
+	EvidenceMetricObservation = "metric_observation"
+	EvidenceAggregation       = "aggregation"
+	EvidenceAlgorithm         = "algorithm"
+)
+
 // Value is a computed metric value with provenance.
 type Value struct {
 	MetricID         string   `json:"metric_id"`
@@ -68,15 +91,15 @@ type Value struct {
 	ExcludedCount    int64    `json:"excluded_count"`
 	// ExcludedDamage is the magnitude of excluded (non-objective) damage
 	// preserved separately; it is distinct from excluded_count (record count).
-	ExcludedDamage            *float64 `json:"excluded_damage,omitempty"`
-	SampleCount               int64    `json:"sample_count"`
-	EvidenceCount             int64    `json:"evidence_count"`
-	EvidenceIDs               []int64  `json:"evidence_ids,omitempty"`
-	UnavailableReason         string   `json:"unavailable_reason,omitempty"`
-	Confidence                float64  `json:"confidence"`
-	Direction                 string   `json:"direction"`
-	OfficialScoreEligible     bool     `json:"official_score_eligible"`
-	ExperimentalScoreEligible bool     `json:"experimental_score_eligible"`
+	ExcludedDamage            *float64      `json:"excluded_damage,omitempty"`
+	SampleCount               int64         `json:"sample_count"`
+	EvidenceCount             int64         `json:"evidence_count"`
+	Evidence                  []EvidenceRef `json:"evidence,omitempty"`
+	UnavailableReason         string        `json:"unavailable_reason,omitempty"`
+	Confidence                float64       `json:"confidence"`
+	Direction                 string        `json:"direction"`
+	OfficialScoreEligible     bool          `json:"official_score_eligible"`
+	ExperimentalScoreEligible bool          `json:"experimental_score_eligible"`
 }
 
 // Output is the metrics artifact for one match.
@@ -103,6 +126,16 @@ type Resolution struct {
 	PublishedPlayers  int    `json:"published_players"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
 	EvidenceCount     int64  `json:"evidence_count"`
+	// EvaluatorID, EntryPoint, AcceptedSourceFields, PublicationGate, and
+	// UnavailableGate are the closure-contract fields persisted for
+	// independent audit: the stable algorithm/evaluator id, the concrete Go
+	// entry point, the accepted source fields, and the definition-specific
+	// publication/abstention gates.
+	EvaluatorID          string `json:"evaluator_id"`
+	EntryPoint           string `json:"entry_point"`
+	AcceptedSourceFields string `json:"accepted_source_fields"`
+	PublicationGate      string `json:"publication_gate"`
+	UnavailableGate      string `json:"unavailable_gate,omitempty"`
 }
 
 // CanonicalJSON returns the deterministic encoding.
@@ -173,13 +206,18 @@ type Calculator struct {
 	damageEvents     []damageEvent                 // for fight_damage_share
 	teams            map[string]map[string]float64 // team_id -> account -> networth (final)
 
-	// evidence: "account\x00metric" -> ordered fact seq ids that produced the
-	// metric's observations (fact_ids -> episode/phase/opportunity -> metric).
-	evidence map[string][]int64
+	// evidence: "account\x00metric" -> ordered typed evidence refs (facts,
+	// episodes, phases) that produced the metric's observations.
+	evidence map[string][]EvidenceRef
 
 	// factsCoverage is the per-family availability from the match's facts
 	// summary, used to resolve per-metric field gates precisely.
 	factsCoverage map[string]bool
+
+	// closure is the frozen 52-row metric closure contract (definition-
+	// specific evaluator/gate mapping). When nil, every metric resolves to
+	// unavailable (the runner always supplies the frozen closure).
+	closure *Closure
 }
 
 type damageEvent struct {
@@ -210,12 +248,15 @@ func NewCalculator(matchID string, accounts []string, accountName map[string]str
 		controlSeconds: map[string]float64{},
 		heroStateSecs:  map[string]map[int64]struct{}{},
 		teams:          map[string]map[string]float64{},
-		evidence:       map[string][]int64{},
+		evidence:       map[string][]EvidenceRef{},
 		factsCoverage:  map[string]bool{},
 		healCasts:      map[string]int64{}, smokeParticles: map[string]int64{},
 		buybackRoundPart: map[string]int64{}, buybackTotal: map[string]int64{},
 	}
 }
+
+// SetClosure binds the frozen 52-row metric closure contract.
+func (c *Calculator) SetClosure(cl *Closure) { c.closure = cl }
 
 // SetFactsCoverage records which fact families the accepted adapter actually
 // emitted for this match, so per-metric field gates resolve precisely instead
@@ -445,30 +486,53 @@ func (c *Calculator) Feed(f *facts.Fact) {
 	}
 }
 
-// addEvidence appends a fact seq to the metric's evidence lineage, avoiding
-// unbounded growth for high-frequency facts (bounded to a representative
-// sample of the earliest observations).
+// addEvidence appends a typed fact ref to the metric's evidence lineage,
+// avoiding unbounded growth for high-frequency facts (bounded to a
+// representative sample of the earliest observations).
 func (c *Calculator) addEvidence(account, metric string, seq int64) {
 	key := account + "\x00" + metric
 	ev := c.evidence[key]
 	if len(ev) < 64 {
-		c.evidence[key] = append(ev, seq)
+		c.evidence[key] = append(ev, EvidenceRef{
+			MatchID:       c.matchID,
+			Kind:          EvidenceFact,
+			ID:            fmt.Sprintf("fact:%d", seq),
+			RuleVersion:   version.FactsSchema,
+			SourceFactSeq: seq,
+		})
 	}
 }
 
-// evidenceFor returns the collected fact seq ids for an account+metric.
-func (c *Calculator) evidenceFor(account, metric string) []int64 {
+// dedupeEvidence removes duplicate evidence refs by match+kind+id, preserving
+// order.
+func dedupeEvidence(refs []EvidenceRef) []EvidenceRef {
+	seen := map[string]bool{}
+	out := make([]EvidenceRef, 0, len(refs))
+	for _, r := range refs {
+		key := r.MatchID + "\x00" + r.Kind + "\x00" + r.ID
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// evidenceFor returns the collected typed evidence refs for an account+metric.
+func (c *Calculator) evidenceFor(account, metric string) []EvidenceRef {
 	return c.evidence[account+"\x00"+metric]
 }
 
 // derivedEvidence resolves episode/phase evidence for metrics computed from
 // the episodes/phases artifacts (e.g. fight_damage_share, fight
-// participation), so the lineage chain is not empty for derived rows.
-func (c *Calculator) derivedEvidence(metricID, acct string, fightParticipation map[string]int64, fightDamageShare map[string]*shareVal, eps *episodes.Output, ph *phase.Output) []int64 {
+// participation, buyback round participation), so the lineage chain carries
+// typed episode/phase identities instead of flattened fact sequences. It is
+// pure: it returns the derived refs without mutating calculator state.
+func (c *Calculator) derivedEvidence(metricID, acct string, fightParticipation map[string]int64, fightDamageShare map[string]*shareVal, eps *episodes.Output, ph *phase.Output) []EvidenceRef {
+	var out []EvidenceRef
 	switch metricID {
 	case "fight_participation_count", "fight_damage_share":
 		if eps != nil {
-			var out []int64
 			for i := range eps.Episodes {
 				e := &eps.Episodes[i]
 				if e.Kind != episodes.KindFight {
@@ -482,28 +546,73 @@ func (c *Calculator) derivedEvidence(metricID, acct string, fightParticipation m
 					}
 				}
 				if participates {
-					out = append(out, e.EvidenceIDs...)
+					out = append(out, EvidenceRef{MatchID: c.matchID, Kind: EvidenceEpisode, ID: e.ID, RuleVersion: e.RuleVersion})
+					for _, fs := range e.EvidenceIDs {
+						out = append(out, EvidenceRef{MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", fs), SourceFactSeq: fs, RuleVersion: version.FactsSchema})
+					}
 				}
 			}
-			return out
+		}
+	case "opportunity_duration_seconds":
+		if ph != nil {
+			for i := range ph.Intervals {
+				iv := &ph.Intervals[i]
+				if !iv.GlobalPhase.Official() {
+					continue
+				}
+				out = append(out, EvidenceRef{
+					MatchID: c.matchID, Kind: EvidencePhase,
+					ID:          fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond),
+					RuleVersion: iv.RuleVersion,
+				})
+			}
 		}
 	case "buyback_round_participation":
 		// Evidence = post-buyback combat events by the same account within the
-		// participation window (fact seq ids from the damage stream).
-		var out []int64
+		// participation window (typed fact refs from the damage stream).
 		for _, bb := range c.buybackSeconds[acct] {
 			for _, de := range c.damageEvents {
 				if de.Actor != acct {
 					continue
 				}
 				if de.GameSecond >= bb && de.GameSecond <= bb+60 {
-					out = append(out, de.FactSeq)
+					out = append(out, EvidenceRef{MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", de.FactSeq), SourceFactSeq: de.FactSeq, RuleVersion: version.FactsSchema})
 				}
 			}
 		}
-		return out
 	}
-	return nil
+	return out
+}
+
+// algorithmRef returns the algorithm/evaluator identity ref for a metric from
+// the closure contract.
+func (c *Calculator) algorithmRef(metricID string) EvidenceRef {
+	evaluator := "unassigned"
+	if c.closure != nil {
+		if row := c.closure.Lookup(metricID); row != nil {
+			evaluator = row.EvaluatorID
+		}
+	}
+	return EvidenceRef{
+		MatchID:     c.matchID,
+		Kind:        EvidenceAlgorithm,
+		ID:          evaluator,
+		RuleVersion: version.MetricsRuleVersion,
+	}
+}
+
+// observationRef returns the metric-observation identity ref for a value.
+func (c *Calculator) observationRef(v Value) EvidenceRef {
+	id := v.MetricID
+	if v.AccountID != "" {
+		id = v.MetricID + ":" + v.AccountID
+	}
+	return EvidenceRef{
+		MatchID:     c.matchID,
+		Kind:        EvidenceMetricObservation,
+		ID:          id,
+		RuleVersion: v.MetricVersion,
+	}
 }
 
 // Result builds the Output artifact. It resolves every registry metric for
@@ -573,9 +682,8 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 			} else {
 				// Fact -> episode/phase/opportunity -> metric evidence lineage.
 				ev := c.evidenceFor(acct, m.ID)
-				if len(ev) == 0 {
-					ev = c.derivedEvidence(m.ID, acct, fightParticipation, fightDamageShare, eps, ph)
-				}
+				ev = append(ev, c.derivedEvidence(m.ID, acct, fightParticipation, fightDamageShare, eps, ph)...)
+				ev = dedupeEvidence(ev)
 				if len(ev) == 0 {
 					// No evidence chain means the metric cannot be audited;
 					// fail closed rather than publish an untraceable value.
@@ -589,7 +697,11 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 					out.Unavailable = append(out.Unavailable, v)
 					continue
 				}
-				v.EvidenceIDs = append([]int64(nil), ev...)
+				// Complete typed chain: evidence entities + the metric
+				// observation identity + the algorithm/evaluator identity.
+				chain := append([]EvidenceRef(nil), ev...)
+				chain = append(chain, c.observationRef(v), c.algorithmRef(m.ID))
+				v.Evidence = chain
 				if v.EvidenceCount == 0 {
 					v.EvidenceCount = int64(len(ev))
 				}
@@ -600,7 +712,7 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 
 	// Match-level metrics.
 	if phaseDuration != nil {
-		out.Values = append(out.Values, phaseDurationValue(reg, c.matchID, ph, phaseDuration))
+		out.Values = append(out.Values, c.phaseDurationValue(reg, c.matchID, ph, phaseDuration))
 	} else {
 		out.Unavailable = append(out.Unavailable, phaseDurationUnavailable(reg, c.matchID))
 	}
@@ -617,12 +729,13 @@ func (c *Calculator) Result(eps *episodes.Output, ph *phase.Output) *Output {
 		}
 		return out.Unavailable[i].MetricID < out.Unavailable[j].MetricID
 	})
-	out.ResolutionTable = buildResolutionTable(out)
+	out.ResolutionTable = c.buildResolutionTable(out)
 	return out
 }
 
-// buildResolutionTable derives the per-metric resolution summary.
-func buildResolutionTable(o *Output) []Resolution {
+// buildResolutionTable derives the per-metric resolution summary from the
+// closure contract plus the computed values/unavailable rows.
+func (c *Calculator) buildResolutionTable(o *Output) []Resolution {
 	pubByMetric := map[string]int{}
 	evByMetric := map[string]int64{}
 	for _, v := range o.Values {
@@ -644,6 +757,15 @@ func buildResolutionTable(o *Output) []Resolution {
 			MetricID: d.ID, CapabilityLevel: d.CapabilityLevel,
 			EpistemicClass: d.EpistemicClass, ReportLevel: d.ReportLevel,
 			PublishedPlayers: pubByMetric[d.ID],
+		}
+		if c.closure != nil {
+			if row := c.closure.Lookup(d.ID); row != nil {
+				r.EvaluatorID = row.EvaluatorID
+				r.EntryPoint = row.EntryPoint
+				r.AcceptedSourceFields = row.AcceptedSourceFields
+				r.PublicationGate = row.PublicationGate
+				r.UnavailableGate = row.UnavailableGate
+			}
 		}
 		if r.PublishedPlayers > 0 {
 			r.Published = true
@@ -828,9 +950,20 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 			v.EvidenceCount = ev
 		}
 	default:
-		// V2/V3 modelled and opportunity metrics requiring map geometry,
-		// creep lifecycle, rune state, ward entities, or team shape.
-		v.UnavailableReason = c.contractReason(m)
+		// Definition-specific closure dispatch: the frozen 52-row closure
+		// contract maps every registry metric to a stable evaluator and a
+		// precise unavailable gate. There is no generic default resolution
+		// path; an unmapped id is a hard failure.
+		row := c.closureRow(m.ID)
+		if row == nil {
+			v.UnavailableReason = "no_closure_entry:" + m.ID
+			break
+		}
+		if row.Resolved == "published" {
+			v.UnavailableReason = "closure_published_but_no_entry_point:" + m.ID
+			break
+		}
+		v.UnavailableReason = c.definitionGateReason(m, row)
 	}
 	if v.UnavailableReason != "" {
 		v.EpistemicClass = ClassUnavailable
@@ -843,12 +976,25 @@ func (c *Calculator) computeMetric(m *Metric, acct, team, role string, teamNetWo
 	return v
 }
 
-// contractReason returns the precise reason for a metric whose required
-// inputs are not produced by the accepted adapter. It names the specific
-// required fact families/field gates that are missing for this match (from the
+// closureRow returns the closure entry for a metric, or nil.
+func (c *Calculator) closureRow(id string) *ClosureRow {
+	if c.closure == nil {
+		return nil
+	}
+	return c.closure.Lookup(id)
+}
+
+// definitionGateReason produces the precise unavailable reason for a metric
+// whose closure row marks it unavailable. It names the specific required
+// fact families/field gates that the accepted adapter does not emit (from the
 // actual facts coverage) rather than a blanket capability-level string, so a
 // true source gap is distinguishable from a missing implementation branch.
-func (c *Calculator) contractReason(m *Metric) string {
+func (c *Calculator) definitionGateReason(m *Metric, row *ClosureRow) string {
+	if row != nil && row.UnavailableGate != "" {
+		// The closure contract already pins the definition-specific gate
+		// reason; keep it verbatim so the persisted reason is auditable.
+		return row.UnavailableGate
+	}
 	var missing []string
 	for _, fam := range m.RequiredFactFamilies {
 		if !c.familyAvailable(fam) {
@@ -858,9 +1004,6 @@ func (c *Calculator) contractReason(m *Metric) string {
 	if len(missing) > 0 {
 		return fmt.Sprintf("%s_input_missing_for_%s:%s", strings.ToLower(m.CapabilityLevel), m.ID, strings.Join(missing, "|"))
 	}
-	// All declared families present but the metric is still unsupported by
-	// this adapter's field gates (e.g. lane geometry / creep lifecycle that
-	// the registry lists but the adapter does not emit).
 	return fmt.Sprintf("%s_field_gates_not_met:%s", strings.ToLower(m.CapabilityLevel), strings.Join(m.RequiredFactFamilies, "|"))
 }
 
@@ -1055,7 +1198,7 @@ func (c *Calculator) computePhaseDuration(ph *phase.Output) *float64 {
 	return &total
 }
 
-func phaseDurationValue(reg *Registry, matchID string, ph *phase.Output, dur *float64) Value {
+func (c *Calculator) phaseDurationValue(reg *Registry, matchID string, ph *phase.Output, dur *float64) Value {
 	v := Value{
 		MetricID: "phase_duration_seconds", Name: "Phase duration (match)",
 		ReportLevel: "match", Unit: "seconds", EpistemicClass: ClassDerived,
@@ -1063,11 +1206,19 @@ func phaseDurationValue(reg *Registry, matchID string, ph *phase.Output, dur *fl
 		Value: dur, SampleCount: 1, Confidence: 1.0, Direction: "context_only",
 	}
 	if ph != nil {
-		var ev []int64
+		var ev []EvidenceRef
 		for i := range ph.Intervals {
-			ev = append(ev, ph.Intervals[i].EvidenceSeqs...)
+			iv := &ph.Intervals[i]
+			ev = append(ev, EvidenceRef{
+				MatchID: c.matchID, Kind: EvidencePhase,
+				ID:          fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond),
+				RuleVersion: iv.RuleVersion,
+			})
+			for _, fs := range iv.EvidenceSeqs {
+				ev = append(ev, EvidenceRef{MatchID: c.matchID, Kind: EvidenceFact, ID: fmt.Sprintf("fact:%d", fs), SourceFactSeq: fs, RuleVersion: version.FactsSchema})
+			}
 		}
-		v.EvidenceIDs = ev
+		v.Evidence = append(ev, c.observationRef(v), c.algorithmRef("phase_duration_seconds"))
 		v.EvidenceCount = int64(len(ev))
 	}
 	return v

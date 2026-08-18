@@ -134,18 +134,11 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 				f := *v.Denominator
 				mv.Denominator = &f
 			}
-			// Preserve the typed fact->episode/phase->metric lineage.
-			for _, ev := range v.EvidenceIDs {
-				mv.Lineage = append(mv.Lineage, EvidenceRef{
-					MatchID:       row.MatchID,
-					Kind:          "fact",
-					ID:            fmt.Sprintf("%s:%d", v.MetricID, ev),
-					SourceFactSeq: ev,
-				})
-			}
-			if len(mv.Lineage) == 0 {
-				mv.Lineage = []EvidenceRef{{MatchID: row.MatchID, Kind: "metric", ID: v.MetricID}}
-			}
+			// Preserve the typed match-qualified fact->episode/phase->
+			// metric_observation->algorithm lineage verbatim. Evidence refs
+			// already carry (match_id, kind, id, rule_version); they are never
+			// relabeled or fabricated at the scoring boundary.
+			mv.Lineage = append(mv.Lineage, metricsToEvidenceRefs(row.MatchID, v.Evidence)...)
 			byAcct[v.AccountID][v.MetricID] = mv
 		}
 		for acct, mvs := range byAcct {
@@ -162,6 +155,25 @@ func BuildCorpusFromStore(st *store.Store, c *Contract, tc *TeamContract, mreg *
 		return players[i].AccountID < players[j].AccountID
 	})
 	return NewCorpusWithTeam(c, tc, mreg, players), nil
+}
+
+// metricsToEvidenceRefs converts typed metric-boundary evidence refs to the
+// scoring lineage refs, preserving identity (match, kind, id, rule version)
+// and source fact sequence. No relabeling and no invented success refs: a
+// metric that published without evidence stays lineage-empty (the metrics
+// layer fails those closed with no_evidence_lineage).
+func metricsToEvidenceRefs(matchID string, ev []metrics.EvidenceRef) []EvidenceRef {
+	out := make([]EvidenceRef, 0, len(ev))
+	for _, r := range ev {
+		out = append(out, EvidenceRef{
+			MatchID:       matchID,
+			Kind:          r.Kind,
+			ID:            r.ID,
+			RuleVersion:   r.RuleVersion,
+			SourceFactSeq: r.SourceFactSeq,
+		})
+	}
+	return out
 }
 
 // reportLite is the report subset the scorer needs (participants with roles).

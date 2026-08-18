@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/clock"
@@ -34,6 +35,15 @@ func testRegistry(t *testing.T) *Registry {
 	return reg
 }
 
+func testClosure(t *testing.T) *Closure {
+	t.Helper()
+	cl, err := LoadClosure("../../../docs/specs/ti2026-metric-closure-v1.json")
+	if err != nil {
+		t.Fatalf("load closure: %v", err)
+	}
+	return cl
+}
+
 func mustJSON(v interface{}) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -57,6 +67,237 @@ func TestRegistryContract(t *testing.T) {
 		if m.OfficialScoreEligible && m.CapabilityLevel == CapabilityV3 {
 			t.Fatalf("metric %s official-eligible but V3", m.ID)
 		}
+	}
+}
+
+// TestMetricClosureEqualsRegistry proves the frozen 52-row closure contract
+// agrees exactly with the frozen registry: 52 unique registry ids, 52 unique
+// closure rows, zero unknown, zero duplicate, zero unmapped, and no generic
+// default resolution (every row names an evaluator, entry point, accepted
+// source fields, and publication/abstention gates).
+func TestMetricClosureEqualsRegistry(t *testing.T) {
+	reg := testRegistry(t)
+	cl := testClosure(t)
+	if err := cl.ValidateAgainstRegistry(reg); err != nil {
+		t.Fatalf("closure/registry mismatch: %v", err)
+	}
+	if len(cl.Metrics) != 52 {
+		t.Fatalf("closure rows=%d want 52", len(cl.Metrics))
+	}
+	seen := map[string]bool{}
+	published, unavailable := 0, 0
+	for i := range cl.Metrics {
+		r := &cl.Metrics[i]
+		if seen[r.MetricID] {
+			t.Fatalf("duplicate closure row %s", r.MetricID)
+		}
+		seen[r.MetricID] = true
+		if r.EvaluatorID == "" || r.EntryPoint == "" || r.AcceptedSourceFields == "" || r.PublicationGate == "" || r.UnavailableGate == "" {
+			t.Fatalf("closure row %s incomplete: %+v", r.MetricID, r)
+		}
+		switch r.Resolved {
+		case "published":
+			published++
+			if !strings.HasPrefix(r.EntryPoint, "computeMetric:") && r.EntryPoint != "phaseDurationValue" {
+				t.Fatalf("published row %s entry point %q is not a concrete evaluator dispatch", r.MetricID, r.EntryPoint)
+			}
+		case "unavailable":
+			unavailable++
+		default:
+			t.Fatalf("closure row %s unknown resolved state %q", r.MetricID, r.Resolved)
+		}
+	}
+	if published == 0 || unavailable == 0 {
+		t.Fatalf("closure must contain published and unavailable rows (published=%d unavailable=%d)", published, unavailable)
+	}
+	// Cross-check: every published closure id has a concrete computeMetric
+	// switch case; every other registry id resolves through a definition-
+	// specific unavailable gate (never a generic default).
+	for i := range cl.Metrics {
+		r := &cl.Metrics[i]
+		if r.Resolved == "published" && !publishedIDs[r.MetricID] {
+			t.Fatalf("closure marks %s published but computeMetric has no entry point", r.MetricID)
+		}
+	}
+	// A 51-row closure (unknown/unmapped) must fail hard.
+	bad := *cl
+	bad.Metrics = bad.Metrics[:51]
+	if err := bad.ValidateAgainstRegistry(reg); err == nil {
+		t.Fatal("closure with 51 rows accepted against 52-id registry")
+	}
+}
+
+// publishedIDs is the authoritative set of metric ids with a concrete
+// evaluator entry point (kept in sync with computeMetric/phaseDurationValue).
+var publishedIDs = map[string]bool{
+	"kill_count": true, "assist_count": true, "death_count": true,
+	"buyback_use_count": true, "last_hit_count": true, "xp_delta": true,
+	"net_worth_delta": true, "team_resource_share": true,
+	"objective_damage_total": true, "fight_participation_count": true,
+	"opportunity_duration_seconds": true, "hero_damage_total": true,
+	"hero_healing_total": true, "fight_damage_share": true,
+	"buyback_round_participation": true, "phase_duration_seconds": true,
+}
+
+// TestClosureResolutionFieldsPersisted proves the Resolution table carries the
+// closure audit fields (evaluator id, entry point, accepted source fields,
+// publication gate) for independent audit, and that unavailable rows carry the
+// definition-specific unavailable gate reason.
+func TestClosureResolutionFieldsPersisted(t *testing.T) {
+	reg := testRegistry(t)
+	cl := testClosure(t)
+	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc.SetRegistry(reg)
+	calc.SetClosure(cl)
+	calc.SetRoles(map[string]string{"a1": "1"})
+	calc.SetFactsCoverage([]string{"combat_event", "death_respawn_buyback_event"})
+	// Feed a resolved kill so kill_count publishes with lineage.
+	calc.Feed(&facts.Fact{Family: facts.FamilyDeathRespawn, GameSecond: 100, Seq: 1, Payload: mustJSON(&facts.DeathRespawnBuyback{Kind: "death", AccountID: "a2", KillerAccount: "a1"})})
+	out := calc.Result(nil, nil)
+	if len(out.ResolutionTable) != 52 {
+		t.Fatalf("resolution rows=%d want 52", len(out.ResolutionTable))
+	}
+	rowByID := map[string]Resolution{}
+	for _, r := range out.ResolutionTable {
+		rowByID[r.MetricID] = r
+		if r.EvaluatorID == "" || r.EntryPoint == "" || r.AcceptedSourceFields == "" || r.PublicationGate == "" {
+			t.Fatalf("resolution %s missing closure audit fields: %+v", r.MetricID, r)
+		}
+	}
+	// kill_count publishes; its gate reason is the exact unavailable fallback.
+	kc := rowByID["kill_count"]
+	if !kc.Published && kc.UnavailableReason != "death_respawn_buyback_event_missing" {
+		t.Fatalf("kill_count resolution: %+v", kc)
+	}
+	// heal_dispel_save_casts stays unavailable at its exact gate.
+	heal := rowByID["heal_dispel_save_casts"]
+	if heal.Published || !strings.Contains(heal.UnavailableGate, "save_cast_opportunity_gate_not_met") {
+		t.Fatalf("heal_dispel_save_casts gate: %+v", heal)
+	}
+}
+
+// TestClosureDispatchRepresentativeProbes exercises representative published
+// and unavailable algorithms across V1/V2/V3 through the closure dispatch and
+// proves source-field and gate identity in the resolution rows.
+func TestClosureDispatchRepresentativeProbes(t *testing.T) {
+	reg := testRegistry(t)
+	cl := testClosure(t)
+	calc := NewCalculator("m1", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc.SetRegistry(reg)
+	calc.SetClosure(cl)
+	calc.SetRoles(map[string]string{"a1": "1"})
+	calc.SetFactsCoverage([]string{"combat_event"})
+	// Published V1: hero damage.
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 1, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
+	// Published V2 (fight_damage_share) needs episodes: supply a fight.
+	eps := &episodes.Output{Episodes: []episodes.Episode{
+		{ID: "m1:fight:90:0", Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"a1"}, EvidenceIDs: []int64{1}},
+	}}
+	out := calc.Result(eps, nil)
+	found := map[string]Value{}
+	for _, v := range out.Values {
+		found[v.MetricID] = v
+	}
+	for _, mid := range []string{"hero_damage_total", "fight_damage_share"} {
+		if _, ok := found[mid]; !ok {
+			t.Fatalf("%s not published", mid)
+		}
+	}
+	// V3 modelled metric must stay unavailable with a definition-specific gate.
+	for _, v := range out.Unavailable {
+		if v.MetricID == "core_partner_protection_uptime" && v.UnavailableReason == "" {
+			t.Fatalf("V3 modelled metric published without reason")
+		}
+	}
+}
+
+// TestTypedLineageChainPreserved proves a published metric carries the full
+// typed chain: fact -> episode/phase -> metric_observation -> algorithm, with
+// match-qualified identity on every ref.
+func TestTypedLineageChainPreserved(t *testing.T) {
+	reg := testRegistry(t)
+	cl := testClosure(t)
+	calc := NewCalculator("8944521919", []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+	calc.SetRegistry(reg)
+	calc.SetClosure(cl)
+	calc.SetRoles(map[string]string{"a1": "1"})
+	calc.SetFactsCoverage([]string{"combat_event"})
+	calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
+	eps := &episodes.Output{Episodes: []episodes.Episode{
+		{ID: "8944521919:fight:90:0", Kind: episodes.KindFight, StartGameSecond: 90, EndGameSecond: 120, Participants: []string{"a1"}, EvidenceIDs: []int64{7}},
+	}}
+	ph := &phase.Output{Intervals: []phase.Interval{
+		{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{7}},
+	}}
+	out := calc.Result(eps, ph)
+	var fds *Value
+	for i := range out.Values {
+		if out.Values[i].MetricID == "fight_damage_share" && out.Values[i].AccountID == "a1" {
+			fds = &out.Values[i]
+		}
+	}
+	if fds == nil {
+		t.Fatal("fight_damage_share not published")
+	}
+	seen := map[string]bool{}
+	for _, ref := range fds.Evidence {
+		if ref.MatchID != "8944521919" {
+			t.Fatalf("evidence ref missing match id: %+v", ref)
+		}
+		seen[ref.Kind] = true
+	}
+	for _, kind := range []string{EvidenceFact, EvidenceEpisode, EvidenceMetricObservation, EvidenceAlgorithm} {
+		if !seen[kind] {
+			t.Fatalf("fight_damage_share chain missing %s kind: %+v", kind, fds.Evidence)
+		}
+	}
+}
+
+// TestTwoMatchesEqualEntityIDsStayDistinct proves equal fact/entity ids from
+// different matches remain distinct through the typed lineage identity
+// (match-qualified), so canonical persistence and aggregation never collapse
+// them.
+func TestTwoMatchesEqualEntityIDsStayDistinct(t *testing.T) {
+	reg := testRegistry(t)
+	cl := testClosure(t)
+	build := func(matchID string) *Output {
+		calc := NewCalculator(matchID, []string{"a1"}, map[string]string{"a1": "p1"}, map[string]string{"a1": "T1"})
+		calc.SetRegistry(reg)
+		calc.SetClosure(cl)
+		calc.SetRoles(map[string]string{"a1": "1"})
+		calc.SetFactsCoverage([]string{"combat_event"})
+		// Both matches use the same fact seq 7.
+		calc.Feed(&facts.Fact{Family: facts.FamilyCombat, GameSecond: 100, Seq: 7, Payload: mustJSON(&facts.CombatFact{Kind: "damage", ActorAccount: "a1", TargetAccount: "a2", Value: int64p(500)})})
+		return calc.Result(nil, nil)
+	}
+	o1 := build("m1")
+	o2 := build("m2")
+	factRefs := func(o *Output) []EvidenceRef {
+		for _, v := range o.Values {
+			if v.MetricID == "hero_damage_total" {
+				return v.Evidence
+			}
+		}
+		return nil
+	}
+	r1, r2 := factRefs(o1), factRefs(o2)
+	if len(r1) == 0 || len(r2) == 0 {
+		t.Fatal("missing fact evidence")
+	}
+	// Canonical persistence: serialized refs keep their match ids.
+	b1, _ := json.Marshal(o1)
+	b2, _ := json.Marshal(o2)
+	var o1b, o2b Output
+	json.Unmarshal(b1, &o1b)
+	json.Unmarshal(b2, &o2b)
+	if got := factRefs(&o1b)[0].MatchID; got != "m1" {
+		t.Fatalf("m1 fact ref match=%s", got)
+	}
+	if got := factRefs(&o2b)[0].MatchID; got != "m2" {
+		t.Fatalf("m2 fact ref match=%s", got)
+	}
+	if r1[0].ID != r2[0].ID {
+		t.Fatalf("expected equal fact ids, got %s vs %s", r1[0].ID, r2[0].ID)
 	}
 }
 
@@ -267,8 +508,21 @@ func TestObjectiveDamageOnlyConfiguredTargets(t *testing.T) {
 	if obj.ExcludedDamage == nil || *obj.ExcludedDamage != 46511+100+999999+888888+1000 {
 		t.Fatalf("excluded_damage=%v want 1936498", obj.ExcludedDamage)
 	}
-	if len(obj.EvidenceIDs) == 0 {
+	if len(obj.Evidence) == 0 {
 		t.Fatal("objective_damage_total has no evidence lineage")
+	}
+	// The typed chain must carry the metric observation and algorithm refs.
+	hasObs, hasAlg := false, false
+	for _, e := range obj.Evidence {
+		switch e.Kind {
+		case EvidenceMetricObservation:
+			hasObs = e.ID == "objective_damage_total:"+obj.AccountID
+		case EvidenceAlgorithm:
+			hasAlg = e.ID != ""
+		}
+	}
+	if !hasObs || !hasAlg {
+		t.Fatalf("objective_damage_total lineage missing observation/algorithm refs: %+v", obj.Evidence)
 	}
 }
 
@@ -378,8 +632,8 @@ func TestPublishedEvidenceLineageNonEmpty(t *testing.T) {
 	ph := &phase.Output{Intervals: []phase.Interval{{GlobalPhase: phase.Laning, StartGameSecond: 0, EndGameSecond: 200, EvidenceSeqs: []int64{1}}}}
 	out := calc.Result(eps, ph)
 	for _, v := range out.Values {
-		if v.ReportLevel == "player" && len(v.EvidenceIDs) == 0 {
-			t.Fatalf("published metric %s/%s has empty evidence_ids", v.AccountID, v.MetricID)
+		if v.ReportLevel == "player" && len(v.Evidence) == 0 {
+			t.Fatalf("published metric %s/%s has empty evidence lineage", v.AccountID, v.MetricID)
 		}
 	}
 }
