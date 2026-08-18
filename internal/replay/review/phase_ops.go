@@ -2,6 +2,7 @@ package review
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -23,21 +24,28 @@ type PhaseInterval struct {
 type PhaseOp string
 
 const (
-	OpAccept  PhaseOp = "accept"  // confirm a machine boundary unchanged
-	OpMove    PhaseOp = "move"    // change boundary start/end
+	OpAccept  PhaseOp = "accept"  // confirm a current boundary unchanged
+	OpMove    PhaseOp = "move"    // change one shared boundary, adjust both neighbors
 	OpRelabel PhaseOp = "relabel" // change only the phase label
-	OpAdd     PhaseOp = "add"     // insert a new interval
-	OpDelete  PhaseOp = "delete"  // remove an interval
+	OpAdd     PhaseOp = "add"     // subdivide/replace an already covered range
+	OpDelete  PhaseOp = "delete"  // absorb into an explicitly selected adjacent interval
 	OpSplit   PhaseOp = "split"   // split one interval at a boundary
-	OpMerge   PhaseOp = "merge"   // merge two adjacent intervals
+	OpMerge   PhaseOp = "merge"   // merge two adjacent intervals with an explicit label
 )
 
 // ValidPhases are the only legal phase labels.
 var ValidPhases = []string{"laning", "midgame", "decisive"}
 
+// PhaseOpShapeVersion is the explicit request-shape contract. It is bumped
+// whenever an operation's parameter shape changes so that a persisted v2
+// correction can be replayed deterministically.
+const PhaseOpShapeVersion = "phase-op.v2"
+
 // ParseEventRef normalizes a phase interval reference. Accepted forms:
 //
 //	"interval@123-456", "interval@123", "123-456". Returns (start, end, ok).
+//	An open-end ref ("interval@123") resolves against the current stream
+//	(spec requirement: every event_ref resolves against the current stream).
 func ParseEventRef(ref string) (int, int, bool) {
 	s := strings.TrimSpace(ref)
 	s = strings.TrimPrefix(s, "interval@")
@@ -53,7 +61,7 @@ func ParseEventRef(ref string) (int, int, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	return st, -1, true // open end; caller resolves against machine intervals
+	return st, -1, true // open end; caller resolves against the current stream
 }
 
 // CanonicalEventRef builds the canonical interval reference.
@@ -61,22 +69,34 @@ func CanonicalEventRef(iv PhaseInterval) string {
 	return fmt.Sprintf("interval@%d-%d", iv.StartGameSecond, iv.EndGameSecond)
 }
 
-// PhaseOpReq is the typed phase-review mutation payload.
+// PhaseOpReq is the typed phase-review mutation payload. EventRef and
+// merge_right/absorb_into always resolve against the current effective stream
+// (never against phases.json once an overlay exists).
 type PhaseOpReq struct {
 	MatchID string  `json:"match_id"`
 	Author  string  `json:"author"`
 	Reason  string  `json:"reason"`
 	Op      PhaseOp `json:"operation"`
-	// EventRef is the target machine interval for accept/move/relabel/
-	// delete/split, or the merge-left interval for merge.
+	// ShapeVersion pins the request-shape contract; empty defaults to v2.
+	ShapeVersion string `json:"shape_version,omitempty"`
+	// EventRef is the target current interval for accept/move/relabel/
+	// delete/split, or the merge-left/absorbing interval for merge/delete.
 	EventRef string `json:"event_ref"`
-	// Effective is the resulting interval for accept/move/relabel/add.
+	// Effective is the resulting interval for accept/move/relabel/add/merge.
 	Effective *PhaseInterval `json:"effective_value,omitempty"`
 	// SplitSecond is the boundary second for split.
 	SplitSecond *int `json:"split_second,omitempty"`
-	// MergeRight is the second interval to merge for merge.
+	// MergeRight is the second adjacent interval to merge for merge.
 	MergeRight string `json:"merge_right,omitempty"`
-	// EligibleSeconds bounds validation (match end).
+	// AbsorbInto is the explicitly selected adjacent interval that absorbs the
+	// deleted interval for delete.
+	AbsorbInto string `json:"absorb_into,omitempty"`
+	// EvidenceIDs links the correction to supporting fact/episode/phase
+	// lineage identifiers.
+	EvidenceIDs []string `json:"evidence_ids,omitempty"`
+	// EligibleSeconds is the authoritative match-end bound for validation. It
+	// is always resolved server-side from phases.json; the client value is
+	// ignored in favor of the authoritative one.
 	EligibleSeconds int `json:"eligible_seconds,omitempty"`
 }
 
@@ -101,26 +121,42 @@ func ValidateIntervalShape(iv *PhaseInterval, eligible int) error {
 	if iv.StartGameSecond < 0 || iv.EndGameSecond <= iv.StartGameSecond {
 		return fmt.Errorf("invalid_interval_bounds:%d-%d", iv.StartGameSecond, iv.EndGameSecond)
 	}
-	if eligible > 0 && iv.EndGameSecond > eligible {
-		return fmt.Errorf("interval_exceeds_eligible_seconds:%d>%d", iv.EndGameSecond, eligible)
+	if eligible > 0 && (iv.StartGameSecond < 0 || iv.EndGameSecond > eligible) {
+		return fmt.Errorf("interval_exceeds_eligible_seconds:%d-%d (eligible %d)", iv.StartGameSecond, iv.EndGameSecond, eligible)
 	}
 	return nil
 }
 
-// PhaseOverlay applies typed operations to a machine interval stream and
-// returns the validated effective stream (or an error). Machine intervals are
-// never mutated. Overlap/gap/order and official-phase invariants are enforced.
-type PhaseOverlay struct {
-	Machine []PhaseInterval
+// ErrStalePrecondition is the sentinel for a failed current-state
+// precondition: the operation references a target that no longer exists in
+// the current effective stream. The API maps it to 409 (conflict) rather than
+// 400 so a stale client never silently succeeds against a moved stream.
+var ErrStalePrecondition = errors.New("stale_current_state_precondition")
+
+// IsStale reports whether an Apply error is a stale-precondition failure.
+func IsStale(err error) bool { return errors.Is(err, ErrStalePrecondition) }
+
+func staleErrorf(format string, args ...interface{}) error {
+	return fmt.Errorf("%w: %s", ErrStalePrecondition, fmt.Sprintf(format, args...))
 }
 
-// FromJSON decodes machine intervals from raw JSON messages.
+// PhaseOverlay applies typed operations to a base stream (the current
+// effective stream when one exists, otherwise the immutable machine stream).
+// Machine intervals are never mutated; each operation is one atomic partition
+// transform and the resulting stream is validated before it is returned.
+type PhaseOverlay struct {
+	// Base is the current stream the operation addresses. It is never
+	// mutated; Apply always returns a fresh validated copy.
+	Base []PhaseInterval
+}
+
+// FromJSON decodes intervals from raw JSON messages.
 func FromJSON(raw []json.RawMessage) ([]PhaseInterval, error) {
 	out := make([]PhaseInterval, 0, len(raw))
 	for _, b := range raw {
 		var iv PhaseInterval
 		if err := json.Unmarshal(b, &iv); err != nil {
-			return nil, fmt.Errorf("decode machine interval: %w", err)
+			return nil, fmt.Errorf("decode phase interval: %w", err)
 		}
 		out = append(out, iv)
 	}
@@ -140,152 +176,324 @@ func ToJSON(intervals []PhaseInterval) []json.RawMessage {
 }
 
 // Apply runs one typed operation and returns the new effective stream. The
-// machine stream is preserved; the returned stream is validated.
+// base stream is preserved; the returned stream is validated against the
+// authoritative eligible_seconds. A reference that cannot be resolved against
+// the current stream fails closed with ErrStalePrecondition.
 func (o *PhaseOverlay) Apply(req PhaseOpReq) ([]PhaseInterval, error) {
-	work := append([]PhaseInterval(nil), o.Machine...)
-	sort.Slice(work, func(i, j int) bool { return work[i].StartGameSecond < work[j].StartGameSecond })
 	eligible := req.EligibleSeconds
 	if eligible <= 0 {
-		for _, iv := range work {
-			if iv.EndGameSecond > eligible {
-				eligible = iv.EndGameSecond
-			}
-		}
+		return nil, fmt.Errorf("eligible_seconds_required")
 	}
+	work := append([]PhaseInterval(nil), o.Base...)
+	sort.Slice(work, func(i, j int) bool { return work[i].StartGameSecond < work[j].StartGameSecond })
+	if len(work) == 0 {
+		return nil, fmt.Errorf("empty_phase_stream")
+	}
+	var err error
 	switch req.Op {
 	case OpAccept:
-		// Confirm a machine boundary; effective equals machine (no change).
-		if req.EventRef == "" {
-			return nil, fmt.Errorf("event_ref_required")
-		}
-		st, _, ok := ParseEventRef(req.EventRef)
-		if !ok {
-			return nil, fmt.Errorf("invalid_event_ref:%s", req.EventRef)
-		}
-		if !o.hasInterval(work, st) {
-			return nil, fmt.Errorf("machine_interval_not_found:%s", req.EventRef)
-		}
-		return work, nil
-	case OpMove, OpRelabel:
-		if req.EventRef == "" || req.Effective == nil {
-			return nil, fmt.Errorf("event_ref_and_effective_required")
-		}
-		if err := ValidateIntervalShape(req.Effective, eligible); err != nil {
-			return nil, err
-		}
-		st, _, ok := ParseEventRef(req.EventRef)
-		if !ok {
-			return nil, fmt.Errorf("invalid_event_ref:%s", req.EventRef)
-		}
-		idx := o.indexOf(work, st)
-		if idx < 0 {
-			return nil, fmt.Errorf("machine_interval_not_found:%s", req.EventRef)
-		}
-		replaced := *req.Effective
-		replaced.EventRef = CanonicalEventRef(replaced)
-		work[idx] = replaced
-	case OpAdd:
-		if req.Effective == nil {
-			return nil, fmt.Errorf("effective_interval_required")
-		}
-		if err := ValidateIntervalShape(req.Effective, eligible); err != nil {
-			return nil, err
-		}
-		work = append(work, *req.Effective)
-	case OpDelete:
-		if req.EventRef == "" {
-			return nil, fmt.Errorf("event_ref_required")
-		}
-		st, _, ok := ParseEventRef(req.EventRef)
-		if !ok {
-			return nil, fmt.Errorf("invalid_event_ref:%s", req.EventRef)
-		}
-		idx := o.indexOf(work, st)
-		if idx < 0 {
-			return nil, fmt.Errorf("machine_interval_not_found:%s", req.EventRef)
-		}
-		work = append(work[:idx], work[idx+1:]...)
+		err = o.applyAccept(work, req)
+	case OpRelabel:
+		err = o.applyRelabel(work, req)
 	case OpSplit:
-		if req.EventRef == "" || req.SplitSecond == nil {
-			return nil, fmt.Errorf("event_ref_and_split_second_required")
-		}
-		st, _, ok := ParseEventRef(req.EventRef)
-		if !ok {
-			return nil, fmt.Errorf("invalid_event_ref:%s", req.EventRef)
-		}
-		idx := o.indexOf(work, st)
-		if idx < 0 {
-			return nil, fmt.Errorf("machine_interval_not_found:%s", req.EventRef)
-		}
-		s := *req.SplitSecond
-		if s <= work[idx].StartGameSecond || s >= work[idx].EndGameSecond {
-			return nil, fmt.Errorf("invalid_split_second:%d outside %d-%d", s, work[idx].StartGameSecond, work[idx].EndGameSecond)
-		}
-		left := work[idx]
-		right := work[idx]
-		left.EndGameSecond = s
-		right.StartGameSecond = s
-		right.RoundIndex = work[idx].RoundIndex
-		work = append(work[:idx], append([]PhaseInterval{left, right}, work[idx+1:]...)...)
+		work, err = o.applySplit(work, req)
 	case OpMerge:
-		if req.EventRef == "" || req.MergeRight == "" {
-			return nil, fmt.Errorf("event_ref_and_merge_right_required")
-		}
-		ls, _, ok := ParseEventRef(req.EventRef)
-		if !ok {
-			return nil, fmt.Errorf("invalid_event_ref:%s", req.EventRef)
-		}
-		rs, _, ok2 := ParseEventRef(req.MergeRight)
-		if !ok2 {
-			return nil, fmt.Errorf("invalid_merge_right:%s", req.MergeRight)
-		}
-		li := o.indexOf(work, ls)
-		ri := o.indexOf(work, rs)
-		if li < 0 || ri < 0 {
-			return nil, fmt.Errorf("machine_interval_not_found:%s,%s", req.EventRef, req.MergeRight)
-		}
-		if li > ri {
-			li, ri = ri, li
-		}
-		// Adjacency required; merge into one interval.
-		if work[li].EndGameSecond != work[ri].StartGameSecond {
-			return nil, fmt.Errorf("merge_intervals_not_adjacent:%d-%d != %d-%d",
-				work[li].StartGameSecond, work[li].EndGameSecond,
-				work[ri].StartGameSecond, work[ri].EndGameSecond)
-		}
-		if work[li].GlobalPhase != work[ri].GlobalPhase {
-			return nil, fmt.Errorf("merge_phase_mismatch:%s vs %s", work[li].GlobalPhase, work[ri].GlobalPhase)
-		}
-		merged := work[li]
-		merged.EndGameSecond = work[ri].EndGameSecond
-		work = append(work[:li], append([]PhaseInterval{merged}, work[ri+1:]...)...)
+		work, err = o.applyMerge(work, req)
+	case OpMove:
+		err = o.applyMove(work, req)
+	case OpAdd:
+		work, err = o.applyAdd(work, req)
+	case OpDelete:
+		work, err = o.applyDelete(work, req)
 	default:
 		return nil, fmt.Errorf("unknown_phase_operation:%s", req.Op)
 	}
-	if err := validateStream(work); err != nil {
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStream(work, eligible); err != nil {
 		return nil, err
 	}
 	return work, nil
 }
 
-func (o *PhaseOverlay) hasInterval(intervals []PhaseInterval, start int) bool {
-	return o.indexOf(intervals, start) >= 0
+// applyAccept records acceptance of the current target without changing the
+// stream. The full stream is still validated.
+func (o *PhaseOverlay) applyAccept(work []PhaseInterval, req PhaseOpReq) error {
+	idx, _, ok := o.findByRef(work, req.EventRef)
+	if !ok {
+		return staleErrorf("machine_interval_not_found:%s", req.EventRef)
+	}
+	_ = idx
+	return nil
 }
 
-func (o *PhaseOverlay) indexOf(intervals []PhaseInterval, start int) int {
-	for i := range intervals {
-		if intervals[i].StartGameSecond == start {
-			return i
+// applyRelabel changes only the selected interval label; boundaries must be
+// unchanged.
+func (o *PhaseOverlay) applyRelabel(work []PhaseInterval, req PhaseOpReq) error {
+	idx, target, ok := o.findByRef(work, req.EventRef)
+	if !ok {
+		return staleErrorf("machine_interval_not_found:%s", req.EventRef)
+	}
+	if req.Effective == nil {
+		return fmt.Errorf("effective_interval_required")
+	}
+	if req.Effective.StartGameSecond != target.StartGameSecond || req.Effective.EndGameSecond != target.EndGameSecond {
+		return fmt.Errorf("relabel_must_not_change_boundaries:want %d-%d got %d-%d",
+			target.StartGameSecond, target.EndGameSecond,
+			req.Effective.StartGameSecond, req.Effective.EndGameSecond)
+	}
+	if err := ValidatePhaseLabel(req.Effective.GlobalPhase); err != nil {
+		return err
+	}
+	target.GlobalPhase = req.Effective.GlobalPhase
+	target.EventRef = CanonicalEventRef(target)
+	work[idx] = target
+	return nil
+}
+
+// applySplit divides the selected current interval at the requested second.
+func (o *PhaseOverlay) applySplit(work []PhaseInterval, req PhaseOpReq) ([]PhaseInterval, error) {
+	idx, target, ok := o.findByRef(work, req.EventRef)
+	if !ok {
+		return nil, staleErrorf("machine_interval_not_found:%s", req.EventRef)
+	}
+	if req.SplitSecond == nil {
+		return nil, fmt.Errorf("split_second_required")
+	}
+	s := *req.SplitSecond
+	if s <= target.StartGameSecond || s >= target.EndGameSecond {
+		return nil, fmt.Errorf("invalid_split_second:%d outside %d-%d", s, target.StartGameSecond, target.EndGameSecond)
+	}
+	left := target
+	right := target
+	left.EndGameSecond = s
+	right.StartGameSecond = s
+	left.EventRef = CanonicalEventRef(left)
+	right.EventRef = CanonicalEventRef(right)
+	out := append([]PhaseInterval(nil), work[:idx]...)
+	out = append(out, left, right)
+	out = append(out, work[idx+1:]...)
+	return out, nil
+}
+
+// applyMerge joins two adjacent current intervals with an explicit,
+// deterministic resulting label (the request label, or the left interval's
+// label when none is supplied).
+func (o *PhaseOverlay) applyMerge(work []PhaseInterval, req PhaseOpReq) ([]PhaseInterval, error) {
+	li, l, ok := o.findByRef(work, req.EventRef)
+	if !ok {
+		return nil, staleErrorf("machine_interval_not_found:%s", req.EventRef)
+	}
+	ri, r, ok2 := o.findByRef(work, req.MergeRight)
+	if !ok2 {
+		return nil, staleErrorf("machine_interval_not_found:%s", req.MergeRight)
+	}
+	if li == ri {
+		return nil, fmt.Errorf("merge_requires_two_distinct_intervals")
+	}
+	if li > ri {
+		li, ri = ri, li
+		l, r = r, l
+	}
+	if l.EndGameSecond != r.StartGameSecond {
+		return nil, fmt.Errorf("merge_intervals_not_adjacent:%d-%d != %d-%d",
+			l.StartGameSecond, l.EndGameSecond, r.StartGameSecond, r.EndGameSecond)
+	}
+	label := l.GlobalPhase
+	if req.Effective != nil && req.Effective.GlobalPhase != "" {
+		label = req.Effective.GlobalPhase
+	}
+	if err := ValidatePhaseLabel(label); err != nil {
+		return nil, err
+	}
+	merged := PhaseInterval{
+		StartGameSecond: l.StartGameSecond,
+		EndGameSecond:   r.EndGameSecond,
+		GlobalPhase:     label,
+		RoundIndex:      l.RoundIndex,
+		EventRef:        CanonicalEventRef(PhaseInterval{StartGameSecond: l.StartGameSecond, EndGameSecond: r.EndGameSecond}),
+	}
+	out := append([]PhaseInterval(nil), work[:li]...)
+	out = append(out, merged)
+	out = append(out, work[ri+1:]...)
+	return out, nil
+}
+
+// applyMove changes one shared boundary and adjusts both neighboring
+// intervals together. The target's other boundary and its label are kept.
+func (o *PhaseOverlay) applyMove(work []PhaseInterval, req PhaseOpReq) error {
+	idx, target, ok := o.findByRef(work, req.EventRef)
+	if !ok {
+		return staleErrorf("machine_interval_not_found:%s", req.EventRef)
+	}
+	if req.Effective == nil {
+		return fmt.Errorf("effective_interval_required")
+	}
+	eff := req.Effective
+	if eff.GlobalPhase != "" && eff.GlobalPhase != target.GlobalPhase {
+		return fmt.Errorf("move_must_not_relabel:%s vs %s", eff.GlobalPhase, target.GlobalPhase)
+	}
+	movedStart := eff.StartGameSecond != target.StartGameSecond
+	movedEnd := eff.EndGameSecond != target.EndGameSecond
+	switch {
+	case movedStart && movedEnd:
+		return fmt.Errorf("move_must_change_one_boundary_only")
+	case movedStart:
+		if idx == 0 {
+			return fmt.Errorf("move_start_boundary_no_left_neighbor")
+		}
+		left := &work[idx-1]
+		if eff.StartGameSecond <= left.StartGameSecond || eff.StartGameSecond >= target.EndGameSecond {
+			return fmt.Errorf("invalid_move_boundary:%d for %d-%d (left %d-%d)",
+				eff.StartGameSecond, target.StartGameSecond, target.EndGameSecond, left.StartGameSecond, left.EndGameSecond)
+		}
+		left.EndGameSecond = eff.StartGameSecond
+		left.EventRef = CanonicalEventRef(*left)
+		target.StartGameSecond = eff.StartGameSecond
+	case movedEnd:
+		if idx == len(work)-1 {
+			return fmt.Errorf("move_end_boundary_no_right_neighbor")
+		}
+		right := &work[idx+1]
+		if eff.EndGameSecond <= target.StartGameSecond || eff.EndGameSecond >= right.EndGameSecond {
+			return fmt.Errorf("invalid_move_boundary:%d for %d-%d (right %d-%d)",
+				eff.EndGameSecond, target.StartGameSecond, target.EndGameSecond, right.StartGameSecond, right.EndGameSecond)
+		}
+		right.StartGameSecond = eff.EndGameSecond
+		right.EventRef = CanonicalEventRef(*right)
+		target.EndGameSecond = eff.EndGameSecond
+	default:
+		return fmt.Errorf("move_boundary_unchanged")
+	}
+	target.EventRef = CanonicalEventRef(target)
+	work[idx] = target
+	return nil
+}
+
+// applyAdd inserts a labelled interval by atomically subdividing/replacing an
+// already covered range: the new interval must be contained in a single
+// current interval, which is subdivided (or replaced when it exactly matches).
+func (o *PhaseOverlay) applyAdd(work []PhaseInterval, req PhaseOpReq) ([]PhaseInterval, error) {
+	if req.Effective == nil {
+		return nil, fmt.Errorf("effective_interval_required")
+	}
+	if err := ValidateIntervalShape(req.Effective, req.EligibleSeconds); err != nil {
+		return nil, err
+	}
+	iv := *req.Effective
+	covered := -1
+	for i := range work {
+		if iv.StartGameSecond >= work[i].StartGameSecond && iv.EndGameSecond <= work[i].EndGameSecond {
+			covered = i
+			break
 		}
 	}
-	return -1
+	if covered < 0 {
+		return nil, staleErrorf("add_range_not_covered_by_single_interval:%d-%d", iv.StartGameSecond, iv.EndGameSecond)
+	}
+	orig := work[covered]
+	if iv.StartGameSecond == orig.StartGameSecond && iv.EndGameSecond == orig.EndGameSecond {
+		orig.GlobalPhase = iv.GlobalPhase
+		orig.EventRef = CanonicalEventRef(orig)
+		work[covered] = orig
+		return work, nil
+	}
+	parts := []PhaseInterval{
+		{StartGameSecond: orig.StartGameSecond, EndGameSecond: iv.StartGameSecond, GlobalPhase: orig.GlobalPhase, RoundIndex: orig.RoundIndex},
+		{StartGameSecond: iv.StartGameSecond, EndGameSecond: iv.EndGameSecond, GlobalPhase: iv.GlobalPhase, RoundIndex: orig.RoundIndex},
+		{StartGameSecond: iv.EndGameSecond, EndGameSecond: orig.EndGameSecond, GlobalPhase: orig.GlobalPhase, RoundIndex: orig.RoundIndex},
+	}
+	kept := make([]PhaseInterval, 0, len(parts))
+	for _, p := range parts {
+		if p.EndGameSecond > p.StartGameSecond {
+			p.EventRef = CanonicalEventRef(p)
+			kept = append(kept, p)
+		}
+	}
+	out := append([]PhaseInterval(nil), work[:covered]...)
+	out = append(out, kept...)
+	out = append(out, work[covered+1:]...)
+	return out, nil
 }
 
-// validateStream enforces the official phase stream invariants: ordered,
-// non-overlapping, gap-free over [0, eligible], and laning never re-enters
-// after exit.
-func validateStream(intervals []PhaseInterval) error {
+// applyDelete absorbs the selected interval into an explicitly selected
+// adjacent interval rather than leaving uncovered time. The absorbing
+// interval keeps its label and expands to cover the deleted range.
+func (o *PhaseOverlay) applyDelete(work []PhaseInterval, req PhaseOpReq) ([]PhaseInterval, error) {
+	if req.AbsorbInto == "" {
+		return nil, fmt.Errorf("absorb_into_required")
+	}
+	idx, target, ok := o.findByRef(work, req.EventRef)
+	if !ok {
+		return nil, staleErrorf("machine_interval_not_found:%s", req.EventRef)
+	}
+	ai, absorber, ok2 := o.findByRef(work, req.AbsorbInto)
+	if !ok2 {
+		return nil, staleErrorf("machine_interval_not_found:%s", req.AbsorbInto)
+	}
+	if ai == idx {
+		return nil, fmt.Errorf("absorb_into_must_be_adjacent_distinct")
+	}
+	switch {
+	case absorber.EndGameSecond == target.StartGameSecond:
+		// Absorber is the immediate left neighbor: it extends to cover the
+		// deleted interval, keeping its own label.
+		absorber.EndGameSecond = target.EndGameSecond
+		absorber.EventRef = CanonicalEventRef(absorber)
+		work[ai] = absorber
+	case absorber.StartGameSecond == target.EndGameSecond:
+		// Absorber is the immediate right neighbor: it extends left to cover
+		// the deleted interval, keeping its own label.
+		absorber.StartGameSecond = target.StartGameSecond
+		absorber.EventRef = CanonicalEventRef(absorber)
+		work[ai] = absorber
+	default:
+		return nil, fmt.Errorf("absorb_into_not_adjacent:%s to %s", req.EventRef, req.AbsorbInto)
+	}
+	// Remove the deleted interval; if it sat left of the absorber, the
+	// absorber index shifts by one after the removal.
+	out := append([]PhaseInterval(nil), work[:idx]...)
+	out = append(out, work[idx+1:]...)
+	return out, nil
+}
+
+// findByRef resolves an event_ref (open or closed) against the current stream
+// by its start second. Open-end refs resolve to the interval starting at the
+// given second.
+func (o *PhaseOverlay) findByRef(intervals []PhaseInterval, ref string) (int, PhaseInterval, bool) {
+	if ref == "" {
+		return -1, PhaseInterval{}, false
+	}
+	st, en, ok := ParseEventRef(ref)
+	if !ok {
+		return -1, PhaseInterval{}, false
+	}
+	for i := range intervals {
+		if intervals[i].StartGameSecond == st && (en < 0 || intervals[i].EndGameSecond == en) {
+			return i, intervals[i], true
+		}
+	}
+	return -1, PhaseInterval{}, false
+}
+
+// validateStream enforces the official phase stream invariants against the
+// authoritative eligible_seconds (never inferred from the maximum interval
+// end): non-empty, first start exactly 0, final end exactly eligible_seconds,
+// positive widths, sorted contiguous gap-free coverage, official phases only,
+// and laning never re-enters after exit (midgame <-> decisive re-entry is
+// permitted).
+func validateStream(intervals []PhaseInterval, eligible int) error {
+	if len(intervals) == 0 {
+		return fmt.Errorf("phase_stream_empty")
+	}
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i].StartGameSecond < intervals[j].StartGameSecond })
+	if intervals[0].StartGameSecond != 0 {
+		return fmt.Errorf("phase_stream_first_start_not_zero:%d", intervals[0].StartGameSecond)
+	}
+	if last := intervals[len(intervals)-1]; last.EndGameSecond != eligible {
+		return fmt.Errorf("phase_stream_final_end_not_eligible:%d != %d", last.EndGameSecond, eligible)
+	}
 	prevEnd := 0
 	seenLaning := false
 	sawLaningExit := false
@@ -294,7 +502,10 @@ func validateStream(intervals []PhaseInterval) error {
 		if err := ValidatePhaseLabel(iv.GlobalPhase); err != nil {
 			return err
 		}
-		if iv.StartGameSecond < prevEnd {
+		if iv.EndGameSecond <= iv.StartGameSecond {
+			return fmt.Errorf("phase_interval_zero_or_negative_width:%d-%d", iv.StartGameSecond, iv.EndGameSecond)
+		}
+		if i > 0 && iv.StartGameSecond < prevEnd {
 			return fmt.Errorf("phase_intervals_overlap:%d-%d", iv.StartGameSecond, iv.EndGameSecond)
 		}
 		if iv.StartGameSecond > prevEnd {

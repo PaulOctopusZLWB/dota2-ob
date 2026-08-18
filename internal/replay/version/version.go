@@ -30,8 +30,12 @@ const (
 	MetricsSchema = "replay.metrics.v2"
 	// ScoreSchema is the radar/score snapshot schema version.
 	ScoreSchema = "replay.score.v2"
+	// CorrectionSchemaV1 is the legacy review/correction overlay schema
+	// version; v1 documents are still readable and are migrated
+	// deterministically to the current version on load.
+	CorrectionSchemaV1 = "replay.corrections.v1"
 	// CorrectionSchema is the review/correction overlay schema version.
-	CorrectionSchema = "replay.corrections.v1"
+	CorrectionSchema = "replay.corrections.v2"
 	// RoleSchema is the nominal role registry schema version.
 	RoleSchema = "ti2026.roles.v1"
 	// ReportSchema is the match report schema version.
@@ -48,5 +52,5 @@ const (
 	// ScoreRuleVersion identifies the radar/score computation rule set.
 	ScoreRuleVersion = "ti2026.scoring.v2"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
-	CorrectionRuleVersion = "ti2026.corrections.v1"
+	CorrectionRuleVersion = "ti2026.corrections.v2"
 )

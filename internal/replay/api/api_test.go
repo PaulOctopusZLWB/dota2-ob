@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,7 +72,9 @@ func testStore(t *testing.T) *store.Store {
 			"hero_name": "npc_dota_hero_kez", "hero_id": 145, "side": side, "team": team,
 		})
 	}
-	st.WriteJSON("m1", store.ArtifactVerification, map[string]string{"state": "verified", "reason": "ok"})
+	st.WriteJSON("m1", store.ArtifactVerification, map[string]string{
+		"state": "verified", "reason": "ok", "demo_sha256_actual": "test-replay-sha256",
+	})
 	st.WriteJSON("m1", store.ArtifactIdentity, map[string]interface{}{
 		"state": "verified", "match_id": "m1",
 		"participants": parts,
@@ -82,7 +86,8 @@ func testStore(t *testing.T) *store.Store {
 	st.WriteJSON("m1", store.ArtifactClock, map[string]interface{}{"state": "calibrated", "game_duration_seconds": 100})
 	st.WriteJSON("m1", store.ArtifactFactsSummary, map[string]interface{}{"families": []interface{}{}})
 	st.WriteJSON("m1", store.ArtifactPhases, map[string]interface{}{
-		"state": "complete", "intervals": []map[string]interface{}{{"global_phase": "laning", "start_game_second": 0, "end_game_second": 100}},
+		"state": "complete", "eligible_seconds": 100, "rule_version": "ti2026.phase.v1",
+		"intervals": []map[string]interface{}{{"global_phase": "laning", "start_game_second": 0, "end_game_second": 100}},
 	})
 	st.WriteJSON("m1", store.ArtifactEpisodes, map[string]interface{}{
 		"episodes":    []interface{}{},
@@ -415,10 +420,11 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// The fixture store has a machine phase interval 0-100 (laning); the move
-	// operation relabels it to midgame via the typed op payload (boundaries
-	// kept contiguous).
-	body := `{"match_id":"m1","author":"paul","reason":"moved boundary","operation":"move","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}}`
+	// The fixture store has a machine phase interval 0-100 (laning); the
+	// relabel operation changes its label to midgame via the typed op payload
+	// (boundaries kept contiguous). The single-interval stream has no internal
+	// shared boundary, so relabel is the correct narrow persistence probe.
+	body := `{"match_id":"m1","author":"paul","reason":"relabeled on evidence","operation":"relabel","event_ref":"interval@0-100","effective_value":{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+Version+"/reviews/phase-corrections", strings.NewReader(body))
 	req.Header.Set("X-Dota2-OB-Token", "tok")
 	resp, err := http.DefaultClient.Do(req)
@@ -431,23 +437,23 @@ func TestReviewMutationWithTokenPersistsCorrection(t *testing.T) {
 	}
 	var out struct {
 		Data struct {
-			Corrections []struct {
+			PhaseCorrections []struct {
 				ID               string `json:"id"`
 				Author           string `json:"author"`
 				AlgorithmVersion string `json:"algorithm_version"`
 				ReplaySHA256     string `json:"replay_sha256"`
 				Reason           string `json:"reason"`
-			} `json:"corrections"`
+			} `json:"phase_corrections"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Data.Corrections) != 1 {
-		t.Fatalf("corrections=%d", len(out.Data.Corrections))
+	if len(out.Data.PhaseCorrections) != 1 {
+		t.Fatalf("phase_corrections=%d", len(out.Data.PhaseCorrections))
 	}
-	c := out.Data.Corrections[0]
-	if c.Author != "paul" || c.Reason == "" || c.AlgorithmVersion == "" || c.ID == "" {
+	c := out.Data.PhaseCorrections[0]
+	if c.Author != "paul" || c.Reason == "" || c.AlgorithmVersion == "" || c.ReplaySHA256 == "" || c.ID == "" {
 		t.Fatalf("correction provenance incomplete: %+v", c)
 	}
 	// Effective phase overlay persisted.
@@ -490,6 +496,309 @@ func TestReviewMutationRejectsTamperedMachineValue(t *testing.T) {
 		t.Fatalf("invalid-phase correction status=%d want 400", resp.StatusCode)
 	}
 }
+
+func cumulativePhaseIntervals() []review.PhaseInterval {
+	return []review.PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 594, GlobalPhase: "laning"},
+		{StartGameSecond: 594, EndGameSecond: 780, GlobalPhase: "midgame"},
+		{StartGameSecond: 780, EndGameSecond: 820, GlobalPhase: "decisive"},
+		{StartGameSecond: 820, EndGameSecond: 1420, GlobalPhase: "midgame"},
+		{StartGameSecond: 1420, EndGameSecond: 1474, GlobalPhase: "decisive"},
+		{StartGameSecond: 1474, EndGameSecond: 1564, GlobalPhase: "midgame"},
+		{StartGameSecond: 1564, EndGameSecond: 1609, GlobalPhase: "decisive"},
+		{StartGameSecond: 1609, EndGameSecond: 1769, GlobalPhase: "midgame"},
+		{StartGameSecond: 1769, EndGameSecond: 1799, GlobalPhase: "decisive"},
+		{StartGameSecond: 1799, EndGameSecond: 2101, GlobalPhase: "midgame"},
+		{StartGameSecond: 2101, EndGameSecond: 2141, GlobalPhase: "decisive"},
+		{StartGameSecond: 2141, EndGameSecond: 2251, GlobalPhase: "midgame"},
+		{StartGameSecond: 2251, EndGameSecond: 2294, GlobalPhase: "decisive"},
+		{StartGameSecond: 2294, EndGameSecond: 2424, GlobalPhase: "midgame"},
+		{StartGameSecond: 2424, EndGameSecond: 2454, GlobalPhase: "decisive"},
+		{StartGameSecond: 2454, EndGameSecond: 2633, GlobalPhase: "midgame"},
+		{StartGameSecond: 2633, EndGameSecond: 2705, GlobalPhase: "decisive"},
+	}
+}
+
+func addCumulativePhaseMatch(t *testing.T, st *store.Store, matchID string) []review.PhaseInterval {
+	t.Helper()
+	machine := cumulativePhaseIntervals()
+	if err := st.WriteJSON(matchID, store.ArtifactVerification, map[string]string{
+		"state": "verified", "reason": "ok", "demo_sha256_actual": "8944521919-replay-sha256",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON(matchID, store.ArtifactPhases, map[string]interface{}{
+		"schema_version": "replay.phase.v1", "rule_version": "ti2026.phase.v1",
+		"state": "complete", "eligible_seconds": 2705, "covered_seconds": 2705,
+		"intervals": machine,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteStatus(matchID, &store.StatusRecord{
+		SchemaVersion: store.StatusSchema, MatchID: matchID, Status: store.StatusVerified,
+		Publication: "published", Reason: "all_gates_pass", ArchiveState: "verified",
+		IdentityState: "verified", ClockState: "calibrated", ParseState: "complete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RebuildCatalog("2026-08-18T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	return machine
+}
+
+func postPhaseOperation(t *testing.T, baseURL string, req review.PhaseOpReq) (int, review.Review, string) {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+Version+"/reviews/phase-corrections", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpReq.Header.Set("X-Dota2-OB-Token", "tok")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var wire struct {
+		Data  json.RawMessage `json:"data"`
+		Error string          `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
+		t.Fatal(err)
+	}
+	var rv review.Review
+	if len(wire.Data) > 0 {
+		if err := json.Unmarshal(wire.Data, &rv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return resp.StatusCode, rv, wire.Error
+}
+
+func normalizePhaseStream(in []review.PhaseInterval) []review.PhaseInterval {
+	out := append([]review.PhaseInterval(nil), in...)
+	for i := range out {
+		out[i].EventRef = review.CanonicalEventRef(out[i])
+	}
+	return out
+}
+
+func equalPhaseStreams(a, b []review.PhaseInterval) bool {
+	aj, _ := json.Marshal(normalizePhaseStream(a))
+	bj, _ := json.Marshal(normalizePhaseStream(b))
+	return bytes.Equal(aj, bj)
+}
+
+func assertPhaseCoverage(t *testing.T, intervals []review.PhaseInterval, eligible int) {
+	t.Helper()
+	if len(intervals) == 0 || intervals[0].StartGameSecond != 0 || intervals[len(intervals)-1].EndGameSecond != eligible {
+		t.Fatalf("coverage endpoints: %+v", intervals)
+	}
+	end := 0
+	for i, iv := range intervals {
+		if iv.StartGameSecond != end || iv.EndGameSecond <= iv.StartGameSecond {
+			t.Fatalf("coverage at %d: previous_end=%d interval=%+v", i, end, iv)
+		}
+		end = iv.EndGameSecond
+	}
+}
+
+// TestPhaseCorrectionCumulativeAPIAndRestart runs the frozen 8944521919
+// partition shape through all seven API operations. Every request addresses
+// the prior effective stream; every success persists one complete v2
+// before/after record and exact [0,2705] coverage. Restart reproduces the
+// stream/audit, stale and invalid requests are atomic, and phases.json remains
+// byte-identical.
+func TestPhaseCorrectionCumulativeAPIAndRestart(t *testing.T) {
+	st := testStore(t)
+	matchID := "8944521919"
+	machine := addCumulativePhaseMatch(t, st, matchID)
+	phasePath := filepath.Join(st.Root, "matches", matchID, store.ArtifactPhases)
+	phaseBytesBefore, err := os.ReadFile(phasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phaseHashBefore := sha256.Sum256(phaseBytesBefore)
+
+	rv, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rv).WithSessionToken("tok")
+	ts := httptest.NewServer(srv.Handler())
+
+	operations := []review.PhaseOpReq{
+		{Op: review.OpSplit, EventRef: "interval@0-594", SplitSecond: apiIntPtr(100)},
+		{Op: review.OpRelabel, EventRef: "interval@100-594", Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 594, GlobalPhase: "midgame"}},
+		{Op: review.OpMove, EventRef: "interval@100-594", Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "midgame"}},
+		{Op: review.OpAdd, Effective: &review.PhaseInterval{StartGameSecond: 1700, EndGameSecond: 1750, GlobalPhase: "decisive"}},
+		{Op: review.OpDelete, EventRef: "interval@1700-1750", AbsorbInto: "interval@1609-1700"},
+		{Op: review.OpSplit, EventRef: "interval@780-820", SplitSecond: apiIntPtr(800)},
+		{Op: review.OpMerge, EventRef: "interval@780-800", MergeRight: "interval@800-820", Effective: &review.PhaseInterval{GlobalPhase: "decisive"}},
+		{Op: review.OpAccept, EventRef: "interval@2454-2633"},
+	}
+
+	previous := machine
+	var final review.Review
+	for i := range operations {
+		operations[i].MatchID = matchID
+		operations[i].Author = "paul"
+		operations[i].Reason = fmt.Sprintf("cumulative step %d", i+1)
+		operations[i].EvidenceIDs = []string{fmt.Sprintf("phase:%d", i+1)}
+		status, got, apiErr := postPhaseOperation(t, ts.URL, operations[i])
+		if status != http.StatusOK {
+			t.Fatalf("step %d %s status=%d error=%q", i+1, operations[i].Op, status, apiErr)
+		}
+		if len(got.PhaseCorrections) != i+1 {
+			t.Fatalf("step %d phase corrections=%d", i+1, len(got.PhaseCorrections))
+		}
+		effective, err := review.FromJSON(got.EffectivePhaseIntervals)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPhaseCoverage(t, effective, 2705)
+		pc := got.PhaseCorrections[i]
+		if pc.Operation != string(operations[i].Op) || pc.ShapeVersion != review.PhaseOpShapeVersion ||
+			pc.ReplaySHA256 == "" || pc.AlgorithmVersion == "" || pc.MachineRuleVersion == "" ||
+			len(pc.MachineValue) == 0 || len(pc.EffectiveValue) == 0 || string(pc.EffectiveValue) == "null" {
+			t.Fatalf("step %d v2 provenance incomplete: %+v", i+1, pc)
+		}
+		if !equalPhaseStreams(pc.BeforeStream, previous) || !equalPhaseStreams(pc.AfterStream, effective) {
+			t.Fatalf("step %d before/after stream mismatch", i+1)
+		}
+		persisted, err := rv.Load(matchID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(persisted.PhaseCorrections) != i+1 || len(persisted.EffectivePhaseIntervals) == 0 {
+			t.Fatalf("step %d correction/overlay not persisted together", i+1)
+		}
+		audit, err := rv.LoadAudit()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(audit.Entries) != i+1 {
+			t.Fatalf("step %d audit entries=%d", i+1, len(audit.Entries))
+		}
+		previous = effective
+		final = got
+	}
+
+	// Closed refs are exact current-state preconditions: a matching start with
+	// a tampered/stale end must be 409 and cannot mutate review or audit.
+	reviewBeforeFailure, err := os.ReadFile(rv.Path(matchID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditBeforeFailure, err := os.ReadFile(rv.AuditPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := review.PhaseOpReq{
+		MatchID: matchID, Author: "paul", Reason: "stale closed ref", Op: review.OpRelabel,
+		EventRef: "interval@100-999", Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "midgame"},
+	}
+	if status, _, apiErr := postPhaseOperation(t, ts.URL, stale); status != http.StatusConflict {
+		t.Fatalf("stale status=%d error=%q want 409", status, apiErr)
+	}
+	invalid := review.PhaseOpReq{
+		MatchID: matchID, Author: "paul", Reason: "illegal phase", Op: review.OpRelabel,
+		EventRef: "interval@100-700", Effective: &review.PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "reset"},
+	}
+	if status, _, apiErr := postPhaseOperation(t, ts.URL, invalid); status != http.StatusBadRequest {
+		t.Fatalf("invalid status=%d error=%q want 400", status, apiErr)
+	}
+	reviewAfterFailure, err := os.ReadFile(rv.Path(matchID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditAfterFailure, err := os.ReadFile(rv.AuditPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reviewBeforeFailure, reviewAfterFailure) || !bytes.Equal(auditBeforeFailure, auditAfterFailure) {
+		t.Fatal("stale/invalid mutation changed persisted review or audit")
+	}
+
+	ts.Close()
+	restartedReviews, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := restartedReviews.Load(matchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalStream, err := review.FromJSON(final.EffectivePhaseIntervals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedStream, err := review.FromJSON(restarted.EffectivePhaseIntervals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalPhaseStreams(finalStream, restartedStream) || len(restarted.PhaseCorrections) != len(operations) {
+		t.Fatalf("restart mismatch: intervals=%d corrections=%d", len(restartedStream), len(restarted.PhaseCorrections))
+	}
+	restartedAudit, err := restartedReviews.LoadAudit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restartedAudit.Entries) != len(operations) {
+		t.Fatalf("restart audit=%d", len(restartedAudit.Entries))
+	}
+	for i, entry := range restartedAudit.Entries {
+		wantOp := string(operations[len(operations)-1-i].Op)
+		if entry.Action != "phase_correction_v2" || !strings.HasPrefix(entry.Summary, wantOp+" ") {
+			t.Fatalf("audit[%d]=%+v want operation %s", i, entry, wantOp)
+		}
+	}
+
+	// A restarted API serves the same persisted review stream.
+	restartedServer := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(restartedReviews).WithSessionToken("tok")
+	ts2 := httptest.NewServer(restartedServer.Handler())
+	defer ts2.Close()
+	var queue struct {
+		Data struct {
+			Reviews []review.Review `json:"reviews"`
+		} `json:"data"`
+	}
+	if code := getJSON(t, ts2.URL+Version+"/reviews/queue", &queue); code != http.StatusOK {
+		t.Fatalf("restart queue status=%d", code)
+	}
+	found := false
+	for _, candidate := range queue.Data.Reviews {
+		if candidate.MatchID == matchID {
+			stream, err := review.FromJSON(candidate.EffectivePhaseIntervals)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equalPhaseStreams(stream, restartedStream) {
+				t.Fatal("restarted API served a different effective stream")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("restarted API omitted 8944521919 review")
+	}
+
+	phaseBytesAfter, err := os.ReadFile(phasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phaseHashAfter := sha256.Sum256(phaseBytesAfter)
+	if phaseHashBefore != phaseHashAfter || !bytes.Equal(phaseBytesBefore, phaseBytesAfter) {
+		t.Fatalf("machine phases changed: before=%x after=%x", phaseHashBefore, phaseHashAfter)
+	}
+	t.Logf("immutable phases.json sha256=%x", phaseHashAfter)
+}
+
+func apiIntPtr(v int) *int { return &v }
 
 // TestRoleOverridePersistsToAuthoritativeStore proves a role override is
 // written to the data-root override store (effective) and audited.

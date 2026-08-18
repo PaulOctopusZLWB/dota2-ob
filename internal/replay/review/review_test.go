@@ -2,8 +2,13 @@ package review
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/store"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay/version"
 )
 
 func TestAddAuthoritativePreservesMachineValue(t *testing.T) {
@@ -120,18 +125,29 @@ func TestSetReviewStatus(t *testing.T) {
 }
 
 // TestPhaseOverlayTypedOps exercises accept/move/relabel/add/delete/split/
-// merge with stream-invariant validation.
+// merge as atomic partition transforms against the current effective stream
+// (the v2 contract), with exact [0, eligible] coverage enforced at every step.
 func TestPhaseOverlayTypedOps(t *testing.T) {
 	machine := []PhaseInterval{
 		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
 		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
 		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
 	}
-	ov := &PhaseOverlay{Machine: machine}
+	eligible := 900
+	base := append([]PhaseInterval(nil), machine...)
 
-	// Relabel: change the decisive interval to midgame.
-	out, err := ov.Apply(PhaseOpReq{
-		Op: OpRelabel, EventRef: "interval@600-900",
+	// accept: records acceptance without changing the stream.
+	out, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{Op: OpAccept, EventRef: "interval@0-300", EligibleSeconds: eligible})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("accept changed the stream: %+v", out)
+	}
+
+	// relabel: changes only the selected label; machine untouched.
+	out, err = (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpRelabel, EventRef: "interval@600-900", EligibleSeconds: eligible,
 		Effective: &PhaseInterval{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "midgame"},
 	})
 	if err != nil {
@@ -140,113 +156,521 @@ func TestPhaseOverlayTypedOps(t *testing.T) {
 	if out[2].GlobalPhase != "midgame" {
 		t.Fatalf("relabel phase=%s", out[2].GlobalPhase)
 	}
-	// Machine stream untouched.
 	if machine[2].GlobalPhase != "decisive" {
 		t.Fatalf("machine mutated: %+v", machine[2])
 	}
 
-	// Split the laning interval at 150.
-	out, err = ov.Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@0-300", SplitSecond: intPtr(150)})
+	// split: divides the laning interval at 150.
+	out, err = (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@0-300", SplitSecond: intPtr(150), EligibleSeconds: eligible})
 	if err != nil {
 		t.Fatalf("split: %v", err)
 	}
 	if len(out) != 4 || out[0].EndGameSecond != 150 || out[1].StartGameSecond != 150 {
 		t.Fatalf("split result: %+v", out)
 	}
-
-	// Delete that would leave uncovered eligible seconds is rejected (gap
-	// invariant), matching the spec's "exact eligible-second coverage".
-	if _, err := ov.Apply(PhaseOpReq{Op: OpDelete, EventRef: "interval@0-300"}); err == nil {
-		t.Fatal("delete creating a coverage gap accepted")
-	}
-	if _, err := ov.Apply(PhaseOpReq{Op: OpDelete, EventRef: "interval@300-600"}); err == nil {
-		t.Fatal("interior delete creating a gap accepted")
-	}
-	// Delete is valid only when the remaining stream stays contiguous: delete
-	// the decisive interval from a stream whose tail is already right-censored
-	// by an ended segment is not expressible; instead verify a delete of a
-	// zero-width duplicate is a no-op error path by checking unknown refs.
-	if _, err := ov.Apply(PhaseOpReq{Op: OpDelete, EventRef: "interval@999-1000"}); err == nil {
-		t.Fatal("unknown delete ref accepted")
+	// Deterministic canonical refs on the split halves.
+	if out[0].EventRef != "interval@0-150" || out[1].EventRef != "interval@150-300" {
+		t.Fatalf("split canonical refs: %+v", out[:2])
 	}
 
-	// Merge two adjacent same-phase intervals: split midgame then merge back.
-	splitOut, err := ov.Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@300-600", SplitSecond: intPtr(450)})
+	// move: change one shared boundary, adjusting both neighbors.
+	moveBase := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 150, GlobalPhase: "laning"},
+		{StartGameSecond: 150, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+	}
+	out, err = (&PhaseOverlay{Base: moveBase}).Apply(PhaseOpReq{
+		Op: OpMove, EventRef: "interval@150-300", EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 150, EndGameSecond: 250, GlobalPhase: "laning"},
+	})
 	if err != nil {
-		t.Fatalf("split for merge: %v", err)
+		t.Fatalf("move: %v", err)
 	}
-	if len(splitOut) != 4 {
-		t.Fatalf("split result len=%d", len(splitOut))
+	if out[1].EndGameSecond != 250 || out[2].StartGameSecond != 250 {
+		t.Fatalf("move did not adjust both neighbors: %+v", out)
 	}
-	ov2 := &PhaseOverlay{Machine: splitOut}
-	out, err = ov2.Apply(PhaseOpReq{Op: OpMerge, EventRef: "interval@300-450", MergeRight: "interval@450-600"})
+
+	// add: subdivide an already covered range.
+	out, err = (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpAdd, EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 400, EndGameSecond: 500, GlobalPhase: "decisive"},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if len(out) != 5 || out[2].GlobalPhase != "decisive" {
+		t.Fatalf("add result: %+v", out)
+	}
+
+	// delete: absorbs into an explicitly selected adjacent interval.
+	out, err = (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpDelete, EventRef: "interval@600-900", AbsorbInto: "interval@300-600", EligibleSeconds: eligible,
+	})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(out) != 2 || out[1].StartGameSecond != 300 || out[1].EndGameSecond != 900 || out[1].GlobalPhase != "midgame" {
+		t.Fatalf("delete absorb result: %+v", out)
+	}
+
+	// merge: join two adjacent intervals with an explicit deterministic label.
+	mergeBase := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 450, GlobalPhase: "midgame"},
+		{StartGameSecond: 450, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+	}
+	out, err = (&PhaseOverlay{Base: mergeBase}).Apply(PhaseOpReq{
+		Op: OpMerge, EventRef: "interval@300-450", MergeRight: "interval@450-600",
+		Effective: &PhaseInterval{GlobalPhase: "decisive"}, EligibleSeconds: eligible,
+	})
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
-	if len(out) != 3 || out[1].StartGameSecond != 300 || out[1].EndGameSecond != 600 {
+	if out[1].StartGameSecond != 300 || out[1].EndGameSecond != 600 || out[1].GlobalPhase != "decisive" {
 		t.Fatalf("merge result: %+v", out)
-	}
-	// Non-adjacent or phase-mismatch merges are rejected.
-	if _, err := ov.Apply(PhaseOpReq{Op: OpMerge, EventRef: "interval@0-300", MergeRight: "interval@600-900"}); err == nil {
-		t.Fatal("non-adjacent merge accepted")
-	}
-	if _, err := ov.Apply(PhaseOpReq{Op: OpMerge, EventRef: "interval@300-600", MergeRight: "interval@600-900"}); err == nil {
-		t.Fatal("phase-mismatch merge accepted")
-	}
-
-	// Add a new interval.
-	out, err = ov.Apply(PhaseOpReq{
-		Op: OpAdd, Effective: &PhaseInterval{StartGameSecond: 300, EndGameSecond: 450, GlobalPhase: "midgame"},
-	})
-	if err == nil {
-		t.Fatalf("add with overlap should fail: %+v", out)
 	}
 }
 
-// TestPhaseOverlayValidation locks the invalid-state rejections: bogus phase,
-// gap, overlap, non-adjacent merge, unknown ref, bad split.
+// TestPhaseOverlayCumulativeChain proves operations compose against the prior
+// effective stream: each op is applied to the previous op's result, and
+// coverage stays exactly [0, eligible].
+func TestPhaseOverlayCumulativeChain(t *testing.T) {
+	machine := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 594, GlobalPhase: "laning"},
+		{StartGameSecond: 594, EndGameSecond: 780, GlobalPhase: "midgame"},
+		{StartGameSecond: 780, EndGameSecond: 820, GlobalPhase: "decisive"},
+		{StartGameSecond: 820, EndGameSecond: 1420, GlobalPhase: "midgame"},
+		{StartGameSecond: 1420, EndGameSecond: 1474, GlobalPhase: "decisive"},
+		{StartGameSecond: 1474, EndGameSecond: 1564, GlobalPhase: "midgame"},
+		{StartGameSecond: 1564, EndGameSecond: 1609, GlobalPhase: "decisive"},
+		{StartGameSecond: 1609, EndGameSecond: 1769, GlobalPhase: "midgame"},
+		{StartGameSecond: 1769, EndGameSecond: 1799, GlobalPhase: "decisive"},
+		{StartGameSecond: 1799, EndGameSecond: 2101, GlobalPhase: "midgame"},
+		{StartGameSecond: 2101, EndGameSecond: 2141, GlobalPhase: "decisive"},
+		{StartGameSecond: 2141, EndGameSecond: 2251, GlobalPhase: "midgame"},
+		{StartGameSecond: 2251, EndGameSecond: 2294, GlobalPhase: "decisive"},
+		{StartGameSecond: 2294, EndGameSecond: 2424, GlobalPhase: "midgame"},
+		{StartGameSecond: 2424, EndGameSecond: 2454, GlobalPhase: "decisive"},
+		{StartGameSecond: 2454, EndGameSecond: 2633, GlobalPhase: "midgame"},
+		{StartGameSecond: 2633, EndGameSecond: 2705, GlobalPhase: "decisive"},
+	}
+	eligible := 2705
+	ov := &PhaseOverlay{Base: machine}
+	cur := machine
+
+	// 1. split interval@0-594 at 100.
+	cur, err := ov.Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@0-594", SplitSecond: intPtr(100), EligibleSeconds: eligible})
+	if err != nil {
+		t.Fatalf("step1 split: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+	// The split child must be addressable on the current stream.
+	if _, ok := findStart(cur, "interval@100-594"); !ok {
+		t.Fatalf("split child missing on current stream: %+v", cur[:3])
+	}
+
+	// 2. relabel the resulting current interval.
+	ov2 := &PhaseOverlay{Base: cur}
+	cur, err = ov2.Apply(PhaseOpReq{Op: OpRelabel, EventRef: "interval@100-594", EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 100, EndGameSecond: 594, GlobalPhase: "midgame"}})
+	if err != nil {
+		t.Fatalf("step2 relabel: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+
+	// 3. move the shared boundary between the split child and its neighbor.
+	ov3 := &PhaseOverlay{Base: cur}
+	cur, err = ov3.Apply(PhaseOpReq{Op: OpMove, EventRef: "interval@100-594", EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 100, EndGameSecond: 700, GlobalPhase: "midgame"}})
+	if err != nil {
+		t.Fatalf("step3 move: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+
+	// 4. add a bounded decisive interval inside an existing midgame interval.
+	ov4 := &PhaseOverlay{Base: cur}
+	cur, err = ov4.Apply(PhaseOpReq{Op: OpAdd, EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 1700, EndGameSecond: 1750, GlobalPhase: "decisive"}})
+	if err != nil {
+		t.Fatalf("step4 add: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+
+	// 5. delete the added interval by absorbing into its left neighbor.
+	ov5 := &PhaseOverlay{Base: cur}
+	cur, err = ov5.Apply(PhaseOpReq{Op: OpDelete, EventRef: "interval@1700-1750", AbsorbInto: "interval@1609-1700", EligibleSeconds: eligible})
+	if err != nil {
+		t.Fatalf("step5 delete: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+
+	// 6. split then merge adjacent intervals.
+	ov6 := &PhaseOverlay{Base: cur}
+	cur, err = ov6.Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@780-820", SplitSecond: intPtr(800), EligibleSeconds: eligible})
+	if err != nil {
+		t.Fatalf("step6 split: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+	ov7 := &PhaseOverlay{Base: cur}
+	cur, err = ov7.Apply(PhaseOpReq{Op: OpMerge, EventRef: "interval@780-800", MergeRight: "interval@800-820",
+		Effective: &PhaseInterval{GlobalPhase: "midgame"}, EligibleSeconds: eligible})
+	if err != nil {
+		t.Fatalf("step7 merge: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+
+	// 7. accept a current boundary (no change, still validated).
+	ov8 := &PhaseOverlay{Base: cur}
+	cur, err = ov8.Apply(PhaseOpReq{Op: OpAccept, EventRef: "interval@2454-2633", EligibleSeconds: eligible})
+	if err != nil {
+		t.Fatalf("step8 accept: %v", err)
+	}
+	assertCoverage(t, cur, eligible)
+}
+
+func assertCoverage(t *testing.T, intervals []PhaseInterval, eligible int) {
+	t.Helper()
+	if len(intervals) == 0 {
+		t.Fatal("empty stream")
+	}
+	if intervals[0].StartGameSecond != 0 {
+		t.Fatalf("coverage start=%d want 0", intervals[0].StartGameSecond)
+	}
+	if intervals[len(intervals)-1].EndGameSecond != eligible {
+		t.Fatalf("coverage end=%d want %d", intervals[len(intervals)-1].EndGameSecond, eligible)
+	}
+	prevEnd := intervals[0].StartGameSecond
+	for i := range intervals {
+		iv := &intervals[i]
+		if iv.StartGameSecond != prevEnd {
+			t.Fatalf("gap at %d-%d", iv.StartGameSecond, iv.EndGameSecond)
+		}
+		prevEnd = iv.EndGameSecond
+	}
+}
+
+// TestPhaseOverlayValidation locks the invalid-state rejections: empty and
+// final-gap streams, overlap, zero width, illegal phase, laning re-entry, and
+// malformed operations.
 func TestPhaseOverlayValidation(t *testing.T) {
-	ov := &PhaseOverlay{Machine: []PhaseInterval{
+	base := []PhaseInterval{
 		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
 		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
-	}}
-	if _, err := ov.Apply(PhaseOpReq{
-		Op: OpRelabel, EventRef: "interval@300-600",
+	}
+	eligible := 900
+
+	// Bogus phase label.
+	if _, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpRelabel, EventRef: "interval@300-600", EligibleSeconds: eligible,
 		Effective: &PhaseInterval{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "bogus"},
 	}); err == nil {
 		t.Fatal("bogus phase accepted")
 	}
-	if _, err := ov.Apply(PhaseOpReq{
-		Op: OpAdd, Effective: &PhaseInterval{StartGameSecond: 601, EndGameSecond: 700, GlobalPhase: "midgame"},
+	// Relabel that changes boundaries is rejected.
+	if _, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpRelabel, EventRef: "interval@300-600", EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 300, EndGameSecond: 650, GlobalPhase: "midgame"},
 	}); err == nil {
-		t.Fatal("stream gap accepted")
+		t.Fatal("relabel changing boundaries accepted")
 	}
-	if _, err := ov.Apply(PhaseOpReq{Op: OpDelete, EventRef: "interval@999-1000"}); err == nil {
-		t.Fatal("unknown ref accepted")
+	// Add spanning a boundary (no single covering interval) is stale.
+	if _, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpAdd, EligibleSeconds: eligible,
+		Effective: &PhaseInterval{StartGameSecond: 200, EndGameSecond: 400, GlobalPhase: "midgame"},
+	}); !IsStale(err) {
+		t.Fatalf("add spanning boundary err=%v want stale", err)
 	}
-	if _, err := ov.Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@0-300", SplitSecond: intPtr(301)}); err == nil {
+	// Delete without an explicit absorber is rejected.
+	if _, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{Op: OpDelete, EventRef: "interval@300-600", EligibleSeconds: eligible}); err == nil {
+		t.Fatal("delete without absorber accepted")
+	}
+	// Delete with a non-adjacent absorber is rejected.
+	if _, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpDelete, EventRef: "interval@300-600", AbsorbInto: "interval@0-300", EligibleSeconds: eligible,
+	}); err == nil {
+		t.Fatal("non-adjacent absorber accepted")
+	}
+	// Invalid split second.
+	if _, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{Op: OpSplit, EventRef: "interval@0-300", SplitSecond: intPtr(301), EligibleSeconds: eligible}); err == nil {
 		t.Fatal("invalid split accepted")
 	}
-	if _, err := ov.Apply(PhaseOpReq{Op: OpMerge, EventRef: "interval@0-300", MergeRight: "interval@300-600"}); err == nil {
-		t.Fatal("non-adjacent/phase-mismatch merge accepted")
+	// Merge adjacent intervals with full coverage must succeed.
+	fullBase := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+	}
+	if _, err := (&PhaseOverlay{Base: fullBase}).Apply(PhaseOpReq{
+		Op: OpMerge, EventRef: "interval@300-600", MergeRight: "interval@600-900", EligibleSeconds: eligible,
+	}); err != nil {
+		// 300-600 + 600-900 are adjacent and mergeable with full coverage.
+		t.Fatalf("adjacent merge rejected: %v", err)
+	}
+
+	// Empty stream fails closed.
+	if _, err := (&PhaseOverlay{Base: nil}).Apply(PhaseOpReq{Op: OpAccept, EventRef: "interval@0-300", EligibleSeconds: eligible}); err == nil {
+		t.Fatal("empty stream accepted")
+	}
+	// Final-gap stream (does not reach eligible) is rejected even though its
+	// maximum interval end is well-formed — validation must not infer success
+	// from the max end alone.
+	finalGap := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+	}
+	if _, err := (&PhaseOverlay{Base: finalGap}).Apply(PhaseOpReq{Op: OpAccept, EventRef: "interval@300-600", EligibleSeconds: eligible}); err == nil {
+		t.Fatal("final-gap stream accepted")
 	}
 }
 
-// TestPhaseOverlayLaningNoReentry proves laning never re-enters after exit.
-func TestPhaseOverlayLaningNoReentry(t *testing.T) {
-	ov := &PhaseOverlay{Machine: []PhaseInterval{
+// TestPhaseOverlayStreamInvariants locks validateStream directly for states no
+// single operation can produce from a valid stream: overlap, zero width,
+// first-start-not-zero, final-end-not-eligible, and laning re-entry.
+func TestPhaseOverlayStreamInvariants(t *testing.T) {
+	if err := validateStream([]PhaseInterval{}, 900); err == nil {
+		t.Fatal("empty stream accepted")
+	}
+	overlap := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 400, GlobalPhase: "laning"},
+		{StartGameSecond: 200, EndGameSecond: 600, GlobalPhase: "midgame"},
+	}
+	if err := validateStream(overlap, 900); err == nil {
+		t.Fatal("overlap accepted")
+	}
+	zeroWidth := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 300, GlobalPhase: "midgame"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+	}
+	if err := validateStream(zeroWidth, 900); err == nil {
+		t.Fatal("zero width accepted")
+	}
+	notZeroStart := []PhaseInterval{
+		{StartGameSecond: 10, EndGameSecond: 300, GlobalPhase: "laning"},
+	}
+	if err := validateStream(notZeroStart, 900); err == nil {
+		t.Fatal("first start not zero accepted")
+	}
+	notEligibleEnd := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 600, GlobalPhase: "laning"},
+	}
+	if err := validateStream(notEligibleEnd, 900); err == nil {
+		t.Fatal("final end not eligible accepted")
+	}
+	illegalPhase := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "bogus"},
+	}
+	if err := validateStream(illegalPhase, 600); err == nil {
+		t.Fatal("illegal phase accepted")
+	}
+	laningReentry := []PhaseInterval{
 		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
 		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
-	}}
-	_, err := ov.Apply(PhaseOpReq{
-		Op: OpAdd, Effective: &PhaseInterval{StartGameSecond: 600, EndGameSecond: 700, GlobalPhase: "laning"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "laning"},
+	}
+	if err := validateStream(laningReentry, 900); err == nil {
+		t.Fatal("laning re-entry accepted")
+	}
+	// midgame <-> decisive re-entry is permitted.
+	reentry := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+		{StartGameSecond: 900, EndGameSecond: 1200, GlobalPhase: "midgame"},
+		{StartGameSecond: 1200, EndGameSecond: 1500, GlobalPhase: "decisive"},
+	}
+	if err := validateStream(reentry, 1500); err != nil {
+		t.Fatalf("midgame<->decisive re-entry rejected: %v", err)
+	}
+}
+
+// TestPhaseOverlayStalePreconditions proves refs that no longer exist in the
+// current stream fail closed with the stale sentinel (mapped to 409 by the
+// API).
+func TestPhaseOverlayStalePreconditions(t *testing.T) {
+	base := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+	}
+	eligible := 600
+	stale := []PhaseOpReq{
+		{Op: OpRelabel, EventRef: "interval@999-1000", EligibleSeconds: eligible,
+			Effective: &PhaseInterval{StartGameSecond: 999, EndGameSecond: 1000, GlobalPhase: "midgame"}},
+		{Op: OpRelabel, EventRef: "interval@300-999", EligibleSeconds: eligible,
+			Effective: &PhaseInterval{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"}},
+		{Op: OpDelete, EventRef: "interval@999-1000", AbsorbInto: "interval@300-600", EligibleSeconds: eligible},
+		{Op: OpMerge, EventRef: "interval@0-300", MergeRight: "interval@999-1000", EligibleSeconds: eligible},
+		{Op: OpSplit, EventRef: "interval@999-1000", SplitSecond: intPtr(50), EligibleSeconds: eligible},
+		{Op: OpAccept, EventRef: "interval@999-1000", EligibleSeconds: eligible},
+	}
+	for i, req := range stale {
+		_, err := (&PhaseOverlay{Base: base}).Apply(req)
+		if !IsStale(err) {
+			t.Fatalf("case %d err=%v want stale sentinel", i, err)
+		}
+	}
+}
+
+// TestPhaseOverlayMergeDeleteExplicitParameters proves the merge resulting
+// label and the delete absorber are explicit and deterministic.
+func TestPhaseOverlayMergeDeleteExplicitParameters(t *testing.T) {
+	eligible := 900
+	// merge defaults to the left interval's label when no explicit label.
+	base := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 450, GlobalPhase: "midgame"},
+		{StartGameSecond: 450, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+	}
+	out, err := (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpMerge, EventRef: "interval@300-450", MergeRight: "interval@450-600", EligibleSeconds: eligible,
 	})
-	if err == nil {
-		t.Fatal("laning re-entry after exit accepted")
+	if err != nil {
+		t.Fatalf("merge default label: %v", err)
+	}
+	if out[1].GlobalPhase != "midgame" {
+		t.Fatalf("merge default label=%s want midgame", out[1].GlobalPhase)
+	}
+	// Explicit label wins.
+	out, err = (&PhaseOverlay{Base: base}).Apply(PhaseOpReq{
+		Op: OpMerge, EventRef: "interval@300-450", MergeRight: "interval@450-600",
+		Effective: &PhaseInterval{GlobalPhase: "decisive"}, EligibleSeconds: eligible,
+	})
+	if err != nil {
+		t.Fatalf("merge explicit label: %v", err)
+	}
+	if out[1].GlobalPhase != "decisive" {
+		t.Fatalf("merge explicit label=%s want decisive", out[1].GlobalPhase)
+	}
+	// delete absorbing into the right neighbor keeps the right label.
+	deleteBase := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 300, GlobalPhase: "laning"},
+		{StartGameSecond: 300, EndGameSecond: 600, GlobalPhase: "midgame"},
+		{StartGameSecond: 600, EndGameSecond: 900, GlobalPhase: "decisive"},
+	}
+	out, err = (&PhaseOverlay{Base: deleteBase}).Apply(PhaseOpReq{
+		Op: OpDelete, EventRef: "interval@300-600", AbsorbInto: "interval@600-900", EligibleSeconds: eligible,
+	})
+	if err != nil {
+		t.Fatalf("delete absorb right: %v", err)
+	}
+	if out[1].StartGameSecond != 300 || out[1].EndGameSecond != 900 || out[1].GlobalPhase != "decisive" {
+		t.Fatalf("delete absorb right result: %+v", out)
 	}
 }
 
 func intPtr(v int) *int { return &v }
+
+func TestReviewDocumentMigrationFixtures(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Missing documents load as a fresh v2 review without inventing history.
+	missing, err := s.Load("missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.SchemaVersion != version.CorrectionSchema || missing.ReviewStatus != "pending" ||
+		len(missing.Corrections) != 0 || len(missing.PhaseCorrections) != 0 {
+		t.Fatalf("missing fixture: %+v", missing)
+	}
+
+	matchID := "migrate1"
+	machine := []PhaseInterval{
+		{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning"},
+		{StartGameSecond: 100, EndGameSecond: 200, GlobalPhase: "midgame"},
+	}
+	phases, err := json.Marshal(map[string]interface{}{
+		"rule_version": version.PhaseRuleVersion, "eligible_seconds": 200, "intervals": machine,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAtomic(filepath.Join(root, "matches", matchID, store.ArtifactPhases), phases); err != nil {
+		t.Fatal(err)
+	}
+	phaseMachine := json.RawMessage(`{"start_game_second":0,"end_game_second":100,"global_phase":"laning"}`)
+	phaseEffective := json.RawMessage(`{"start_game_second":0,"end_game_second":100,"global_phase":"midgame"}`)
+	roleMachine := json.RawMessage(`{"role":5}`)
+	legacy := Review{
+		SchemaVersion: version.CorrectionSchemaV1,
+		RuleVersion:   "ti2026.corrections.v1",
+		MatchID:       matchID,
+		ReviewStatus:  "in_progress",
+		Corrections: []Correction{
+			{
+				ID: "corr-migrate1-0001", SchemaVersion: version.CorrectionSchemaV1,
+				MatchID: matchID, Kind: KindPhaseInterval, Author: "paul", Reason: "legacy phase",
+				AppliedAt: "2026-08-17T00:00:00Z", AlgorithmVersion: version.PhaseRuleVersion,
+				PreviousValue: phaseMachine, EffectiveValue: phaseEffective, EventRef: "interval@0-100",
+			},
+			{
+				ID: "corr-migrate1-0002", SchemaVersion: version.CorrectionSchemaV1,
+				MatchID: matchID, Kind: KindRoleOverride, Author: "paul", Reason: "legacy role",
+				AppliedAt: "2026-08-17T00:01:00Z", AlgorithmVersion: version.RoleSchema,
+				PreviousValue: roleMachine, EffectiveValue: json.RawMessage(`{"role":4}`), EventRef: "player@42",
+			},
+		},
+	}
+	legacyJSON, err := json.Marshal(&legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAtomic(s.Path(matchID), legacyJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := s.MigrateV1(matchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.SchemaVersion != version.CorrectionSchema || migrated.RuleVersion != version.CorrectionRuleVersion {
+		t.Fatalf("migrated versions: schema=%q rule=%q", migrated.SchemaVersion, migrated.RuleVersion)
+	}
+	if len(migrated.Corrections) != 2 || len(migrated.PhaseCorrections) != 1 {
+		t.Fatalf("migrated history: corrections=%d phase_corrections=%d", len(migrated.Corrections), len(migrated.PhaseCorrections))
+	}
+	if !jsonEqual(migrated.Corrections[0].PreviousValue, phaseMachine) ||
+		!jsonEqual(migrated.Corrections[1].PreviousValue, roleMachine) {
+		t.Fatal("v1 machine truth was not preserved")
+	}
+	pc := migrated.PhaseCorrections[0]
+	if pc.Operation != "v1_migrated" || pc.ShapeVersion != "v1" || len(pc.BeforeStream) != 2 || len(pc.AfterStream) != 2 || len(pc.MachineValue) == 0 {
+		t.Fatalf("migrated phase correction incomplete: %+v", pc)
+	}
+	if len(migrated.EffectivePhaseIntervals) != 2 {
+		t.Fatalf("migrated effective stream=%d", len(migrated.EffectivePhaseIntervals))
+	}
+
+	// A persisted v2 document is idempotent: reopening/migrating it neither
+	// loses nor duplicates prior corrections.
+	v2Before, err := os.ReadFile(s.Path(matchID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := reopened.MigrateV1(matchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2After, err := os.ReadFile(s.Path(matchID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(v2Before) != string(v2After) || len(v2.Corrections) != 2 || len(v2.PhaseCorrections) != 1 {
+		t.Fatalf("v2 fixture was not idempotent: corrections=%d phase=%d bytes_equal=%v",
+			len(v2.Corrections), len(v2.PhaseCorrections), string(v2Before) == string(v2After))
+	}
+}
 
 func TestCorrectionSchemaVersion(t *testing.T) {
 	s, err := New(t.TempDir())
@@ -260,7 +684,7 @@ func TestCorrectionSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rv.SchemaVersion != "replay.corrections.v1" {
+	if rv.SchemaVersion != "replay.corrections.v2" {
 		t.Fatalf("schema=%s", rv.SchemaVersion)
 	}
 	if !strings.Contains(rv.Corrections[0].ID, "m1") {

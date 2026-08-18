@@ -98,43 +98,6 @@ func (s *Server) handleReviewsAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: audit})
 }
 
-// machinePhaseTruth resolves the authoritative machine value for a phase
-// interval correction: the machine interval (from phases.json) referenced by
-// event_ref (canonical `interval@START-END` or `START-END`), the replay
-// content hash, and the machine phase rule version. It never trusts the
-// caller-supplied previous value.
-func (s *Server) machinePhaseTruth(matchID, eventRef string) (review.MachineTruth, error) {
-	var ph phase.Output
-	if err := s.Store.ReadJSON(matchID, store.ArtifactPhases, &ph); err != nil {
-		return review.MachineTruth{}, fmt.Errorf("machine_phases_unavailable: %w", err)
-	}
-	st, _, ok := review.ParseEventRef(eventRef)
-	if !ok {
-		return review.MachineTruth{}, fmt.Errorf("invalid_event_ref:%s", eventRef)
-	}
-	var machine json.RawMessage
-	for _, iv := range ph.Intervals {
-		if iv.StartGameSecond == st {
-			ref := review.CanonicalEventRef(review.PhaseInterval{StartGameSecond: iv.StartGameSecond, EndGameSecond: iv.EndGameSecond, GlobalPhase: string(iv.GlobalPhase), RoundIndex: iv.RoundIndex})
-			b, _ := json.Marshal(map[string]interface{}{
-				"start_game_second": iv.StartGameSecond, "end_game_second": iv.EndGameSecond,
-				"global_phase": iv.GlobalPhase, "round_index": iv.RoundIndex,
-				"rule_version": iv.RuleVersion, "event_ref": ref,
-			})
-			machine = b
-			break
-		}
-	}
-	if len(machine) == 0 {
-		return review.MachineTruth{}, fmt.Errorf("machine_interval_not_found: %s", eventRef)
-	}
-	return review.MachineTruth{
-		ReplaySHA256:     s.replaySHA(matchID),
-		AlgorithmVersion: ph.RuleVersion,
-		MachineValue:     machine,
-	}, nil
-}
-
 // machineEventTruth resolves the authoritative machine value for a behavior
 // event correction from the episodes artifact.
 func (s *Server) machineEventTruth(matchID, eventRef string) (review.MachineTruth, error) {
@@ -174,11 +137,15 @@ func (s *Server) replaySHA(matchID string) string {
 }
 
 // handlePhaseCorrections applies a typed phase-review operation
-// (accept/move/relabel/add/delete/split/merge). The machine output
-// (phases.json) is never mutated; the machine value, replay SHA, and rule
-// version are resolved server-side, so a fabricated previous value is
-// rejected. The effective stream is recomputed, validated, and durably
-// persisted before a 2xx is returned.
+// (accept/move/relabel/add/delete/split/merge) cumulatively against the
+// current persisted effective phase stream. The machine output (phases.json)
+// is never mutated; it is only the fallback base for a review with no
+// effective overlay. Every event_ref resolves against that current stream, not
+// against phases.json after the first correction. The v2 correction and the
+// resulting effective stream are persisted together under one serialized
+// store operation before a 2xx is returned; a stale/tampered current-state
+// precondition fails closed with 409, and an invalid operation leaves both the
+// persisted state and the audit unchanged.
 func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -200,61 +167,35 @@ func (s *Server) handlePhaseCorrections(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "match_id_not_in_catalog")
 		return
 	}
-	// Resolve machine intervals (the immutable source for the overlay).
+	// Resolve the authoritative machine phase context (eligible_seconds, rule
+	// version, replay SHA, immutable machine intervals) from phases.json.
 	var ph phase.Output
 	if err := s.Store.ReadJSON(req.MatchID, store.ArtifactPhases, &ph); err != nil {
 		writeErr(w, http.StatusBadRequest, "machine_phases_unavailable")
 		return
 	}
-	machine := []review.PhaseInterval{}
+	machine := make([]review.PhaseInterval, 0, len(ph.Intervals))
 	for _, iv := range ph.Intervals {
 		machine = append(machine, review.PhaseInterval{
 			StartGameSecond: iv.StartGameSecond, EndGameSecond: iv.EndGameSecond,
 			GlobalPhase: string(iv.GlobalPhase), RoundIndex: iv.RoundIndex,
 		})
 	}
-	ov := &review.PhaseOverlay{Machine: machine}
-	req.EligibleSeconds = ph.EligibleSeconds
-	effective, err := ov.Apply(req)
+	ctx := review.PhaseContext{
+		EligibleSeconds:  ph.EligibleSeconds,
+		RuleVersion:      ph.RuleVersion,
+		ReplaySHA256:     s.replaySHA(req.MatchID),
+		MachineIntervals: machine,
+	}
+	// One serialized store operation persists the v2 correction + effective
+	// stream together. Errors change neither persisted state nor the audit.
+	rv, err := s.Reviews.ApplyPhaseOp(req.MatchID, ctx, req)
 	if err != nil {
+		if review.IsStale(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	// Resolve the machine value for the correction record (authoritative).
-	var truth review.MachineTruth
-	if req.Op == review.OpAdd {
-		truth = review.MachineTruth{
-			ReplaySHA256:     s.replaySHA(req.MatchID),
-			AlgorithmVersion: ph.RuleVersion,
-			MachineValue:     json.RawMessage(`{}`),
-		}
-	} else {
-		truth, err = s.machinePhaseTruth(req.MatchID, req.EventRef)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	effJSON, _ := json.Marshal(req.Effective)
-	if len(effJSON) == 0 {
-		effJSON = json.RawMessage(`{}`)
-	}
-	rv, err := s.Reviews.AddAuthoritative(req.MatchID, review.Correction{
-		MatchID: req.MatchID, Kind: review.KindPhaseInterval, Author: req.Author,
-		Reason: req.Reason, EffectiveValue: effJSON, EventRef: req.EventRef,
-	}, truth)
-	if err != nil {
-		if strings.Contains(err.Error(), "tamper") {
-			writeErr(w, http.StatusConflict, "previous_value_mismatch_machine_truth")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "correction_persist_failed")
-		return
-	}
-	// Durably persist the validated effective overlay; propagate errors.
-	effRaw := review.ToJSON(effective)
-	if _, err := s.Reviews.SetEffectivePhases(req.MatchID, effRaw, req.Author); err != nil {
-		writeErr(w, http.StatusInternalServerError, "effective_overlay_persist_failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
