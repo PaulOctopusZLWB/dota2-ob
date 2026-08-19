@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/analytics"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/capture"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/gsi"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/lifecycle"
 	"github.com/PaulOctopusZLWB/dota2-ob/internal/operator"
@@ -145,6 +146,6 @@ func runAnalyze(sessionPath string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("analyze-session path is not a directory")
 	}
-	_, err = analytics.AnalyzeSession(abs, filepath.Base(abs))
+	_, err = capture.AnalyzeSession(abs, filepath.Base(abs))
 	return err
 }

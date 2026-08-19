@@ -39,6 +39,14 @@ func NewAnalyticsProjection(engine *analytics.Engine, sessionDir, sessionID stri
 	return analyticsProjection{engine, sessionDir, sessionID}
 }
 func (p analyticsProjection) Apply(record *session.Record) error {
-	p.engine.Observe(analytics.Normalize(record.ReceivedAt, record.Payload))
+	observation, err := MapLiveObservationV1(record)
+	if err != nil {
+		return err
+	}
+	tick, err := LegacyNormalizedTickV1(observation, currentRecordResolver(record))
+	if err != nil {
+		return err
+	}
+	p.engine.Observe(tick)
 	return analytics.WriteSummaryFiles(p.sessionDir, p.sessionID, p.engine)
 }

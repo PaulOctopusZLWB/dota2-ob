@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -22,18 +23,35 @@ import (
 )
 
 type fakeServer struct {
-	events      *[]string
+	events      *eventRecorder
 	done        chan struct{}
 	shutdownErr error
 }
 
+type eventRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *eventRecorder) append(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *eventRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
 func (s *fakeServer) Serve(net.Listener) error {
 	<-s.done
-	*s.events = append(*s.events, "serve_done")
+	s.events.append("serve_done")
 	return nil
 }
 func (s *fakeServer) Shutdown(context.Context) error {
-	*s.events = append(*s.events, "shutdown")
+	s.events.append("shutdown")
 	select {
 	case <-s.done:
 	default:
@@ -47,12 +65,12 @@ func (s *fakeServer) Close() error {
 	default:
 		close(s.done)
 	}
-	*s.events = append(*s.events, "force_close")
+	s.events.append("force_close")
 	return nil
 }
 
 type fakeCloser struct {
-	events *[]string
+	events *eventRecorder
 	err    error
 	calls  int
 }
@@ -127,16 +145,16 @@ func (w *fakeWaiter) Wait() { close(w.entered); <-w.release }
 
 func (c *fakeCloser) Close() error {
 	c.calls++
-	*c.events = append(*c.events, "store_close")
+	c.events.append("store_close")
 	return c.err
 }
 
 func TestRunnerHandlesINTAndTERMWithShutdownBeforeOnceOnlyStoreClose(t *testing.T) {
 	for _, signal := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
 		t.Run(signal.String(), func(t *testing.T) {
-			var events []string
-			server := &fakeServer{events: &events, done: make(chan struct{})}
-			closer := &fakeCloser{events: &events}
+			events := &eventRecorder{}
+			server := &fakeServer{events: events, done: make(chan struct{})}
+			closer := &fakeCloser{events: events}
 			signals := make(chan os.Signal, 2)
 			signals <- signal
 			signals <- signal
@@ -148,17 +166,18 @@ func TestRunnerHandlesINTAndTERMWithShutdownBeforeOnceOnlyStoreClose(t *testing.
 				t.Fatalf("close calls = %d", closer.calls)
 			}
 			want := []string{"shutdown", "serve_done", "store_close"}
-			if !reflect.DeepEqual(events, want) {
-				t.Fatalf("events=%v, want %v", events, want)
+			got := events.snapshot()
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("events=%v, want %v", got, want)
 			}
 		})
 	}
 }
 
 func TestRunnerReportsStableShutdownAndCloseCodes(t *testing.T) {
-	var events []string
-	server := &fakeServer{events: &events, done: make(chan struct{}), shutdownErr: errors.New("secret path")}
-	closer := &fakeCloser{events: &events, err: errors.New("secret close")}
+	events := &eventRecorder{}
+	server := &fakeServer{events: events, done: make(chan struct{}), shutdownErr: errors.New("secret path")}
+	closer := &fakeCloser{events: events, err: errors.New("secret close")}
 	signals := make(chan os.Signal, 1)
 	signals <- os.Interrupt
 	err := lifecycle.Run(server, nil, closer, nil, signals, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) })
@@ -168,9 +187,9 @@ func TestRunnerReportsStableShutdownAndCloseCodes(t *testing.T) {
 }
 
 func TestRunnerWaitsForHandlersAfterShutdownFailureBeforeClosingAppender(t *testing.T) {
-	var events []string
-	server := &fakeServer{events: &events, done: make(chan struct{}), shutdownErr: errors.New("timeout")}
-	closer := &fakeCloser{events: &events}
+	events := &eventRecorder{}
+	server := &fakeServer{events: events, done: make(chan struct{}), shutdownErr: errors.New("timeout")}
+	closer := &fakeCloser{events: events}
 	waiter := &fakeWaiter{entered: make(chan struct{}), release: make(chan struct{})}
 	signals := make(chan os.Signal, 1)
 	signals <- os.Interrupt
