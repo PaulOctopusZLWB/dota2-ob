@@ -28,14 +28,18 @@ import (
 // source/reason/timestamp are carried alongside the underlying registry
 // provenance so both are auditable.
 type Participant struct {
-	Slot        int32  `json:"slot"`
-	AccountID   string `json:"account_id"`
-	PlayerName  string `json:"player_name"`
-	HeroName    string `json:"hero_name"`
-	HeroID      int32  `json:"hero_id"`
-	Side        string `json:"side"`
-	TeamID      string `json:"team_id"`
-	TeamName    string `json:"team_name"`
+	Slot       int32  `json:"slot"`
+	AccountID  string `json:"account_id"`
+	PlayerName string `json:"player_name"`
+	HeroName   string `json:"hero_name"`
+	HeroID     int32  `json:"hero_id"`
+	Side       string `json:"side"`
+	TeamID     string `json:"team_id"`
+	TeamName   string `json:"team_name"`
+	// SourceNominalRole is the immutable nominal role from the frozen source
+	// registry; it is never overwritten by an override.
+	SourceNominalRole string `json:"source_nominal_role"`
+	// NominalRole is the current effective role (source unless overridden).
 	NominalRole string `json:"nominal_role"`
 	// RoleSourceKind is the effective source of the nominal role: the base
 	// registry source kind, or "manual_override" when an override applies.
@@ -50,6 +54,10 @@ type Participant struct {
 	OverrideApplied bool    `json:"override_applied"`
 	OverrideReason  *string `json:"override_reason,omitempty"`
 	OverrideAt      *string `json:"override_at,omitempty"`
+	// OverrideAuthor is the review author of the effective override. It never
+	// implies the manual value came from the public source registry.
+	OverrideAuthor  *string `json:"override_author,omitempty"`
+	OverrideVersion *string `json:"override_version,omitempty"`
 }
 
 // Team is the report view of one team.
@@ -80,6 +88,42 @@ type Report struct {
 	Canonical          *store.Canonical      `json:"canonical"`
 	RoleRegistry       string                `json:"role_registry_version"`
 	UnavailableReasons []string              `json:"unavailable_reasons"`
+}
+
+// OverlayRoles deterministically re-resolves each participant's role from the
+// frozen registry plus the current effective override store, updating the
+// report's source/effective role and override provenance in place. It is the
+// on-read compatibility overlay for older reports: it never rewrites immutable
+// artifacts and never fabricates provenance. RoleReg may be nil (roles left
+// as-is for auditability).
+func OverlayRoles(r *Report, matchID string, roleReg *roles.Registry, overrides *roles.OverrideFile) {
+	if r == nil || roleReg == nil {
+		return
+	}
+	for i := range r.Participants {
+		p := &r.Participants[i]
+		eff, ok := roleReg.Effective(matchID, p.AccountID, overrides)
+		if !ok {
+			continue
+		}
+		p.SourceNominalRole = eff.SourceNominalRole
+		p.NominalRole = eff.NominalRole
+		p.TeamID = eff.TeamID
+		p.TeamName = eff.TeamName
+		p.RoleSourceKind = eff.SourceKind
+		p.RoleSourceURL = eff.SourceURL
+		p.RoleSourceRetrievedAt = eff.RetrievedAt
+		p.RoleConfidence = eff.Confidence
+		p.RoleRecordVersion = eff.RecordVersion
+		p.OverrideApplied = eff.OverrideApplied
+		p.OverrideReason = eff.OverrideReason
+		p.OverrideAt = eff.OverrideAt
+		p.OverrideAuthor = eff.OverrideAuthor
+		p.OverrideVersion = eff.OverrideVersion
+		if eff.OverrideApplied {
+			p.RoleSourceKind = "manual_override"
+		}
+	}
 }
 
 // Build loads the persisted artifacts for one match from the store and merges
@@ -172,6 +216,7 @@ func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *
 				part.RoleSourceKind = "unavailable"
 				r.UnavailableReasons = append(r.UnavailableReasons, fmt.Sprintf("role:%s:registry_unavailable", p.AccountID))
 			} else if eff, ok := roleReg.Effective(matchID, p.AccountID, overrides); ok {
+				part.SourceNominalRole = eff.SourceNominalRole
 				part.NominalRole = eff.NominalRole
 				part.TeamID = eff.TeamID
 				part.TeamName = eff.TeamName
@@ -186,6 +231,8 @@ func Build(st *store.Store, matchID string, roleReg *roles.Registry, overrides *
 				part.OverrideApplied = eff.OverrideApplied
 				part.OverrideReason = eff.OverrideReason
 				part.OverrideAt = eff.OverrideAt
+				part.OverrideAuthor = eff.OverrideAuthor
+				part.OverrideVersion = eff.OverrideVersion
 				if eff.OverrideApplied {
 					part.RoleSourceKind = "manual_override"
 				}
@@ -263,9 +310,13 @@ type GateResult struct {
 }
 
 // PublicationGate verifies the role-provenance publication gate: exactly ten
-// identity-bound participants, each with a valid nominal role 1-5 and source
-// provenance (source kind and confidence present). Missing registry, missing
-// participant rows, or an invalid role fails the gate with explicit reasons.
+// identity-bound participants, each with a valid effective nominal role 1-5
+// and source provenance (source kind and confidence present), and a complete
+// frozen source roster (each source side covers roles 1-5). Coverage is
+// evaluated on the immutable SOURCE roles, because a manual override is a
+// correction to a disputed assignment and must not un-publish the match merely
+// by re-labelling one player; the override itself is separately validated for
+// manual_override source + reason + timestamp + base source provenance.
 func (r *Report) PublicationGate() GateResult {
 	g := GateResult{OK: true, Reasons: []string{}}
 	if r.Identity == nil || r.Identity.State != identity.StateVerified {
@@ -276,7 +327,7 @@ func (r *Report) PublicationGate() GateResult {
 		g.OK = false
 		g.Reasons = append(g.Reasons, fmt.Sprintf("participants=%d_want_10", len(r.Participants)))
 	}
-	rolesBySide := map[string]map[string]bool{
+	sourceRolesBySide := map[string]map[string]bool{
 		"radiant": {},
 		"dire":    {},
 	}
@@ -321,12 +372,17 @@ func (r *Report) PublicationGate() GateResult {
 			g.OK = false
 			g.Reasons = append(g.Reasons, fmt.Sprintf("role:%s:missing_confidence", p.AccountID))
 		}
-		if m, ok := rolesBySide[p.Side]; ok {
-			m[p.NominalRole] = true
+		// Roster coverage uses the immutable source role.
+		src := p.SourceNominalRole
+		if src == "" {
+			src = p.NominalRole
+		}
+		if m, ok := sourceRolesBySide[p.Side]; ok {
+			m[src] = true
 		}
 	}
-	// Exactly two participants per role per side (frozen roster contract).
-	for side, m := range rolesBySide {
+	// Frozen roster contract: each source side covers all roles 1-5.
+	for side, m := range sourceRolesBySide {
 		for _, role := range []string{"1", "2", "3", "4", "5"} {
 			if !m[role] {
 				g.OK = false

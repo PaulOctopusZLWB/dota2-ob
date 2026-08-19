@@ -32,6 +32,8 @@ const (
 	ArtifactEpisodes     = "episodes.json"
 	ArtifactPhases       = "phases.json"
 	ArtifactMetrics      = "metrics.json"
+	ArtifactScores       = "scores.json"
+	ArtifactCorrections  = "corrections.json"
 	ArtifactReport       = "report.json"
 	ArtifactStatus       = "status.json"
 	ArtifactCanonical    = "canonical.json"
@@ -87,6 +89,7 @@ type InputFingerprint struct {
 	EpisodeSchema  string `json:"episode_schema"`
 	PhaseSchema    string `json:"phase_schema"`
 	MetricsSchema  string `json:"metrics_schema"`
+	ScoreSchema    string `json:"score_schema"`
 	ReportSchema   string `json:"report_schema"`
 	RoleSchema     string `json:"role_schema"`
 	// Rule/algorithm versions of every derived artifact.
@@ -94,10 +97,15 @@ type InputFingerprint struct {
 	EpisodeRuleVersion string `json:"episode_rule_version"`
 	LaneRuleVersion    string `json:"lane_rule_version"`
 	MetricsRuleVersion string `json:"metrics_rule_version"`
+	ScoreRuleVersion   string `json:"score_rule_version"`
 	// Effective role-registry identity: registry content hash plus override
 	// content hash when overrides exist (both affect published results).
 	RoleRegistrySHA256  string `json:"role_registry_sha256"`
 	RoleOverridesSHA256 string `json:"role_overrides_sha256,omitempty"`
+	// Metric registry and scoring contract content hashes (affect published
+	// metric values and score snapshots).
+	MetricRegistrySHA256  string `json:"metric_registry_sha256,omitempty"`
+	ScoringContractSHA256 string `json:"scoring_contract_sha256,omitempty"`
 }
 
 // Canonical is the canonical artifact-tree record.
@@ -196,7 +204,39 @@ func WriteAtomic(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("store: promote %s: %w", path, err)
 	}
+	if err := SyncParent(path); err != nil {
+		return fmt.Errorf("store: sync promoted parent %s: %w", path, err)
+	}
 	return nil
+}
+
+// SyncParent durably records directory metadata after a rename or unlink.
+// On Linux, fsync of the file alone does not make the directory entry crash-
+// durable; callers must not acknowledge a promotion/removal before this
+// succeeds.
+func SyncParent(path string) error {
+	dir := filepath.Dir(path)
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open parent %s: %w", dir, err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync parent %s: %w", dir, err)
+	}
+	return nil
+}
+
+// RemoveDurable unlinks path and fsyncs its parent before returning success.
+func RemoveDurable(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return SyncParent(path)
 }
 
 // StreamWriter writes a large artifact atomically: bytes go to a temporary
@@ -253,6 +293,9 @@ func (w *StreamWriter) Close() error {
 	if err := os.Rename(name, w.path); err != nil {
 		return fmt.Errorf("store: promote %s: %w", w.path, err)
 	}
+	if err := SyncParent(w.path); err != nil {
+		return fmt.Errorf("store: sync promoted parent %s: %w", w.path, err)
+	}
 	w.done = true
 	return nil
 }
@@ -291,6 +334,16 @@ func (s *Store) ReadJSONFile(path string, v interface{}) error {
 	return nil
 }
 
+// WriteRootJSON writes a store-level JSON file (not under a match dir)
+// atomically. Used for rebuildable corpus-level catalogs.
+func (s *Store) WriteRootJSON(name string, v interface{}) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("store: marshal %s: %w", name, err)
+	}
+	return WriteAtomic(filepath.Join(s.Root, name), b)
+}
+
 // OpenArtifact opens a match artifact for streaming reads.
 func (s *Store) OpenArtifact(matchID, artifact string) (*os.File, error) {
 	return os.Open(s.ArtifactPath(matchID, artifact))
@@ -299,30 +352,43 @@ func (s *Store) OpenArtifact(matchID, artifact string) (*os.File, error) {
 // Fingerprint builds the version-complete input fingerprint for a manifest
 // entry. roleRegistrySHA and roleOverridesSHA are content hashes of the
 // effective role registry and override inputs (empty when absent).
+// metricRegistrySHA and scoringContractSHA are content hashes of the frozen
+// metric registry and scoring contract inputs.
 func Fingerprint(archiveSHA, demoSHA, matchID, roleRegistrySHA, roleOverridesSHA string) InputFingerprint {
+	return FingerprintWithContracts(archiveSHA, demoSHA, matchID, roleRegistrySHA, roleOverridesSHA, "", "")
+}
+
+// FingerprintWithContracts is Fingerprint plus the metric registry and scoring
+// contract content hashes, which deterministically invalidate stale metric and
+// score artifacts when the frozen contracts change.
+func FingerprintWithContracts(archiveSHA, demoSHA, matchID, roleRegistrySHA, roleOverridesSHA, metricRegistrySHA, scoringContractSHA string) InputFingerprint {
 	return InputFingerprint{
-		SchemaVersion:       version.IdentitySchema,
-		MatchID:             matchID,
-		ArchiveSHA256:       archiveSHA,
-		DemoSHA256:          demoSHA,
-		ParserName:          version.ParserName,
-		ParserVersion:       version.ParserVersion,
-		AdapterVersion:      version.AdapterVersion,
-		RawSchema:           version.RawSchema,
-		FactsSchema:         version.FactsSchema,
-		ClockSchema:         version.ClockSchema,
-		IdentitySchema:      version.IdentitySchema,
-		EpisodeSchema:       version.EpisodeSchema,
-		PhaseSchema:         version.PhaseSchema,
-		MetricsSchema:       version.MetricsSchema,
-		ReportSchema:        version.ReportSchema,
-		RoleSchema:          version.RoleSchema,
-		PhaseRuleVersion:    version.PhaseRuleVersion,
-		EpisodeRuleVersion:  version.EpisodeRuleVersion,
-		LaneRuleVersion:     version.LaneRuleVersion,
-		MetricsRuleVersion:  version.MetricsRuleVersion,
-		RoleRegistrySHA256:  roleRegistrySHA,
-		RoleOverridesSHA256: roleOverridesSHA,
+		SchemaVersion:         version.IdentitySchema,
+		MatchID:               matchID,
+		ArchiveSHA256:         archiveSHA,
+		DemoSHA256:            demoSHA,
+		ParserName:            version.ParserName,
+		ParserVersion:         version.ParserVersion,
+		AdapterVersion:        version.AdapterVersion,
+		RawSchema:             version.RawSchema,
+		FactsSchema:           version.FactsSchema,
+		ClockSchema:           version.ClockSchema,
+		IdentitySchema:        version.IdentitySchema,
+		EpisodeSchema:         version.EpisodeSchema,
+		PhaseSchema:           version.PhaseSchema,
+		MetricsSchema:         version.MetricsSchema,
+		ScoreSchema:           version.ScoreSchema,
+		ReportSchema:          version.ReportSchema,
+		RoleSchema:            version.RoleSchema,
+		PhaseRuleVersion:      version.PhaseRuleVersion,
+		EpisodeRuleVersion:    version.EpisodeRuleVersion,
+		LaneRuleVersion:       version.LaneRuleVersion,
+		MetricsRuleVersion:    version.MetricsRuleVersion,
+		ScoreRuleVersion:      version.ScoreRuleVersion,
+		RoleRegistrySHA256:    roleRegistrySHA,
+		RoleOverridesSHA256:   roleOverridesSHA,
+		MetricRegistrySHA256:  metricRegistrySHA,
+		ScoringContractSHA256: scoringContractSHA,
 	}
 }
 

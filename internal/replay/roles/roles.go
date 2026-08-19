@@ -54,6 +54,10 @@ type Override struct {
 	NominalRole string `json:"nominal_role"`
 	Reason      string `json:"reason"`
 	AppliedAt   string `json:"applied_at"`
+	// Author is the review author who issued the override (retained for
+	// provenance; it never implies the manual value came from the public
+	// source registry).
+	Author string `json:"author,omitempty"`
 }
 
 // OverrideFile is the persisted override set.
@@ -64,12 +68,18 @@ type OverrideFile struct {
 
 // EffectiveRole is the resolved role for one participant in one match.
 type EffectiveRole struct {
-	TournamentID    string  `json:"tournament_id"`
-	MatchID         string  `json:"match_id"`
-	TeamID          string  `json:"team_id"`
-	TeamName        string  `json:"team_name"`
-	AccountID       string  `json:"account_id"`
-	PlayerName      string  `json:"player_name"`
+	TournamentID string `json:"tournament_id"`
+	MatchID      string `json:"match_id"`
+	TeamID       string `json:"team_id"`
+	TeamName     string `json:"team_name"`
+	AccountID    string `json:"account_id"`
+	PlayerName   string `json:"player_name"`
+	// SourceNominalRole is the immutable nominal role from the frozen source
+	// registry. It is NEVER overwritten by an override, so the product can
+	// always separate the public-source role from the effective role.
+	SourceNominalRole string `json:"source_nominal_role"`
+	// NominalRole is the current effective role (source role unless a manual
+	// override applies).
 	NominalRole     string  `json:"nominal_role"`
 	SourceKind      string  `json:"source_kind"`
 	SourceURL       string  `json:"source_url"`
@@ -80,6 +90,12 @@ type EffectiveRole struct {
 	OverrideApplied bool    `json:"override_applied"`
 	OverrideReason  *string `json:"override_reason,omitempty"`
 	OverrideAt      *string `json:"override_at,omitempty"`
+	// OverrideAuthor is the review author of the effective override, when one
+	// is applied. It never implies the value came from the public source.
+	OverrideAuthor *string `json:"override_author,omitempty"`
+	// OverrideVersion is the override store schema/rule version, when an
+	// override is applied.
+	OverrideVersion *string `json:"override_version,omitempty"`
 }
 
 // LoadRegistry reads a role registry JSON file.
@@ -120,19 +136,20 @@ func (r *Registry) Effective(matchID, accountID string, overrides *OverrideFile)
 		return nil, false
 	}
 	eff := &EffectiveRole{
-		TournamentID:  r.TournamentID,
-		MatchID:       matchID,
-		TeamID:        base.teamID,
-		TeamName:      base.teamName,
-		AccountID:     accountID,
-		PlayerName:    base.playerName,
-		NominalRole:   base.nominalRole,
-		SourceKind:    base.sourceKind,
-		SourceURL:     base.sourceURL,
-		SourceLocator: base.sourceLocator,
-		RetrievedAt:   base.retrievedAt,
-		Confidence:    base.confidence,
-		RecordVersion: r.SchemaVersion,
+		TournamentID:      r.TournamentID,
+		MatchID:           matchID,
+		TeamID:            base.teamID,
+		TeamName:          base.teamName,
+		AccountID:         accountID,
+		PlayerName:        base.playerName,
+		SourceNominalRole: base.nominalRole,
+		NominalRole:       base.nominalRole,
+		SourceKind:        base.sourceKind,
+		SourceURL:         base.sourceURL,
+		SourceLocator:     base.sourceLocator,
+		RetrievedAt:       base.retrievedAt,
+		Confidence:        base.confidence,
+		RecordVersion:     r.SchemaVersion,
 	}
 	if overrides != nil {
 		for _, o := range overrides.Overrides {
@@ -150,6 +167,12 @@ func (r *Registry) Effective(matchID, accountID string, overrides *OverrideFile)
 					at := o.AppliedAt
 					eff.OverrideAt = &at
 				}
+				if o.Author != "" {
+					a := o.Author
+					eff.OverrideAuthor = &a
+				}
+				sv := version.RoleSchema
+				eff.OverrideVersion = &sv
 				break
 			}
 		}

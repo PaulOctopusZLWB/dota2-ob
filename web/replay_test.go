@@ -53,6 +53,12 @@ func TestReplayMatchPage(t *testing.T) {
 		"不可用字段",
 		"官方阶段时间线",
 		"reset",
+		// Canonical lineage links on the match page.
+		"lineageCell",
+		"lineageLink",
+		"evidence=fact:",
+		"evidence=metric_observation:",
+		"aggregation.html?id=",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay match page missing %q", want)
@@ -111,8 +117,8 @@ func TestReplayMatchPageEscapesUntrustedValues(t *testing.T) {
 		"esc(u)",
 		"esc(url)",
 		"esc(t.team_name)",
-		"esc(name ? name.player_name",
-		"esc(h)",
+		"esc(name.player_name)",
+		"esc(v.metric_id)",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("replay match page missing escaped usage %q", want)
@@ -168,6 +174,160 @@ func TestReplayCorpusPageEscapesRows(t *testing.T) {
 	} {
 		if strings.Contains(html, forbidden) {
 			t.Fatalf("replay corpus page has unescaped interpolation %q", forbidden)
+		}
+	}
+}
+
+// TestReplayPlayerPage verifies the player profile page renders the official
+// solid radar and the V3 dashed experimental layer separately, plus the score
+// decomposition and suppression states.
+func TestReplayPlayerPage(t *testing.T) {
+	data, err := os.ReadFile("replay/player.html")
+	if err != nil {
+		t.Fatalf("read replay/player.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/players/",
+		"官方实线（V1/V2）",
+		"实验虚线（V3）",
+		"官方总分",
+		"实验总分",
+		"指标分解（原始值",
+		"function esc(",
+		"function safeUrl(",
+		// Canonical lineage links + aggregation drilldown.
+		"lineageLink",
+		"聚合实体（选手锦标赛聚合",
+		"aggregation.html?id=",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay player page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay player page references external resource via %q", scheme)
+		}
+	}
+}
+
+// TestReplayAggregationPage verifies the aggregation entity view renders the
+// canonical aggregation route and its retained child lineage.
+func TestReplayAggregationPage(t *testing.T) {
+	data, err := os.ReadFile("replay/aggregation.html")
+	if err != nil {
+		t.Fatalf("read replay/aggregation.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/aggregations/",
+		"聚合实体",
+		"child_refs",
+		"data-aggregation-match-id",
+		"contract_version",
+		"metric_version",
+		"rule_version",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay aggregation page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay aggregation page references external resource via %q", scheme)
+		}
+	}
+}
+
+// TestReplayTeamPage verifies the team profile page renders the independent
+// team scoring product: official (solid) and experimental (dashed) layers,
+// separately named totals, decomposition, and per-match player rows.
+func TestReplayTeamPage(t *testing.T) {
+	data, err := os.ReadFile("replay/team.html")
+	if err != nil {
+		t.Fatalf("read replay/team.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/teams/",
+		"队伍官方总分",
+		"队伍实验总分（V3 虚线层）",
+		"官方轴分解",
+		"实验轴分解（虚线层）",
+		"指标分解（可复现显示值）",
+		"队伍聚合实体",
+		"data-aggregation-scope",
+		"player.html?id=",
+		// Suppressed layer stays visible as suppressed, never a zero polygon.
+		"已抑制",
+		"总分已抑制",
+		"renderTeamRadar",
+		"expVals",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay team page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay team page references external resource via %q", scheme)
+		}
+	}
+}
+
+// TestReplayReviewPage verifies the gold-review UI renders the correction
+// workflow: reason required, machine value preserved, session token, and
+// Chinese-first labels.
+func TestReplayReviewPage(t *testing.T) {
+	data, err := os.ReadFile("replay/review.html")
+	if err != nil {
+		t.Fatalf("read replay/review.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`lang="zh-CN"`,
+		"/api/replay/v1/reviews/queue",
+		"X-Dota2-OB-Token",
+		"机器值",
+		"有效值",
+		"校正原因（必填）",
+		"阶段边界校正",
+		"争议事件校正",
+		"机器输出永不被修改",
+		// Effective-stream selector operates on the persisted overlay.
+		"当前有效阶段流（操作目标）",
+		"机器阶段流（不可变，仅展示）",
+		"phase-ref-",
+		"effective_phase_intervals",
+		"currentEffectiveStream",
+		// Complete typed operation shapes.
+		"absorb_into",
+		"merge_right",
+		"split_second",
+		"shape_version",
+		"interval@",
+		// Operation-specific payload construction for all seven ops.
+		`case "accept"`,
+		`case "relabel"`,
+		`case "split"`,
+		`case "move"`,
+		`case "add"`,
+		`case "delete"`,
+		`case "merge"`,
+		// Only official phases are legal.
+		`VALID_PHASES = ["laning", "midgame", "decisive"]`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("replay review page missing %q", want)
+		}
+	}
+	for _, scheme := range []string{"https://", "http://", "\"//", "'//"} {
+		if strings.Contains(html, scheme) {
+			t.Fatalf("replay review page references external resource via %q", scheme)
 		}
 	}
 }

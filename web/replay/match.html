@@ -81,6 +81,33 @@ function safeUrl(v) {
   return null;
 }
 
+// lineageLink renders one typed, match-qualified lineage ref as a deep link
+// using the canonical ID/route contract (fact, episode, phase,
+// metric_observation, algorithm, aggregation). Same contract as player.html.
+function lineageLink(ref) {
+  if (!ref || !ref.kind) return "-";
+  const label = `${ref.kind}:${ref.id}`;
+  let href = null;
+  const kind = String(ref.kind);
+  if (kind === "fact") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=fact:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "episode" || kind === "phase") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=${encodeURIComponent(kind)}:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "metric_observation") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=metric_observation:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "algorithm") {
+    if (!ref.match_id) return `<span class="hint">不可用:${esc(label)}</span>`;
+    href = `match.html?id=${encodeURIComponent(ref.match_id)}&evidence=algorithm:${encodeURIComponent(ref.id)}`;
+  } else if (kind === "aggregation") {
+    href = `aggregation.html?id=${encodeURIComponent(ref.id)}`;
+  }
+  if (!href) return `<span class="hint">不可用:${esc(label)}</span>`;
+  return `<a href="${href}" data-evidence-kind="${esc(kind)}" title="match ${esc(ref.match_id || "corpus")} · ${esc(ref.rule_version || "")}">${esc(label)}</a>`;
+}
+
 async function load() {
   const id = new URLSearchParams(location.search).get("id");
   document.getElementById("match-id").textContent = id || "?";
@@ -134,9 +161,9 @@ function render(r) {
       : "-";
     pt += `<tr>
       <td class="num">${esc(p.slot)}</td>
-      <td>${esc(p.player_name)} <span class="hint">(${esc(p.account_id)})</span></td>
+      <td><a href="player.html?id=${esc(p.account_id)}">${esc(p.player_name)}</a> <span class="hint">(${esc(p.account_id)})</span></td>
       <td>${esc(p.hero_name || "-")}</td>
-      <td>${esc(p.team_name || "-")}</td>
+      <td>${p.team_id ? `<a href="team.html?id=${esc(p.team_id)}">${esc(p.team_name || p.team_id)}</a>` : esc(p.team_name || "-")}</td>
       <td class="${p.side === 'radiant' ? 'ok' : p.side === 'dire' ? 'err' : ''}">${esc(p.side || "-")}</td>
       <td><span class="role">${esc(p.nominal_role || "?")}</span>${esc(p.role_confidence || "")}</td>
       <td class="hint">${esc(p.role_source_kind || p.role_source || "-")}</td>
@@ -155,7 +182,10 @@ function render(r) {
       const label = PHRASE[iv.global_phase] || iv.global_phase;
       return `<div class="tl-seg ${cls}" style="width:${esc(w)}%" title="${esc(iv.start_game_second)}s–${esc(iv.end_game_second)}s ${esc(label)}">${w > 8 ? esc(label) : ""}</div>`;
     }).join("");
-    const phaseHint = r.phases.intervals.map(iv => `${esc(PHRASE[iv.global_phase] || iv.global_phase)}:${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s(r${esc(iv.round_index)})`).join(" · ");
+    const phaseHint = r.phases.intervals.map(iv => {
+      const ref = {kind:"phase", id:`interval@${iv.start_game_second}-${iv.end_game_second}`, match_id:r.match_id, rule_version:iv.rule_version};
+      return `${lineageLink(ref)} ${esc(PHRASE[iv.global_phase] || iv.global_phase)}:${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s(r${esc(iv.round_index)})`;
+    }).join(" · ");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">官方阶段时间线</h3>
@@ -168,7 +198,7 @@ function render(r) {
   // 核心事件（行为片段）
   if (r.episodes && r.episodes.episodes) {
     let rows = r.episodes.episodes.map(ep => `<tr>
-      <td>${esc(ep.kind)}</td><td class="num">${esc(ep.start_game_second)}s</td><td class="num">${esc(ep.end_game_second)}s</td>
+      <td>${lineageLink({kind:"episode", id:ep.id, match_id:r.match_id, rule_version:ep.rule_version})} ${esc(ep.kind)}</td><td class="num">${esc(ep.start_game_second)}s</td><td class="num">${esc(ep.end_game_second)}s</td>
       <td>${esc((ep.participants || []).join(", ") || ep.account_id || "-")}</td><td class="hint">${esc(ep.detail || "")}</td></tr>`).join("");
     const unavailEp = (r.episodes.unavailable || []).map(u => `<li>${esc(u.kind)}: ${esc(u.reason)}</li>`).join("");
     c.insertAdjacentHTML("beforeend", `
@@ -181,30 +211,112 @@ function render(r) {
 
   // V1 指标（原始值）
   if (r.metrics && r.metrics.values) {
-    const byAcct = {};
-    for (const v of r.metrics.values) {
-      (byAcct[v.account_id] = byAcct[v.account_id] || []).push(v);
-    }
-    let mrows = "";
-    for (const [acct, vals] of Object.entries(byAcct)) {
-      const name = (r.participants || []).find(p => p.account_id === acct);
-      mrows += `<tr><td>${esc(name ? name.player_name : acct)} <span class="hint">${name ? "角色" + esc(name.nominal_role || "?") : ""}</span></td>` +
-        vals.map(v => `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}</td>`).join("") + `</tr>`;
-    }
-    const headers = [...new Set(r.metrics.values.map(v => v.metric_id))];
-    const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li>${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
+    const mrows = r.metrics.values.map(v => {
+      const name = (r.participants || []).find(p => p.account_id === v.account_id);
+      const subject = name ? esc(name.player_name) + " · 角色" + esc(name.nominal_role || "?") : esc(v.account_id || "match");
+      return `<tr data-metric-id="${esc(v.metric_id)}" data-account-id="${esc(v.account_id || "match")}" data-phase="${esc(v.official_phase || "-")}"><td>${subject}</td><td>${esc(v.metric_id)}</td><td>${esc(v.official_phase || "-")}</td>`+
+        `<td class="num">${esc(v.int_value != null ? v.int_value : v.value)}</td><td class="num">${esc(v.numerator)}</td>`+
+        `<td class="num">${esc(v.denominator)}</td><td class="num">${esc(v.opportunity_count)}</td><td class="num">${esc(v.excluded_count)}</td>`+
+        `<td class="hint">${lineageCell(v)}</td></tr>`;
+    }).join("");
+    const unavailMet = (r.metrics.unavailable || []).filter(v => v.unavailable_reason).map(v => `<li data-unavailable-metric="${esc(v.metric_id)}" data-unavailable-account="${esc(v.account_id || "match")}">${esc(v.account_id)}/${esc(v.metric_id)}: ${esc(v.unavailable_reason)}</li>`).join("");
     c.insertAdjacentHTML("beforeend", `
       <div class="panel">
         <h3 style="margin-top:0">V1 直接事实（原始值）</h3>
-        <table><thead><tr><th>选手</th>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${mrows}</tbody></table>
+        <table><thead><tr><th>主体</th><th>指标</th><th>官方阶段</th><th>值</th><th>分子</th><th>分母</th><th>机会</th><th>排除</th><th>证据链</th></tr></thead><tbody>${mrows}</tbody></table>
         <details><summary>不可用指标</summary><ul class="hint">${unavailMet || "<li>无</li>"}</ul></details>
       </div>`);
   }
 
+// lineageCell renders the typed evidence links for one metric value row.
+function lineageCell(v) {
+  const refs = v.evidence || [];
+  if (!refs.length) return "-";
+  return refs.map(ref => lineageLink(ref)).join(" ");
+}
+
   // 队伍
   if (r.teams && r.teams.length) {
-    const teamRows = r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${esc(t.side)}</td><td>${esc(t.team_name)}</td><td class="hint">${esc(t.team_id)}</td><td>${esc(t.tag || "")}</td></tr>`).join("");
+    const teamRows = r.teams.map(t => `<tr><td class="${t.side === 'radiant' ? 'ok' : 'err'}">${esc(t.side)}</td><td>${t.team_id ? `<a href="team.html?id=${esc(t.team_id)}">${esc(t.team_name)}</a>` : esc(t.team_name)}</td><td class="hint">${esc(t.team_id)}</td><td>${esc(t.tag || "")}</td></tr>`).join("");
     c.insertAdjacentHTML("beforeend", `<div class="panel"><h3 style="margin-top:0">队伍</h3><table>${teamRows}</table></div>`);
+  }
+
+// 评分与雷达（官方实线 + V3 虚线）
+loadScores(r);
+renderEvidenceTarget(r);
+}
+
+// renderEvidenceTarget renders the deep-linked evidence entity when the page
+// is opened with ?evidence=kind:id. It fetches the match-qualified detail
+// route and renders the referenced fact/episode/phase/metric/algorithm, or an
+// explicit unavailable reason when the ref is stale/invalid.
+async function renderEvidenceTarget(r) {
+  const ev = new URLSearchParams(location.search).get("evidence");
+  if (!ev) return;
+  const [kind, ...rest] = ev.split(":");
+  const id = rest.join(":");
+  if (!kind || !id) return;
+  const c = document.getElementById("content");
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  panel.dataset.evidencePanel = kind;
+  panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">载入中…</p>`;
+  c.appendChild(panel);
+  let path = "";
+  if (kind === "fact") {
+    // Pass the stored canonical id through unchanged; the API accepts
+    // "fact:<seq>" directly.
+    path = `/api/replay/v1/matches/${r.match_id}/facts/${encodeURIComponent(id)}`;
+  } else if (kind === "episode") path = `/api/replay/v1/matches/${r.match_id}/episodes/${encodeURIComponent(id)}`;
+  else if (kind === "phase") path = `/api/replay/v1/matches/${r.match_id}/phases/${encodeURIComponent(id)}`;
+  else if (kind === "metric_observation") {
+    // Pass the subject-qualified canonical id through unchanged.
+    path = `/api/replay/v1/matches/${r.match_id}/metrics/${encodeURIComponent(id)}`;
+  } else if (kind === "algorithm") path = `/api/replay/v1/matches/${r.match_id}/algorithms/${encodeURIComponent(id)}`;
+  else if (kind === "aggregation") path = `/api/replay/v1/aggregations/${encodeURIComponent(id)}`;
+  else {
+    panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">不可用: 未知证据类型 ${esc(kind)}</p>`;
+    return;
+  }
+  try {
+    const resp = await fetch(path);
+    const env = await resp.json();
+    if (!resp.ok) {
+      const reason = env && (env.error || env.reason) ? (env.error || env.reason) : String(resp.status);
+      panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint" data-evidence-error="${esc(kind)}">不可用: ${esc(reason)}</p>`;
+      return;
+    }
+    panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><pre class="mono">${esc(JSON.stringify(env.data, null, 2))}</pre>`;
+  } catch (e) {
+    panel.innerHTML = `<h3 style="margin-top:0">证据定位 ${esc(kind)}</h3><p class="hint">不可用: ${esc(String(e))}</p>`;
+  }
+}
+
+async function loadScores(r) {
+  const c = document.getElementById("content");
+  try {
+    const resp = await fetch(`/api/replay/v1/matches/${r.match_id}/scores`);
+    if (resp.status === 404) return;
+    const env = await resp.json();
+    const ms = env.data;
+    if (!ms || !ms.players || !ms.players.length) return;
+    let rows = "";
+    for (const p of ms.players) {
+      const name = (r.participants || []).find(x => x.account_id === p.account_id);
+      const metrics = Object.keys(p.metrics || {}).map(k => `${esc(k)}=${Math.round(p.metrics[k].value * 100) / 100}`).join(" · ");
+      rows += `<tr>
+        <td><a href="player.html?id=${esc(p.account_id)}">${esc(name ? name.player_name : p.account_id)}</a></td>
+        <td><span class="role">${esc(p.nominal_role || "-")}</span></td>
+        <td class="hint">${esc(metrics || "-")}</td>
+      </tr>`;
+    }
+    c.insertAdjacentHTML("beforeend", `
+      <div class="panel">
+        <h3 style="margin-top:0">本场指标明细（选手锦标赛评分见选手档案）</h3>
+        <table><thead><tr><th>选手</th><th>角色</th><th>指标</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>`);
+  } catch (e) {
+    // scores are optional; ignore load errors
   }
 }
 load();
