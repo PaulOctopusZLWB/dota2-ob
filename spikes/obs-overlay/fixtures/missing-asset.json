@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "healthy", "renderSafe": true, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "draft-context",
+    "kicker": "直播洞察 · 资源降级",
+    "title": "本地图标缺失，文字证据保持可读",
+    "body": "图片请求失败时使用固定尺寸的中文占位符，不改变侧栏几何尺寸或分析文字。",
+    "evidence": "本地资源 404 · 固定占位 78×78",
+    "confidenceLabel": "安全降级",
+    "sourceLabel": "OverlayStateV1 · 本地资源",
+    "ageLabel": "更新于 1 秒前",
+    "asset": { "src": "/assets/missing-hero.webp", "alt": "缺失英雄图标", "fallback": "缺" }
+  }
+}
