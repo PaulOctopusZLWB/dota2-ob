@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -643,30 +644,99 @@ func TestV1ReviewedMigratesFailClosedAndPreservesCanonical(t *testing.T) {
 	}
 }
 
-func TestV3CategoryRevisionMigrationIsExplicitAndDeterministic(t *testing.T) {
-	s, _ := New(t.TempDir())
+func TestUsableReviewRevisionToken(t *testing.T) {
+	valid := "rev-0123456789abcdef0123456789abcdef"
+	if !IsUsableReviewRevision(valid) {
+		t.Fatalf("generated-shape token rejected: %s", valid)
+	}
+	for _, invalid := range []string{"", "legacy-v3-revision-unavailable", "rev-", "rev-0123456789abcdef0123456789abcde", "rev-0123456789abcdef0123456789abcdef0", "rev-0123456789ABCDEF0123456789ABCDEF", "rev-g123456789abcdef0123456789abcdef"} {
+		if IsUsableReviewRevision(invalid) {
+			t.Fatalf("unusable token accepted: %q", invalid)
+		}
+	}
+}
+
+func TestV3MarkerBackedSignoffFailsClosedUntilFreshDecision(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	st, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteJSON("m1", store.ArtifactCanonical, map[string]string{"tree_sha256": "immutable"}); err != nil {
+		t.Fatal(err)
+	}
+	canonicalBefore, _ := os.ReadFile(st.ArtifactPath("m1", store.ArtifactCanonical))
 	d := CategoryDecision{ID: "category-m1-0001", MachineCategory: "probe", EffectiveCategory: "probe", Decision: "confirm", MatchID: "m1", ReplaySHA256: "sha", Author: "paul", Reason: "legacy", AppliedAt: "2026-08-21T00:00:00Z"}
-	legacy := &Review{SchemaVersion: version.CorrectionSchemaV3, RuleVersion: version.CorrectionRuleVersionV4, MatchID: "m1", Corrections: []Correction{}, PhaseCorrections: []PhaseCorrectionV2{}, ReviewStatus: "reviewed", CategoryDecisions: []CategoryDecision{d}, FinalSnapshots: []FinalReviewSnapshot{{ID: "final-m1-0001", CategoryDecision: d}}, CurrentFinalSnapshotID: "final-m1-0001", ReviewRevision: "legacy-v3-revision"}
+	legacy := &Review{SchemaVersion: version.CorrectionSchemaV3, RuleVersion: version.CorrectionRuleVersionV4, MatchID: "m1", ReplaySHA256: "sha", Corrections: []Correction{}, PhaseCorrections: []PhaseCorrectionV2{}, ReviewStatus: "reviewed", CategoryDecisions: []CategoryDecision{d}, FinalSnapshots: []FinalReviewSnapshot{{ID: "final-m1-0001", MatchID: "m1", ReplaySHA256: "sha", CategoryDecision: d}}, CurrentFinalSnapshotID: "final-m1-0001", ReviewRevision: "legacy-v3-revision"}
 	if err := s.writeJSON(s.Path("m1"), legacy); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := s.MigrateV1("m1")
+	if err := s.writeJSON(s.AuditPath(), &Audit{SchemaVersion: version.CorrectionSchemaV3, Entries: []AuditEntry{{Seq: 1, Author: "paul", Action: "legacy_final", MatchID: "m1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	beforeReview, beforeAudit := authoritativeBytes(t, s)
+	migrated, err := s.Load("m1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if migrated.SchemaVersion != version.CorrectionSchema || migrated.CategoryDecisions[0].BasedOnRevision != "legacy-v3-revision-unavailable" || migrated.FinalSnapshots[0].CategoryDecision.BasedOnRevision != "legacy-v3-revision-unavailable" {
 		t.Fatalf("migration=%+v", migrated)
 	}
-	if migrated.ReviewRevision == "legacy-v3-revision" {
-		t.Fatal("v3 migration did not derive a new revision")
+	if migrated.ReviewStatus != "in_progress" || migrated.CurrentFinalSnapshotID != "" || len(migrated.FinalSnapshots) != 1 || !IsUsableReviewRevision(migrated.ReviewRevision) {
+		t.Fatalf("marker-backed signoff remained current: %+v", migrated)
 	}
+	assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+	fctx := FinalizeContext{ReplaySHA256: "sha", MachineCategory: "probe", PhaseRuleVersion: "phase-v1", EligibleSeconds: 100, MachineIntervals: []PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning"}}}
+	_, err = s.FinalizeReview("m1", fctx, FinalizeRequest{Author: "paul", Reason: "must not trust marker", ExpectedRevision: migrated.ReviewRevision, Checklist: finalChecklist()})
+	if err == nil || !strings.Contains(err.Error(), "category_decision_revision") {
+		t.Fatalf("marker finalization err=%v", err)
+	}
+	assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
 	restarted, _ := New(s.Root)
 	loaded, err := restarted.Load("m1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.ReviewRevision != migrated.ReviewRevision || loaded.CategoryDecisions[0].BasedOnRevision != "legacy-v3-revision-unavailable" || loaded.FinalSnapshots[0].CategoryDecision.BasedOnRevision != "legacy-v3-revision-unavailable" {
+	if loaded.ReviewRevision != migrated.ReviewRevision || loaded.ReviewStatus != "in_progress" || loaded.CurrentFinalSnapshotID != "" || loaded.CategoryDecisions[0].BasedOnRevision != "legacy-v3-revision-unavailable" || loaded.FinalSnapshots[0].CategoryDecision.BasedOnRevision != "legacy-v3-revision-unavailable" {
 		t.Fatalf("restart=%+v", loaded)
+	}
+	assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+	fresh, err := restarted.DecideCategory("m1", CategoryContext{MachineCategory: "probe", ReplaySHA256: "sha"}, CategoryDecisionRequest{Decision: "confirm", Author: "paul", Reason: "fresh revision-backed decision", ExpectedRevision: loaded.ReviewRevision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.CategoryDecisions) != 2 || fresh.CategoryDecisions[1].BasedOnRevision != loaded.ReviewRevision || !IsUsableReviewRevision(fresh.CategoryDecisions[1].BasedOnRevision) {
+		t.Fatalf("fresh decision=%+v", fresh.CategoryDecisions)
+	}
+	finalized, err := restarted.FinalizeReview("m1", fctx, FinalizeRequest{Author: "paul", Reason: "fresh signoff", ExpectedRevision: fresh.ReviewRevision, Checklist: finalChecklist()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized.ReviewStatus != "reviewed" || len(finalized.FinalSnapshots) != 2 || finalized.CurrentFinalSnapshotID != finalized.FinalSnapshots[1].ID {
+		t.Fatalf("finalized=%+v", finalized)
+	}
+	canonicalAfter, _ := os.ReadFile(st.ArtifactPath("m1", store.ArtifactCanonical))
+	if !bytes.Equal(canonicalBefore, canonicalAfter) {
+		t.Fatal("review migration/finalization changed canonical artifact")
+	}
+}
+
+func TestCurrentTaggedLegacyMarkerSignoffAlsoFailsClosed(t *testing.T) {
+	s, _ := New(t.TempDir())
+	marker := "legacy-v3-revision-unavailable"
+	d := CategoryDecision{ID: "category-m1-0001", BasedOnRevision: marker}
+	legacyRevision := "rev-00000000000000000000000000000000"
+	r := &Review{SchemaVersion: version.CorrectionSchema, RuleVersion: version.CorrectionRuleVersionV5, MatchID: "m1", Corrections: []Correction{}, PhaseCorrections: []PhaseCorrectionV2{}, ReviewStatus: "reviewed", ReviewRevision: legacyRevision, CategoryDecisions: []CategoryDecision{d}, FinalSnapshots: []FinalReviewSnapshot{{ID: "final-m1-0001", CategoryDecision: d}}, CurrentFinalSnapshotID: "final-m1-0001"}
+	if err := s.writeJSON(s.Path("m1"), r); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ReviewStatus != "in_progress" || loaded.CurrentFinalSnapshotID != "" || len(loaded.FinalSnapshots) != 1 || loaded.CategoryDecisions[0].BasedOnRevision != marker || loaded.ReviewRevision == legacyRevision || !IsUsableReviewRevision(loaded.ReviewRevision) {
+		t.Fatalf("current-tagged marker signoff=%+v", loaded)
 	}
 }
 

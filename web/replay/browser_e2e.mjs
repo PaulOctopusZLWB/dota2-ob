@@ -204,8 +204,14 @@ async function phaseOp(page, base, spec) {
   await page.evaluate((m) => {
     window.__phaseResult = "";
   }, MATCH);
-  await page.click(`button[onclick="submitPhase('${MATCH}')"]`);
-  // The page reloads on success; wait for the review panel to reappear.
+  // submitPhase awaits the API and then calls location.reload(). Waiting for
+  // that navigation prevents the next operation's goto from racing the
+  // still-pending reload while retaining the real rendered submit path.
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }),
+    page.click(`button[onclick="submitPhase('${MATCH}')"]`),
+  ]);
+  // The successful reload must render the review panel again.
   await page.waitForSelector(`#phase-ref-${MATCH}`, { timeout: 15000 });
   await waitFor(300);
 
@@ -340,7 +346,11 @@ async function main() {
 	  assert.strictEqual(premature.status, 400, "premature completion must fail closed");
 	  assert.ok(premature.body.error.includes("final_snapshot"), `premature reason=${premature.body.error}`);
 	  await page.goto(`${base}/review.html`, { waitUntil: "domcontentloaded" });
-	  await page.waitForSelector("[data-machine-category]", { timeout: 15000 });
+	  await page.waitForFunction(() => {
+		const categories = [...document.querySelectorAll("[data-machine-category]")];
+		const progress = document.querySelector("#review-progress");
+		return categories.length === 5 && categories.every(node => node.textContent.trim()) && progress && progress.textContent.includes("0/5");
+	  }, null, { timeout: 15000 });
 	  assert.strictEqual(await page.$$eval("[data-machine-category]", els => els.filter(e => e.textContent.trim()).length), 5, "rendered non-empty machine categories");
 	  assert.ok((await page.evaluate(() => document.body.innerText)).includes("语料审核进度 0/5"), "rendered initial corpus progress");
 	  await assertFrozenOpportunityAndLineage(page, base, true);

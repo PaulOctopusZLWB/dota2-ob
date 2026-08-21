@@ -227,6 +227,40 @@ func invalidateFinal(r *Review) {
 	}
 }
 
+// IsUsableReviewRevision reports whether revision is a persisted optimistic-
+// concurrency token produced by revisionOfReview. Legacy migration markers
+// deliberately do not match this shape and can never authorize sign-off.
+func IsUsableReviewRevision(revision string) bool {
+	if len(revision) != len("rev-")+32 || !strings.HasPrefix(revision, "rev-") {
+		return false
+	}
+	for _, c := range revision[len("rev-"):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// HasUsableCategoryDecisionRevision validates both the latest category
+// decision and, when present, the category decision embedded in the current
+// final snapshot. Historical marker-backed decisions remain visible but do
+// not satisfy the completion gate.
+func HasUsableCategoryDecisionRevision(r *Review) bool {
+	if len(r.CategoryDecisions) == 0 || !IsUsableReviewRevision(r.CategoryDecisions[len(r.CategoryDecisions)-1].BasedOnRevision) {
+		return false
+	}
+	if r.CurrentFinalSnapshotID == "" {
+		return true
+	}
+	for i := range r.FinalSnapshots {
+		if r.FinalSnapshots[i].ID == r.CurrentFinalSnapshotID {
+			return IsUsableReviewRevision(r.FinalSnapshots[i].CategoryDecision.BasedOnRevision)
+		}
+	}
+	return false
+}
+
 func migrateMissingDecisionRevisions(r *Review, marker string) {
 	byID := map[string]string{}
 	for i := range r.CategoryDecisions {
@@ -717,6 +751,9 @@ func (s *Store) SetReviewStatus(matchID, status, author, expectedRevision string
 		if !found {
 			return nil, fmt.Errorf("review_requirements_missing:current_final_snapshot_invalid")
 		}
+		if !HasUsableCategoryDecisionRevision(r) {
+			return nil, fmt.Errorf("review_requirements_missing:category_decision_revision")
+		}
 	}
 	if status != "reviewed" {
 		r.CurrentFinalSnapshotID = ""
@@ -837,7 +874,7 @@ func (s *Store) FinalizeReview(matchID string, ctx FinalizeContext, req Finalize
 		return nil, fmt.Errorf("final_phase_stream_invalid:%w", err)
 	}
 	d := r.CategoryDecisions[len(r.CategoryDecisions)-1]
-	if d.BasedOnRevision == "" {
+	if !IsUsableReviewRevision(d.BasedOnRevision) {
 		return nil, fmt.Errorf("review_requirements_missing:category_decision_revision")
 	}
 	if d.ReplaySHA256 != ctx.ReplaySHA256 || (ctx.MachineCategory != "" && d.MachineCategory != ctx.MachineCategory) {
@@ -875,6 +912,7 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 	if r.SchemaVersion == version.CorrectionSchema || r.SchemaVersion == version.CorrectionSchemaV3 || r.SchemaVersion == version.CorrectionSchemaV2 {
 		wasV2 := r.SchemaVersion == version.CorrectionSchemaV2
 		wasV3 := r.SchemaVersion == version.CorrectionSchemaV3
+		categorySignoffInvalidated := false
 		r.SchemaVersion = version.CorrectionSchema
 		r.RuleVersion = version.CorrectionRuleVersion
 		if r.PhaseCorrections == nil {
@@ -892,6 +930,14 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		if wasV2 {
 			migrateMissingDecisionRevisions(&r, "legacy-v2-revision-unavailable")
 		}
+		// V3 could persist an apparent sign-off before category decisions
+		// recorded an accepted optimistic revision. This also covers a V3
+		// document that an earlier V4 reader already tagged as current schema.
+		// Preserve immutable history, but never retain marker-backed approval.
+		if (r.ReviewStatus == "reviewed" || r.CurrentFinalSnapshotID != "") && !HasUsableCategoryDecisionRevision(&r) {
+			invalidateFinal(&r)
+			categorySignoffInvalidated = true
+		}
 		// A v2 "reviewed" flag had no signed category/stream/checklist proof.
 		// Migrate it deterministically to in_progress rather than grandfathering
 		// an unauditable completion.
@@ -901,7 +947,7 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		// Deterministically derive the revision when the persisted document
 		// predates the optimistic-concurrency field, so the UI always has a
 		// valid token for its first mutation.
-		if r.ReviewRevision == "" || wasV2 || wasV3 {
+		if !IsUsableReviewRevision(r.ReviewRevision) || wasV2 || wasV3 || categorySignoffInvalidated {
 			r.ReviewRevision = revisionOfReview(&r)
 		}
 		return &r, nil
@@ -1154,7 +1200,7 @@ func (s *Store) recoverPending() error {
 	if err := json.Unmarshal(b, &tx); err != nil {
 		return fmt.Errorf("decode transaction journal: %w", err)
 	}
-	if (tx.SchemaVersion != version.CorrectionRuleVersion && tx.SchemaVersion != version.CorrectionRuleVersionV4 && tx.SchemaVersion != version.CorrectionRuleVersionV3) || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
+	if (tx.SchemaVersion != version.CorrectionRuleVersion && tx.SchemaVersion != version.CorrectionRuleVersionV5 && tx.SchemaVersion != version.CorrectionRuleVersionV4 && tx.SchemaVersion != version.CorrectionRuleVersionV3) || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
 		return fmt.Errorf("invalid transaction journal")
 	}
 	reviewRoot := filepath.Join(s.Root, "matches") + string(os.PathSeparator)

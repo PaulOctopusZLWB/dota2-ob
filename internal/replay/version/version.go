@@ -62,9 +62,12 @@ const (
 	// complete structured aggregation-lineage rule set.
 	ScoreRuleVersion = "ti2026.scoring.v5"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
-	CorrectionRuleVersion = "ti2026.corrections.v5"
-	// CorrectionRuleVersionV4 is accepted only for recovery of a durable
+	CorrectionRuleVersion = "ti2026.corrections.v6"
+	// CorrectionRuleVersionV5 is accepted only for recovery of a durable
 	// transaction journal prepared by the immediately preceding release.
+	CorrectionRuleVersionV5 = "ti2026.corrections.v5"
+	// CorrectionRuleVersionV4 is accepted only for recovery of an older durable
+	// transaction journal.
 	CorrectionRuleVersionV4 = "ti2026.corrections.v4"
 	// CorrectionRuleVersionV3 remains accepted only for recovery of an older
 	// durable transaction journal.

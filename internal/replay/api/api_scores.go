@@ -105,6 +105,8 @@ func reviewMissing(rv *review.Review) []string {
 	missing := []string{}
 	if len(rv.CategoryDecisions) == 0 {
 		missing = append(missing, "category_decision")
+	} else if !review.HasUsableCategoryDecisionRevision(rv) {
+		missing = append(missing, "category_decision_revision")
 	}
 	if rv.CurrentFinalSnapshotID == "" {
 		missing = append(missing, "phase_stream_reviewed", "role_provenance_evidence", "official_experimental_acknowledged")

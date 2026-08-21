@@ -2643,6 +2643,113 @@ func TestHumanReviewCompletionGateAPI(t *testing.T) {
 	}
 }
 
+func TestLegacyMarkerBackedReviewQueueAndFinalizeFailClosed(t *testing.T) {
+	st := testStore(t)
+	rvs, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := review.CategoryDecision{ID: "category-m1-0001", MachineCategory: "test", EffectiveCategory: "test", Decision: "confirm", MatchID: "m1", ReplaySHA256: "test-replay-sha256", Author: "paul", Reason: "legacy", AppliedAt: "2026-08-21T00:00:00Z"}
+	legacy := &review.Review{SchemaVersion: version.CorrectionSchemaV3, RuleVersion: version.CorrectionRuleVersionV4, MatchID: "m1", ReplaySHA256: "test-replay-sha256", Corrections: []review.Correction{}, PhaseCorrections: []review.PhaseCorrectionV2{}, ReviewStatus: "reviewed", CategoryDecisions: []review.CategoryDecision{d}, FinalSnapshots: []review.FinalReviewSnapshot{{ID: "final-m1-0001", MatchID: "m1", ReplaySHA256: "test-replay-sha256", CategoryDecision: d}}, CurrentFinalSnapshotID: "final-m1-0001", ReviewRevision: "legacy-v3-revision"}
+	if err := st.WriteJSON("m1", store.ArtifactCorrections, legacy); err != nil {
+		t.Fatal(err)
+	}
+	auditBytes, _ := json.Marshal(&review.Audit{SchemaVersion: version.CorrectionSchemaV3, Entries: []review.AuditEntry{{Seq: 1, Author: "paul", Action: "legacy_final", MatchID: "m1"}}})
+	if err := store.WriteAtomic(rvs.AuditPath(), auditBytes); err != nil {
+		t.Fatal(err)
+	}
+	canonicalBefore, _ := os.ReadFile(st.ArtifactPath("m1", store.ArtifactCanonical))
+	reviewBefore, _ := os.ReadFile(rvs.Path("m1"))
+	auditBefore, _ := os.ReadFile(rvs.AuditPath())
+
+	startServer := func(rs *review.Store) *httptest.Server {
+		return httptest.NewServer(testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rs).WithSessionToken("tok").Handler())
+	}
+	type queueWire struct {
+		Data struct {
+			Reviews  []review.Review `json:"reviews"`
+			Progress map[string]int  `json:"progress"`
+		} `json:"data"`
+	}
+	readQueue := func(base string) queueWire {
+		var q queueWire
+		if code := getJSON(t, base+Version+"/reviews/queue", &q); code != http.StatusOK {
+			t.Fatalf("queue status=%d", code)
+		}
+		return q
+	}
+
+	ts := startServer(rvs)
+	q := readQueue(ts.URL)
+	if q.Data.Progress["reviewed"] != 0 || q.Data.Progress["pending"] != 1 || len(q.Data.Reviews) != 1 {
+		t.Fatalf("marker queue=%+v", q.Data)
+	}
+	migrated := q.Data.Reviews[0]
+	if migrated.ReviewStatus != "in_progress" || migrated.CurrentFinalSnapshotID != "" || !strings.Contains(strings.Join(migrated.MissingRequirements, ","), "category_decision_revision") {
+		t.Fatalf("marker requirements=%+v", migrated)
+	}
+	if got, _ := os.ReadFile(rvs.Path("m1")); !bytes.Equal(got, reviewBefore) {
+		t.Fatal("queue reconstruction changed review bytes")
+	}
+	finalPayload := map[string]interface{}{"match_id": "m1", "author": "paul", "reason": "must reject marker", "expected_revision": migrated.ReviewRevision, "checklist": map[string]interface{}{"phase_stream_reviewed": true, "role_provenance_reviewed": true, "role_provenance_evidence": "registry", "official_experimental_acknowledged": true}}
+	if status, _, apiErr := postReviewGate(t, ts.URL, "/reviews/finalize", "tok", finalPayload); status != http.StatusBadRequest || !strings.Contains(apiErr, "category_decision_revision") {
+		t.Fatalf("marker finalize status=%d err=%q", status, apiErr)
+	}
+	if got, _ := os.ReadFile(rvs.Path("m1")); !bytes.Equal(got, reviewBefore) {
+		t.Fatal("marker rejection changed review bytes")
+	}
+	if got, _ := os.ReadFile(rvs.AuditPath()); !bytes.Equal(got, auditBefore) {
+		t.Fatal("marker rejection changed audit bytes/count")
+	}
+	ts.Close()
+
+	restarted, err := review.New(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts2 := startServer(restarted)
+	defer ts2.Close()
+	q2 := readQueue(ts2.URL)
+	if q2.Data.Progress["reviewed"] != 0 || q2.Data.Progress["pending"] != 1 || q2.Data.Reviews[0].ReviewRevision != migrated.ReviewRevision {
+		t.Fatalf("restart queue=%+v", q2.Data)
+	}
+	if got, _ := os.ReadFile(restarted.Path("m1")); !bytes.Equal(got, reviewBefore) {
+		t.Fatal("restart changed review bytes")
+	}
+	if got, _ := os.ReadFile(restarted.AuditPath()); !bytes.Equal(got, auditBefore) {
+		t.Fatal("restart changed audit bytes/count")
+	}
+
+	status, fresh, apiErr := postReviewGate(t, ts2.URL, "/reviews/category-decisions", "tok", map[string]interface{}{"match_id": "m1", "decision": "confirm", "author": "paul", "reason": "fresh revision-backed decision", "expected_revision": migrated.ReviewRevision})
+	if status != http.StatusOK || apiErr != "" || len(fresh.CategoryDecisions) != 2 || fresh.CategoryDecisions[1].BasedOnRevision != migrated.ReviewRevision || !review.IsUsableReviewRevision(fresh.CategoryDecisions[1].BasedOnRevision) {
+		t.Fatalf("fresh category status=%d err=%q review=%+v", status, apiErr, fresh)
+	}
+	freshReviewBytes, _ := os.ReadFile(restarted.Path("m1"))
+	freshAuditBytes, _ := os.ReadFile(restarted.AuditPath())
+	if staleStatus, _, _ := postReviewGate(t, ts2.URL, "/reviews/category-decisions", "tok", map[string]interface{}{"match_id": "m1", "decision": "confirm", "author": "paul", "reason": "stale", "expected_revision": migrated.ReviewRevision}); staleStatus != http.StatusConflict {
+		t.Fatalf("stale category status=%d", staleStatus)
+	}
+	if got, _ := os.ReadFile(restarted.Path("m1")); !bytes.Equal(got, freshReviewBytes) {
+		t.Fatal("stale revision changed review bytes")
+	}
+	if got, _ := os.ReadFile(restarted.AuditPath()); !bytes.Equal(got, freshAuditBytes) {
+		t.Fatal("stale revision changed audit bytes/count")
+	}
+	finalPayload["expected_revision"] = fresh.ReviewRevision
+	status, finalized, apiErr := postReviewGate(t, ts2.URL, "/reviews/finalize", "tok", finalPayload)
+	if status != http.StatusOK || apiErr != "" || finalized.ReviewStatus != "reviewed" || len(finalized.FinalSnapshots) != 2 {
+		t.Fatalf("fresh finalize status=%d err=%q review=%+v", status, apiErr, finalized)
+	}
+	q3 := readQueue(ts2.URL)
+	if q3.Data.Progress["reviewed"] != 1 || q3.Data.Progress["pending"] != 0 || len(q3.Data.Reviews[0].MissingRequirements) != 0 {
+		t.Fatalf("final queue=%+v", q3.Data)
+	}
+	canonicalAfter, _ := os.ReadFile(st.ArtifactPath("m1", store.ArtifactCanonical))
+	if !bytes.Equal(canonicalBefore, canonicalAfter) {
+		t.Fatal("review workflow changed canonical artifact")
+	}
+}
+
 func TestFinalizeMigratedOverlayShapesAPI(t *testing.T) {
 	cases := map[string]struct {
 		intervals []review.PhaseInterval
