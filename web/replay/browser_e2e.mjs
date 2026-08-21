@@ -222,11 +222,47 @@ async function phaseOp(page, base, spec) {
   throw new Error("review for " + MATCH + " not in queue after op " + spec.op);
 }
 
+// assertInvalidatedReviewPage proves the post-signoff state through the
+// rendered product rather than only through queue JSON. Snapshot identity and
+// based_on_revision are asserted separately through the API because the UI
+// intentionally renders human history without exposing opaque tokens.
+async function assertInvalidatedReviewPage(page, base, expectedMachineIntervals) {
+  await page.goto(`${base}/review.html`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction((match) => {
+    const progress = document.querySelector("#review-progress");
+    const phase = document.querySelector(`#phase-ref-${match}`);
+    const panel = phase && phase.closest(".panel");
+    return progress && progress.textContent.includes("0/5") && panel && panel.innerText.includes("in_progress");
+  }, MATCH, { timeout: 15000 });
+  await page.$eval(`#phase-ref-${MATCH}`, node => {
+    const details = [...node.closest(".panel").querySelectorAll("details")].find(item => item.querySelector("summary")?.textContent.includes("V2 阶段校正历史"));
+    if (!details) throw new Error("rendered phase history disclosure missing");
+    if (!details.open) details.querySelector("summary").click();
+  });
+  await page.waitForFunction((match) => document.querySelector(`#phase-ref-${match}`).closest(".panel").innerText.includes("browser post-finalization invalidation"), MATCH, { timeout: 5000 });
+  const panel = await page.$eval(`#phase-ref-${MATCH}`, node => node.closest(".panel").innerText);
+  for (const requirement of ["phase_stream_reviewed", "role_provenance_evidence", "official_experimental_acknowledged", "reviewed_status"]) {
+    assert.ok(panel.includes(requirement), `rendered invalidation missing ${requirement}`);
+  }
+  assert.ok(panel.includes("机器分类") && panel.includes("ordinary_baseline_candidate"), "machine category hidden after invalidation");
+  assert.ok(panel.includes("机器阶段流（不可变，仅展示）"), "machine phase heading hidden after invalidation");
+  assert.ok(panel.includes("confirm：ordinary_baseline_candidate") && panel.includes("frozen category and replay identity inspected"), "category history hidden after invalidation");
+  assert.ok(panel.includes("browser post-finalization invalidation"), "rendered later phase history missing");
+  assert.strictEqual(await page.$$eval(`#phase-ref-${MATCH}`, nodes => nodes[0].closest(".panel").querySelectorAll("ul.stream li.mach").length), expectedMachineIntervals, "rendered machine phase interval count changed after invalidation");
+  assert.strictEqual(await page.$$eval("[data-machine-category]", nodes => nodes.filter(node => node.textContent.trim()).length), 5, "machine categories hidden after invalidation");
+  assert.ok((await page.$eval("#review-progress", node => node.innerText)).includes("语料审核进度 0/5"), "rendered invalidated corpus progress");
+}
+
 // effectiveStream decodes the served effective intervals.
 function effectiveStream(rv) {
   return (rv.effective_phase_intervals || []).map(iv => ({
     start: iv.start_game_second, end: iv.end_game_second, phase: iv.global_phase,
   }));
+}
+
+async function machinePhaseStream(page, base) {
+  const timeline = await api(page, `${base}/api/replay/v1/matches/${MATCH}/timeline`);
+  return (timeline.data && timeline.data.phases && timeline.data.phases.intervals) || [];
 }
 
 // assertCoverage proves exact contiguous [0, eligible].
@@ -672,9 +708,53 @@ async function main() {
 	  assert.deepStrictEqual(afterFinalRestart.data.progress, { reviewed:1, pending:4, total:5 }, "restart reviewed/pending reconciliation");
 	  assert.ok(afterFinalRestart.data.queue.every(row => row.category), "restart lost a machine category");
 
+	  // ============ Later rendered mutation invalidates sign-off + restart ======
+	  // Capture immutable history and machine truth, then use the real phase
+	  // controls to accept an existing interval once more. Accept is a genuine
+	  // audited review mutation even though it preserves interval boundaries.
+	  const signedSnapshot = structuredClone(persistedFinal.final_snapshots[0]);
+	  const signedCategoryHistory = structuredClone(persistedFinal.category_decisions);
+	  const machineBeforeInvalidation = await machinePhaseStream(page, finalBase);
+	  const invalidatedByControl = await phaseOp(page, finalBase, {
+		op:"accept", ref:"interval@2454-2633", author:"browser",
+		reason:"browser post-finalization invalidation", evidence:"phase:post-final",
+	  });
+	  assert.ok(!invalidatedByControl.current_final_snapshot_id, "later rendered mutation retained current final snapshot");
+	  assert.strictEqual(invalidatedByControl.review_status, "in_progress", "later rendered mutation did not return to in_progress");
+	  assert.strictEqual(invalidatedByControl.final_snapshots.length, 1, "later mutation lost historical final snapshot");
+	  assert.deepStrictEqual(invalidatedByControl.final_snapshots[0], signedSnapshot, "later mutation changed historical final snapshot");
+	  assert.deepStrictEqual(invalidatedByControl.category_decisions, signedCategoryHistory, "later mutation changed category history/based_on_revision");
+	  assert.strictEqual(invalidatedByControl.category_decisions[0].based_on_revision, beforeFinal.review_revision, "later mutation changed immutable based_on_revision");
+	  const afterInvalidation = await api(page, `${finalBase}/api/replay/v1/reviews/queue`);
+	  const invalidatedReview = afterInvalidation.data.reviews.find(r => r.match_id === MATCH);
+	  assert.deepStrictEqual(afterInvalidation.data.progress, { reviewed:0, pending:5, total:5 }, "later mutation progress did not return to 0/5");
+	  assert.deepStrictEqual(invalidatedReview.missing_requirements, ["phase_stream_reviewed", "role_provenance_evidence", "official_experimental_acknowledged", "reviewed_status"], "later mutation missing requirements");
+	  assert.deepStrictEqual(await machinePhaseStream(page, finalBase), machineBeforeInvalidation, "later mutation changed machine phase stream");
+	  assert.ok(afterInvalidation.data.queue.every(row => row.category && row.replay_sha256), "later mutation hid machine category/replay identity");
+	  await assertInvalidatedReviewPage(page, finalBase, machineBeforeInvalidation.length);
+
+	  // Restart once more and prove the invalidated state, immutable history,
+	  // precise requirements, machine truth, and corpus reconciliation survive.
+	  await stopServer(server);
+	  server = await startServer(DATA);
+	  const invalidatedRestartBase = server.base;
+	  await setToken(page, invalidatedRestartBase);
+	  const afterInvalidationRestart = await api(page, `${invalidatedRestartBase}/api/replay/v1/reviews/queue`);
+	  const invalidatedRestart = afterInvalidationRestart.data.reviews.find(r => r.match_id === MATCH);
+	  assert.ok(!invalidatedRestart.current_final_snapshot_id, "restart restored invalidated current snapshot");
+	  assert.strictEqual(invalidatedRestart.review_status, "in_progress", "restart lost invalidated in_progress state");
+	  assert.deepStrictEqual(invalidatedRestart.final_snapshots, [signedSnapshot], "restart changed historical final snapshot");
+	  assert.deepStrictEqual(invalidatedRestart.category_decisions, signedCategoryHistory, "restart changed category history/based_on_revision");
+	  assert.deepStrictEqual(invalidatedRestart.missing_requirements, ["phase_stream_reviewed", "role_provenance_evidence", "official_experimental_acknowledged", "reviewed_status"], "restart changed invalidation requirements");
+	  assert.deepStrictEqual(afterInvalidationRestart.data.progress, { reviewed:0, pending:5, total:5 }, "restart invalidated progress did not remain 0/5");
+	  assert.deepStrictEqual(await machinePhaseStream(page, invalidatedRestartBase), machineBeforeInvalidation, "restart changed machine phase stream after invalidation");
+	  assert.ok(afterInvalidationRestart.data.queue.every(row => row.category && row.replay_sha256), "restart hid machine category/replay identity after invalidation");
+	  await assertInvalidatedReviewPage(page, invalidatedRestartBase, machineBeforeInvalidation.length);
+	  assert.strictEqual(sha256File(phasePath), phaseHashBefore, "immutable phases.json changed after post-finalization mutation/restart");
+
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — five non-empty frozen categories, premature completion rejected, signed category/final stream/checklist survives reload+restart, review progress reconciles 1/5 reviewed and 4/5 pending; corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, team 9823272 hero_damage_total=172402 reconciles to two distinct match-qualified team-match entities whose rendered links resolve before/after restart and whose rendered stale link returns the exact 404 reason, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — five non-empty frozen categories, premature completion rejected, signed category/final stream/checklist survives reload+restart at 1/5 reviewed; a later rendered phase mutation clears current sign-off, preserves immutable snapshot/category based_on_revision history, exposes exact missing requirements and machine values at 0/5 reviewed, and survives a second restart; corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, team 9823272 hero_damage_total=172402 reconciles to two distinct match-qualified team-match entities whose rendered links resolve before/after restart and whose rendered stale link returns the exact 404 reason, 8 pre-finalization phase ops + 1 post-finalization rendered invalidation on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }
