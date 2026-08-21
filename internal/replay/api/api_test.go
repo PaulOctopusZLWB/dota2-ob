@@ -2600,6 +2600,9 @@ func TestHumanReviewCompletionGateAPI(t *testing.T) {
 	if status != http.StatusOK || apiErr != "" || len(r1.CategoryDecisions) != 1 || r1.CategoryDecisions[0].MachineCategory != "test" {
 		t.Fatalf("category status=%d err=%q review=%+v", status, apiErr, r1)
 	}
+	if r1.CategoryDecisions[0].BasedOnRevision != r0.ReviewRevision {
+		t.Fatalf("based_on_revision=%q want %q", r1.CategoryDecisions[0].BasedOnRevision, r0.ReviewRevision)
+	}
 	if status, _, apiErr := postReviewStatus(t, ts.URL, "m1", "reviewed", "paul", r1.ReviewRevision); status != http.StatusBadRequest || !strings.Contains(apiErr, "final_snapshot") {
 		t.Fatalf("premature status=%d err=%q", status, apiErr)
 	}
@@ -2634,5 +2637,75 @@ func TestHumanReviewCompletionGateAPI(t *testing.T) {
 	getJSON(t, ts2.URL+Version+"/reviews/queue", &q2)
 	if len(q2.Data.Reviews) != 1 || len(q2.Data.Reviews[0].FinalSnapshots) != 1 || q2.Data.Progress["reviewed"] != 1 {
 		t.Fatalf("restart queue=%+v", q2.Data)
+	}
+	if q2.Data.Reviews[0].CategoryDecisions[0].BasedOnRevision != r0.ReviewRevision {
+		t.Fatalf("restart decision=%+v", q2.Data.Reviews[0].CategoryDecisions)
+	}
+}
+
+func TestFinalizeMigratedOverlayShapesAPI(t *testing.T) {
+	cases := map[string]struct {
+		intervals []review.PhaseInterval
+		valid     bool
+	}{
+		"valid":          {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning"}}, true},
+		"reset":          {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "reset"}}, false},
+		"unsupported":    {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "postgame"}}, false},
+		"gap":            {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 40, GlobalPhase: "laning"}, {StartGameSecond: 50, EndGameSecond: 100, GlobalPhase: "midgame"}}, false},
+		"overlap":        {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 60, GlobalPhase: "laning"}, {StartGameSecond: 50, EndGameSecond: 100, GlobalPhase: "midgame"}}, false},
+		"invalid_bounds": {[]review.PhaseInterval{{StartGameSecond: -1, EndGameSecond: 100, GlobalPhase: "laning"}}, false},
+		"zero_width":     {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 0, GlobalPhase: "laning"}, {StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "midgame"}}, false},
+		"incomplete":     {[]review.PhaseInterval{{StartGameSecond: 0, EndGameSecond: 90, GlobalPhase: "laning"}}, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := testStore(t)
+			legacy := &review.Review{SchemaVersion: version.CorrectionSchemaV1, RuleVersion: "legacy-v1", MatchID: "m1", Corrections: []review.Correction{}, ReviewStatus: "pending", EffectivePhaseIntervals: review.ToJSON(tc.intervals)}
+			if err := st.WriteJSON("m1", store.ArtifactCorrections, legacy); err != nil {
+				t.Fatal(err)
+			}
+			rvs, _ := review.New(st.Root)
+			srv := testServerWithContracts(t, st, &roles.Registry{}).WithReviews(rvs).WithSessionToken("tok")
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+			r0, err := rvs.Load("m1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, r1, apiErr := postReviewGate(t, ts.URL, "/reviews/category-decisions", "tok", map[string]interface{}{"match_id": "m1", "decision": "confirm", "author": "paul", "reason": "checked", "expected_revision": r0.ReviewRevision})
+			if status != http.StatusOK || apiErr != "" {
+				t.Fatalf("category status=%d err=%q", status, apiErr)
+			}
+			beforeReview, _ := os.ReadFile(rvs.Path("m1"))
+			beforeAudit, _ := os.ReadFile(rvs.AuditPath())
+			status, fin, apiErr := postReviewGate(t, ts.URL, "/reviews/finalize", "tok", map[string]interface{}{"match_id": "m1", "author": "paul", "reason": "checked all", "expected_revision": r1.ReviewRevision, "checklist": map[string]interface{}{"phase_stream_reviewed": true, "role_provenance_reviewed": true, "role_provenance_evidence": "registry", "official_experimental_acknowledged": true}})
+			if tc.valid {
+				if status != http.StatusOK || apiErr != "" || fin.ReviewStatus != "reviewed" {
+					t.Fatalf("valid status=%d err=%q review=%+v", status, apiErr, fin)
+				}
+				return
+			}
+			if status != http.StatusBadRequest || !strings.Contains(apiErr, "final_phase_stream_invalid") {
+				t.Fatalf("invalid status=%d err=%q", status, apiErr)
+			}
+			afterReview, _ := os.ReadFile(rvs.Path("m1"))
+			afterAudit, _ := os.ReadFile(rvs.AuditPath())
+			if !bytes.Equal(beforeReview, afterReview) || !bytes.Equal(beforeAudit, afterAudit) {
+				t.Fatal("invalid finalize changed authoritative bytes")
+			}
+			restarted, err := review.New(st.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restartReview, _ := os.ReadFile(restarted.Path("m1"))
+			restartAudit, _ := os.ReadFile(restarted.AuditPath())
+			if !bytes.Equal(beforeReview, restartReview) || !bytes.Equal(beforeAudit, restartAudit) {
+				t.Fatal("restart changed rejected finalize bytes")
+			}
+			loaded, _ := restarted.Load("m1")
+			if loaded.ReviewStatus == "reviewed" || len(loaded.FinalSnapshots) != 0 {
+				t.Fatalf("rejected final visible=%+v", loaded)
+			}
+		})
 	}
 }

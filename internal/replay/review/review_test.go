@@ -504,7 +504,15 @@ func TestCategoryFinalizeAndLaterMutationInvalidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fctx := FinalizeContext{ReplaySHA256: "sha-1", PhaseRuleVersion: "ti2026.phase.v1", MachineIntervals: []PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning"}}}
+	if got := r1.CategoryDecisions[0].BasedOnRevision; got != r0.ReviewRevision {
+		t.Fatalf("based_on_revision=%q want %q", got, r0.ReviewRevision)
+	}
+	beforeReview, beforeAudit := authoritativeBytes(t, s)
+	if _, err := s.DecideCategory("m1", ctx, CategoryDecisionRequest{Decision: "confirm", Author: "stale", Reason: "stale", ExpectedRevision: r0.ReviewRevision}); !IsStale(err) {
+		t.Fatalf("stale err=%v", err)
+	}
+	assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+	fctx := FinalizeContext{ReplaySHA256: "sha-1", PhaseRuleVersion: "ti2026.phase.v1", EligibleSeconds: 100, MachineIntervals: []PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning"}}}
 	if _, err := s.FinalizeReview("m1", fctx, FinalizeRequest{Author: "paul", Reason: "premature", ExpectedRevision: r1.ReviewRevision}); err == nil || !strings.Contains(err.Error(), "phase_stream_reviewed") {
 		t.Fatalf("premature err=%v", err)
 	}
@@ -530,6 +538,9 @@ func TestCategoryFinalizeAndLaterMutationInvalidates(t *testing.T) {
 	if loaded.ReviewStatus != "in_progress" || len(loaded.FinalSnapshots) != 1 {
 		t.Fatalf("restart=%+v", loaded)
 	}
+	if len(loaded.CategoryDecisions) != 1 || loaded.CategoryDecisions[0].BasedOnRevision != r0.ReviewRevision {
+		t.Fatalf("restart category history=%+v", loaded.CategoryDecisions)
+	}
 }
 
 func TestFinalSnapshotPartialPromotionRollsBack(t *testing.T) {
@@ -546,7 +557,7 @@ func TestFinalSnapshotPartialPromotionRollsBack(t *testing.T) {
 		}
 		return store.WriteAtomic(path, b)
 	}
-	_, err = s.FinalizeReview("m1", FinalizeContext{ReplaySHA256: "sha", PhaseRuleVersion: "phase-v1", MachineIntervals: []PhaseInterval{{StartGameSecond: 0, EndGameSecond: 10, GlobalPhase: "laning"}}}, FinalizeRequest{Author: "paul", Reason: "checked all", ExpectedRevision: r1.ReviewRevision, Checklist: FinalChecklist{PhaseStreamReviewed: true, RoleProvenanceReviewed: true, RoleProvenanceEvidence: "registry", OfficialExperimentalAcknowledged: true}})
+	_, err = s.FinalizeReview("m1", FinalizeContext{ReplaySHA256: "sha", PhaseRuleVersion: "phase-v1", EligibleSeconds: 10, MachineIntervals: []PhaseInterval{{StartGameSecond: 0, EndGameSecond: 10, GlobalPhase: "laning"}}}, FinalizeRequest{Author: "paul", Reason: "checked all", ExpectedRevision: r1.ReviewRevision, Checklist: FinalChecklist{PhaseStreamReviewed: true, RoleProvenanceReviewed: true, RoleProvenanceEvidence: "registry", OfficialExperimentalAcknowledged: true}})
 	if !IsStorageError(err) {
 		t.Fatalf("err=%v want storage error", err)
 	}
@@ -583,6 +594,125 @@ func TestV2ReviewedMigratesFailClosed(t *testing.T) {
 	}
 	if len(loaded.CategoryDecisions) != 0 || len(loaded.FinalSnapshots) != 0 {
 		t.Fatalf("migration invented decisions: %+v", loaded)
+	}
+}
+
+func TestV1ReviewedMigratesFailClosedAndPreservesCanonical(t *testing.T) {
+	root := t.TempDir()
+	s, _ := New(root)
+	st, _ := store.New(root)
+	if err := st.WriteJSON("m1", store.ArtifactPhases, map[string]interface{}{"eligible_seconds": 100, "rule_version": "phase-v1", "intervals": []map[string]interface{}{{"start_game_second": 0, "end_game_second": 100, "global_phase": "laning"}}}); err != nil {
+		t.Fatal(err)
+	}
+	canonical := []byte(`{"tree_sha256":"immutable"}`)
+	if err := store.WriteAtomic(st.ArtifactPath("m1", store.ArtifactCanonical), canonical); err != nil {
+		t.Fatal(err)
+	}
+	legacy := &Review{SchemaVersion: version.CorrectionSchemaV1, RuleVersion: "legacy-v1", MatchID: "m1", Corrections: []Correction{}, ReviewStatus: "reviewed", ReviewRevision: "legacy-v1-revision", CurrentFinalSnapshotID: "unusable-v1-snapshot"}
+	if err := s.writeJSON(s.Path("m1"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := s.MigrateV1("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.SchemaVersion != version.CorrectionSchema || migrated.RuleVersion != version.CorrectionRuleVersion || migrated.ReviewStatus != "in_progress" || migrated.CurrentFinalSnapshotID != "" {
+		t.Fatalf("migration=%+v", migrated)
+	}
+	if migrated.ReviewRevision == "" || migrated.ReviewRevision == "legacy-v1-revision" {
+		t.Fatalf("revision=%q", migrated.ReviewRevision)
+	}
+	gotCanonical, _ := os.ReadFile(st.ArtifactPath("m1", store.ArtifactCanonical))
+	if string(gotCanonical) != string(canonical) {
+		t.Fatal("V1 migration changed canonical artifact")
+	}
+	restarted, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := restarted.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ReviewStatus != "in_progress" || reloaded.CurrentFinalSnapshotID != "" || reloaded.ReviewRevision != migrated.ReviewRevision {
+		t.Fatalf("restart=%+v", reloaded)
+	}
+	gotCanonical, _ = os.ReadFile(st.ArtifactPath("m1", store.ArtifactCanonical))
+	if string(gotCanonical) != string(canonical) {
+		t.Fatal("restart changed canonical artifact")
+	}
+}
+
+func TestV3CategoryRevisionMigrationIsExplicitAndDeterministic(t *testing.T) {
+	s, _ := New(t.TempDir())
+	d := CategoryDecision{ID: "category-m1-0001", MachineCategory: "probe", EffectiveCategory: "probe", Decision: "confirm", MatchID: "m1", ReplaySHA256: "sha", Author: "paul", Reason: "legacy", AppliedAt: "2026-08-21T00:00:00Z"}
+	legacy := &Review{SchemaVersion: version.CorrectionSchemaV3, RuleVersion: version.CorrectionRuleVersionV4, MatchID: "m1", Corrections: []Correction{}, PhaseCorrections: []PhaseCorrectionV2{}, ReviewStatus: "reviewed", CategoryDecisions: []CategoryDecision{d}, FinalSnapshots: []FinalReviewSnapshot{{ID: "final-m1-0001", CategoryDecision: d}}, CurrentFinalSnapshotID: "final-m1-0001", ReviewRevision: "legacy-v3-revision"}
+	if err := s.writeJSON(s.Path("m1"), legacy); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := s.MigrateV1("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.SchemaVersion != version.CorrectionSchema || migrated.CategoryDecisions[0].BasedOnRevision != "legacy-v3-revision-unavailable" || migrated.FinalSnapshots[0].CategoryDecision.BasedOnRevision != "legacy-v3-revision-unavailable" {
+		t.Fatalf("migration=%+v", migrated)
+	}
+	if migrated.ReviewRevision == "legacy-v3-revision" {
+		t.Fatal("v3 migration did not derive a new revision")
+	}
+	restarted, _ := New(s.Root)
+	loaded, err := restarted.Load("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ReviewRevision != migrated.ReviewRevision || loaded.CategoryDecisions[0].BasedOnRevision != "legacy-v3-revision-unavailable" || loaded.FinalSnapshots[0].CategoryDecision.BasedOnRevision != "legacy-v3-revision-unavailable" {
+		t.Fatalf("restart=%+v", loaded)
+	}
+}
+
+func finalChecklist() FinalChecklist {
+	return FinalChecklist{PhaseStreamReviewed: true, RoleProvenanceReviewed: true, RoleProvenanceEvidence: "registry inspected", OfficialExperimentalAcknowledged: true}
+}
+
+func TestFinalizeRejectsInvalidEffectiveStreamsMutationFree(t *testing.T) {
+	cases := map[string][]PhaseInterval{
+		"reset":          {{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "reset"}},
+		"unsupported":    {{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "postgame"}},
+		"gap":            {{StartGameSecond: 0, EndGameSecond: 40, GlobalPhase: "laning"}, {StartGameSecond: 50, EndGameSecond: 100, GlobalPhase: "midgame"}},
+		"overlap":        {{StartGameSecond: 0, EndGameSecond: 60, GlobalPhase: "laning"}, {StartGameSecond: 50, EndGameSecond: 100, GlobalPhase: "midgame"}},
+		"invalid_bounds": {{StartGameSecond: -1, EndGameSecond: 100, GlobalPhase: "laning"}},
+		"zero_width":     {{StartGameSecond: 0, EndGameSecond: 0, GlobalPhase: "laning"}, {StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "midgame"}},
+		"incomplete":     {{StartGameSecond: 0, EndGameSecond: 90, GlobalPhase: "laning"}},
+	}
+	for name, intervals := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, _ := New(t.TempDir())
+			r0, _ := s.Load("m1")
+			r1, err := s.DecideCategory("m1", CategoryContext{MachineCategory: "probe", ReplaySHA256: "sha"}, CategoryDecisionRequest{Decision: "confirm", Author: "paul", Reason: "checked", ExpectedRevision: r0.ReviewRevision})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r2, err := s.SetEffectivePhases("m1", ToJSON(intervals), "legacy-migration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = r1
+			beforeReview, beforeAudit := authoritativeBytes(t, s)
+			_, err = s.FinalizeReview("m1", FinalizeContext{ReplaySHA256: "sha", MachineCategory: "probe", PhaseRuleVersion: "phase-v1", EligibleSeconds: 100, MachineIntervals: []PhaseInterval{{StartGameSecond: 0, EndGameSecond: 100, GlobalPhase: "laning"}}}, FinalizeRequest{Author: "paul", Reason: "attempt", ExpectedRevision: r2.ReviewRevision, Checklist: finalChecklist()})
+			if err == nil || !strings.Contains(err.Error(), "final_phase_stream_invalid") {
+				t.Fatalf("err=%v", err)
+			}
+			assertAuthoritativeBytes(t, s, beforeReview, beforeAudit)
+			restarted, err := New(s.Root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertAuthoritativeBytes(t, restarted, beforeReview, beforeAudit)
+			loaded, _ := restarted.Load("m1")
+			if loaded.ReviewStatus == "reviewed" || len(loaded.FinalSnapshots) != 0 {
+				t.Fatalf("invalid final visible=%+v", loaded)
+			}
+		})
 	}
 }
 

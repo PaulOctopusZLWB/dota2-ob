@@ -49,6 +49,9 @@ type CategoryDecision struct {
 	Author            string `json:"author"`
 	Reason            string `json:"reason"`
 	AppliedAt         string `json:"applied_at"`
+	// BasedOnRevision is the exact optimistic revision accepted before this
+	// immutable decision advanced the document revision.
+	BasedOnRevision string `json:"based_on_revision"`
 }
 
 // FinalChecklist records the required human inspection evidence. Booleans are
@@ -81,6 +84,7 @@ type FinalizeContext struct {
 	ReplaySHA256     string
 	MachineCategory  string
 	PhaseRuleVersion string
+	EligibleSeconds  int
 	MachineIntervals []PhaseInterval
 }
 
@@ -220,6 +224,25 @@ func invalidateFinal(r *Review) {
 	if r.CurrentFinalSnapshotID != "" || r.ReviewStatus == "reviewed" {
 		r.CurrentFinalSnapshotID = ""
 		r.ReviewStatus = "in_progress"
+	}
+}
+
+func migrateMissingDecisionRevisions(r *Review, marker string) {
+	byID := map[string]string{}
+	for i := range r.CategoryDecisions {
+		if r.CategoryDecisions[i].BasedOnRevision == "" {
+			r.CategoryDecisions[i].BasedOnRevision = marker
+		}
+		byID[r.CategoryDecisions[i].ID] = r.CategoryDecisions[i].BasedOnRevision
+	}
+	for i := range r.FinalSnapshots {
+		if r.FinalSnapshots[i].CategoryDecision.BasedOnRevision == "" {
+			if based := byID[r.FinalSnapshots[i].CategoryDecision.ID]; based != "" {
+				r.FinalSnapshots[i].CategoryDecision.BasedOnRevision = based
+			} else {
+				r.FinalSnapshots[i].CategoryDecision.BasedOnRevision = marker
+			}
+		}
 	}
 }
 
@@ -745,7 +768,7 @@ func (s *Store) DecideCategory(matchID string, ctx CategoryContext, req Category
 	if strings.TrimSpace(effective) == "" {
 		return nil, fmt.Errorf("effective_category_required")
 	}
-	d := CategoryDecision{ID: fmt.Sprintf("category-%s-%04d", matchID, len(r.CategoryDecisions)+1), MachineCategory: ctx.MachineCategory, EffectiveCategory: effective, Decision: req.Decision, MatchID: matchID, ReplaySHA256: ctx.ReplaySHA256, Author: req.Author, Reason: req.Reason, AppliedAt: time.Now().UTC().Format(time.RFC3339)}
+	d := CategoryDecision{ID: fmt.Sprintf("category-%s-%04d", matchID, len(r.CategoryDecisions)+1), MachineCategory: ctx.MachineCategory, EffectiveCategory: effective, Decision: req.Decision, MatchID: matchID, ReplaySHA256: ctx.ReplaySHA256, Author: req.Author, Reason: req.Reason, AppliedAt: time.Now().UTC().Format(time.RFC3339), BasedOnRevision: r.ReviewRevision}
 	r.CategoryDecisions = append(r.CategoryDecisions, d)
 	r.ReplaySHA256 = ctx.ReplaySHA256
 	invalidateFinal(r)
@@ -807,7 +830,16 @@ func (s *Store) FinalizeReview(matchID string, ctx FinalizeContext, req Finalize
 	if len(stream) == 0 || ctx.ReplaySHA256 == "" {
 		return nil, fmt.Errorf("review_requirements_missing:phase_stream_or_replay_identity")
 	}
+	// A retained legacy overlay is not trusted merely because it decodes.
+	// Validate complete coverage and the exact official phase vocabulary
+	// against the authoritative eligible_seconds before changing any bytes.
+	if err := validateStream(stream, ctx.EligibleSeconds); err != nil {
+		return nil, fmt.Errorf("final_phase_stream_invalid:%w", err)
+	}
 	d := r.CategoryDecisions[len(r.CategoryDecisions)-1]
+	if d.BasedOnRevision == "" {
+		return nil, fmt.Errorf("review_requirements_missing:category_decision_revision")
+	}
 	if d.ReplaySHA256 != ctx.ReplaySHA256 || (ctx.MachineCategory != "" && d.MachineCategory != ctx.MachineCategory) {
 		return nil, fmt.Errorf("review_requirements_missing:category_decision_identity_mismatch")
 	}
@@ -840,8 +872,9 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		}
 		return nil, err
 	}
-	if r.SchemaVersion == version.CorrectionSchema || r.SchemaVersion == version.CorrectionSchemaV2 {
+	if r.SchemaVersion == version.CorrectionSchema || r.SchemaVersion == version.CorrectionSchemaV3 || r.SchemaVersion == version.CorrectionSchemaV2 {
 		wasV2 := r.SchemaVersion == version.CorrectionSchemaV2
+		wasV3 := r.SchemaVersion == version.CorrectionSchemaV3
 		r.SchemaVersion = version.CorrectionSchema
 		r.RuleVersion = version.CorrectionRuleVersion
 		if r.PhaseCorrections == nil {
@@ -853,6 +886,12 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		if r.FinalSnapshots == nil {
 			r.FinalSnapshots = []FinalReviewSnapshot{}
 		}
+		if wasV3 {
+			migrateMissingDecisionRevisions(&r, "legacy-v3-revision-unavailable")
+		}
+		if wasV2 {
+			migrateMissingDecisionRevisions(&r, "legacy-v2-revision-unavailable")
+		}
 		// A v2 "reviewed" flag had no signed category/stream/checklist proof.
 		// Migrate it deterministically to in_progress rather than grandfathering
 		// an unauditable completion.
@@ -862,7 +901,7 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		// Deterministically derive the revision when the persisted document
 		// predates the optimistic-concurrency field, so the UI always has a
 		// valid token for its first mutation.
-		if r.ReviewRevision == "" || wasV2 {
+		if r.ReviewRevision == "" || wasV2 || wasV3 {
 			r.ReviewRevision = revisionOfReview(&r)
 		}
 		return &r, nil
@@ -873,15 +912,20 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 	if err != nil {
 		return nil, err
 	}
-	if migrated.ReviewRevision == "" {
-		migrated.ReviewRevision = revisionOfReview(migrated)
+	migrateMissingDecisionRevisions(migrated, "legacy-v1-revision-unavailable")
+	// V1 had no usable signed-final contract. Always fail closed and derive a
+	// deterministic V4 revision from the complete migrated document.
+	if migrated.ReviewStatus == "reviewed" || migrated.CurrentFinalSnapshotID != "" {
+		migrated.ReviewStatus = "in_progress"
+		migrated.CurrentFinalSnapshotID = ""
 	}
+	migrated.ReviewRevision = revisionOfReview(migrated)
 	return migrated, nil
 }
 
-// MigrateV1 loads a legacy v1 review document, migrates it to the current v2
+// MigrateV1 loads a legacy v1 review document, migrates it to the current
 // schema, and writes the migrated document back without losing machine truth
-// or prior corrections. Missing documents become a fresh pending v2 review.
+// or prior corrections. Missing documents become a fresh pending review.
 func (s *Store) MigrateV1(matchID string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -898,7 +942,7 @@ func (s *Store) MigrateV1(matchID string) (*Review, error) {
 	return r, nil
 }
 
-// migrateV1 converts a legacy v1 review document to the v2 schema
+// migrateV1 converts a legacy v1 review document to the current schema
 // deterministically. It preserves the machine value (previous_value) and all
 // prior corrections: non-phase corrections are kept verbatim, and v1
 // phase-interval corrections are replayed against the machine stream to
@@ -982,6 +1026,12 @@ func (s *Store) migrateV1(matchID string, r *Review) (*Review, error) {
 	r.PhaseCorrections = append(phaseCorrections, r.PhaseCorrections...)
 	if r.Corrections == nil {
 		r.Corrections = []Correction{}
+	}
+	if r.CategoryDecisions == nil {
+		r.CategoryDecisions = []CategoryDecision{}
+	}
+	if r.FinalSnapshots == nil {
+		r.FinalSnapshots = []FinalReviewSnapshot{}
 	}
 	return r, nil
 }
@@ -1104,7 +1154,7 @@ func (s *Store) recoverPending() error {
 	if err := json.Unmarshal(b, &tx); err != nil {
 		return fmt.Errorf("decode transaction journal: %w", err)
 	}
-	if (tx.SchemaVersion != version.CorrectionRuleVersion && tx.SchemaVersion != version.CorrectionRuleVersionV3) || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
+	if (tx.SchemaVersion != version.CorrectionRuleVersion && tx.SchemaVersion != version.CorrectionRuleVersionV4 && tx.SchemaVersion != version.CorrectionRuleVersionV3) || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
 		return fmt.Errorf("invalid transaction journal")
 	}
 	reviewRoot := filepath.Join(s.Root, "matches") + string(os.PathSeparator)

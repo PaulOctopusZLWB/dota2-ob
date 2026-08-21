@@ -638,6 +638,7 @@ async function main() {
 		match_id:MATCH, decision:"confirm", author:"browser", reason:"frozen category and replay identity inspected", expected_revision:beforeFinal.review_revision,
 	  }, TOKEN);
 	  assert.strictEqual(category.status, 200, `category decision failed: ${JSON.stringify(category.body)}`);
+	  assert.strictEqual(category.body.data.category_decisions.at(-1).based_on_revision, beforeFinal.review_revision, "category decision lost accepted revision");
 	  const finalized = await post(page, `${restartedBase2}/api/replay/v1/reviews/finalize`, {
 		match_id:MATCH, author:"browser", reason:"full effective stream and required product checks inspected", expected_revision:category.body.data.review_revision,
 		checklist:{ phase_stream_reviewed:true, role_provenance_reviewed:true, role_provenance_evidence:"role registry sources and effective override inspected", official_experimental_acknowledged:true },
@@ -656,6 +657,7 @@ async function main() {
 	  const persistedFinal = afterFinalRestart.data.reviews.find(r => r.match_id === MATCH);
 	  assert.strictEqual(persistedFinal.review_status, "reviewed", "restart lost reviewed status");
 	  assert.strictEqual(persistedFinal.category_decisions.length, 1, "restart lost category decision");
+	  assert.strictEqual(persistedFinal.category_decisions[0].based_on_revision, beforeFinal.review_revision, "restart lost category based_on_revision");
 	  assert.strictEqual(persistedFinal.final_snapshots.length, 1, "restart lost final snapshot");
 	  assert.deepStrictEqual(afterFinalRestart.data.progress, { reviewed:1, pending:4, total:5 }, "restart reviewed/pending reconciliation");
 	  assert.ok(afterFinalRestart.data.queue.every(row => row.category), "restart lost a machine category");

@@ -212,7 +212,7 @@ func (s *Server) handleReviewFinalize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rv, err := s.Reviews.FinalizeReview(wire.MatchID, review.FinalizeContext{ReplaySHA256: catCtx.ReplaySHA256, MachineCategory: catCtx.MachineCategory, PhaseRuleVersion: ph.RuleVersion, MachineIntervals: machine}, wire.FinalizeRequest)
+	rv, err := s.Reviews.FinalizeReview(wire.MatchID, review.FinalizeContext{ReplaySHA256: catCtx.ReplaySHA256, MachineCategory: catCtx.MachineCategory, PhaseRuleVersion: ph.RuleVersion, EligibleSeconds: ph.EligibleSeconds, MachineIntervals: machine}, wire.FinalizeRequest)
 	if err != nil {
 		if review.IsStale(err) {
 			writeErr(w, http.StatusConflict, err.Error())
