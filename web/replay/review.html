@@ -133,6 +133,11 @@ async function load() {
       </div>`);
 
     const reviews = data.reviews || [];
+    const progress = data.progress || { reviewed: 0, pending: reviews.length, total: reviews.length };
+    c.insertAdjacentHTML("beforeend", `<div class="panel" id="review-progress">
+      <h3 style="margin-top:0">语料审核进度 ${esc(progress.reviewed)}/${esc(progress.total)}</h3>
+      <p class="hint">已完成 ${esc(progress.reviewed)} · 待处理 ${esc(progress.pending)}。只有分类决定与最终阶段流/检查清单共同签署后才计为完成。</p>
+    </div>`);
     for (const rv of reviews) {
       // Determine the current effective stream: persisted overlay when
       // present, else the machine stream (pre-first-correction fallback).
@@ -183,6 +188,9 @@ async function load() {
       const machineOptions = machine.map(iv =>
         `<li class="mach">${esc(PHASE[iv.global_phase] || iv.global_phase)} ${esc(iv.start_game_second)}–${esc(iv.end_game_second)}s · interval@${esc(iv.start_game_second)}-${esc(iv.end_game_second)}</li>`
       ).join("");
+      const categoryHistory = (rv.category_decisions || []).map(d =>
+        `<li>${esc(d.decision)}：<strong>${esc(d.effective_category)}</strong> · ${esc(d.author)} · ${esc(d.reason)} · ${esc(d.applied_at)}</li>`).join("");
+      const missing = (rv.missing_requirements || []).map(x => `<span class="badge err">${esc(x)}</span>`).join(" ");
 
       c.insertAdjacentHTML("beforeend", `
         <div class="panel">
@@ -190,6 +198,21 @@ async function load() {
             <span class="badge ${rv.review_status === 'reviewed' ? 'ok' : rv.review_status === 'in_progress' ? 'warn' : ''}">${esc(rv.review_status || "pending")}</span>
             <span class="badge">修订 ${esc((rv.review_revision || "").slice(0, 12))}</span></h3>
           <input type="hidden" id="phase-rev-${esc(rv.match_id)}" value="${esc(rv.review_revision || "")}">
+
+          <div class="panel" style="background:var(--panel-2)">
+            <h4 style="margin-top:0">结构分类决定（机器值不可变）</h4>
+            <p>机器分类：<strong class="mach" data-machine-category>${esc(rv.machine_category || "（缺失）")}</strong></p>
+            <p class="mono">match_id=${esc(rv.match_id)} · replay_sha256=${esc(rv.replay_sha256 || "（缺失）")}</p>
+            <div class="form-grid">
+              <label class="hint">决定<select id="cat-decision-${esc(rv.match_id)}"><option value="">请选择，不自动接受</option><option value="confirm">确认机器分类</option><option value="reclassify">重新分类</option><option value="replacement">记录替换决定</option></select></label>
+              <label class="hint">有效分类（确认时可留空）<input id="cat-effective-${esc(rv.match_id)}" placeholder="人工决定的分类"></label>
+              <label class="hint">作者<input id="cat-author-${esc(rv.match_id)}" placeholder="审核人"></label>
+              <label class="hint">原因（必填）<textarea id="cat-reason-${esc(rv.match_id)}" rows="2"></textarea></label>
+            </div>
+            <button onclick="submitCategory('${esc(rv.match_id)}')">提交分类决定</button>
+            <p id="cat-result-${esc(rv.match_id)}" class="hint"></p>
+            <ul class="hint">${categoryHistory || "<li>尚无人工分类决定</li>"}</ul>
+          </div>
 
           <div class="form-grid">
             <div>
@@ -252,6 +275,22 @@ async function load() {
           <details style="margin-top:10px"><summary>事件/角色校正历史</summary>
             <table><thead><tr><th>ID</th><th>类型</th><th>作者</th><th>原因</th><th>引用</th><th>机器值</th><th>有效值</th><th>时间/算法版本</th></tr></thead><tbody>${corrections || `<tr><td colspan="8" class="hint">无</td></tr>`}</tbody></table>
           </details>
+
+          <div class="panel" style="background:var(--panel-2)" data-final-review>
+            <h4 style="margin-top:0">最终人工审核签署</h4>
+            <p>缺失要求：${missing || '<span class="badge ok">无</span>'}</p>
+            <label><input id="final-phase-${esc(rv.match_id)}" type="checkbox" style="width:auto"> 我已逐段检查并接受/校正当前完整阶段流</label><br>
+            <label><input id="final-role-${esc(rv.match_id)}" type="checkbox" style="width:auto"> 我已抽查名义角色的来源/人工覆盖 provenance</label>
+            <input id="final-role-evidence-${esc(rv.match_id)}" placeholder="角色来源检查证据（必填）">
+            <label><input id="final-style-${esc(rv.match_id)}" type="checkbox" style="width:auto"> 我确认官方实线分数与 V3 实验虚线分数严格分离</label>
+            <div class="form-grid" style="margin-top:8px">
+              <label class="hint">作者<input id="final-author-${esc(rv.match_id)}" placeholder="审核人"></label>
+              <label class="hint">签署原因（必填）<textarea id="final-reason-${esc(rv.match_id)}" rows="2"></textarea></label>
+            </div>
+            <button onclick="finalizeReview('${esc(rv.match_id)}')">签署当前修订并完成审核</button>
+            <p class="hint">所有选择默认未勾选；签署后任何分类、阶段、角色或事件变更都会使本次签署失效。</p>
+            <p id="final-result-${esc(rv.match_id)}" class="hint"></p>
+          </div>
         </div>`);
     }
     if (reviews.length === 0) {
@@ -381,8 +420,45 @@ async function submitEvent(matchId) {
   else { alert("提交失败: " + JSON.stringify(out)); }
 }
 
+async function submitCategory(matchId) {
+  const el = document.getElementById("cat-result-" + matchId);
+  const decision = document.getElementById("cat-decision-" + matchId).value;
+  const author = document.getElementById("cat-author-" + matchId).value;
+  const reason = document.getElementById("cat-reason-" + matchId).value;
+  if (!decision || !author || !reason) { el.textContent = "决定、作者、原因均必填"; return; }
+  const resp = await postCorrection("/reviews/category-decisions", {
+    match_id: matchId, decision, author, reason,
+    effective_category: document.getElementById("cat-effective-" + matchId).value,
+    expected_revision: document.getElementById("phase-rev-" + matchId).value,
+  });
+  const out = await resp.json();
+  if (resp.ok) location.reload(); else el.textContent = `提交失败(${resp.status}): ${JSON.stringify(out)}`;
+}
+
+async function finalizeReview(matchId) {
+  const el = document.getElementById("final-result-" + matchId);
+  const payload = {
+    match_id: matchId,
+    author: document.getElementById("final-author-" + matchId).value,
+    reason: document.getElementById("final-reason-" + matchId).value,
+    expected_revision: document.getElementById("phase-rev-" + matchId).value,
+    checklist: {
+      phase_stream_reviewed: document.getElementById("final-phase-" + matchId).checked,
+      role_provenance_reviewed: document.getElementById("final-role-" + matchId).checked,
+      role_provenance_evidence: document.getElementById("final-role-evidence-" + matchId).value,
+      official_experimental_acknowledged: document.getElementById("final-style-" + matchId).checked,
+    },
+  };
+  if (!payload.author || !payload.reason) { el.textContent = "作者与签署原因必填"; return; }
+  const resp = await postCorrection("/reviews/finalize", payload);
+  const out = await resp.json();
+  if (resp.ok) location.reload(); else el.textContent = `签署失败(${resp.status}): ${JSON.stringify(out)}`;
+}
+
 window.submitPhase = submitPhase;
 window.submitEvent = submitEvent;
+window.submitCategory = submitCategory;
+window.finalizeReview = finalizeReview;
 load();
 </script>
 </body>

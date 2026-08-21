@@ -37,8 +37,12 @@ const (
 	// version; v1 documents are still readable and are migrated
 	// deterministically to the current version on load.
 	CorrectionSchemaV1 = "replay.corrections.v1"
+	// CorrectionSchemaV2 is the legacy typed phase-operation schema.
+	CorrectionSchemaV2 = "replay.corrections.v2"
+	// CorrectionSchemaV3 added category decisions and final review snapshots.
+	CorrectionSchemaV3 = "replay.corrections.v3"
 	// CorrectionSchema is the review/correction overlay schema version.
-	CorrectionSchema = "replay.corrections.v2"
+	CorrectionSchema = "replay.corrections.v4"
 	// RoleSchema is the nominal role registry schema version.
 	RoleSchema = "ti2026.roles.v1"
 	// ReportSchema is the match report schema version. v4 includes the immutable
@@ -58,5 +62,14 @@ const (
 	// complete structured aggregation-lineage rule set.
 	ScoreRuleVersion = "ti2026.scoring.v5"
 	// CorrectionRuleVersion identifies the review/correction overlay rule set.
-	CorrectionRuleVersion = "ti2026.corrections.v3"
+	CorrectionRuleVersion = "ti2026.corrections.v6"
+	// CorrectionRuleVersionV5 is accepted only for recovery of a durable
+	// transaction journal prepared by the immediately preceding release.
+	CorrectionRuleVersionV5 = "ti2026.corrections.v5"
+	// CorrectionRuleVersionV4 is accepted only for recovery of an older durable
+	// transaction journal.
+	CorrectionRuleVersionV4 = "ti2026.corrections.v4"
+	// CorrectionRuleVersionV3 remains accepted only for recovery of an older
+	// durable transaction journal.
+	CorrectionRuleVersionV3 = "ti2026.corrections.v3"
 )

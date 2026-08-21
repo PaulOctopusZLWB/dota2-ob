@@ -109,6 +109,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(Version+"/reviews/audit", s.handleReviewsAudit)
 	mux.HandleFunc(Version+"/reviews/phase-corrections", s.handlePhaseCorrections)
 	mux.HandleFunc(Version+"/reviews/event-corrections", s.handleEventCorrections)
+	mux.HandleFunc(Version+"/reviews/category-decisions", s.handleCategoryDecisions)
+	mux.HandleFunc(Version+"/reviews/finalize", s.handleReviewFinalize)
 	mux.HandleFunc(Version+"/reviews/status", s.handleReviewStatus)
 	mux.HandleFunc(Version+"/roles/overrides", s.handleRoleOverrides)
 	mux.HandleFunc(Version+"/scores/corpus", s.handleScoreCorpus)

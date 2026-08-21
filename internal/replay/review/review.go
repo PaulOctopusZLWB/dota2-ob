@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,76 @@ const (
 	// KindRoleOverride corrects a nominal role (source-backed manual override).
 	KindRoleOverride Kind = "role_override"
 )
+
+// CategoryDecision is an immutable human decision over the server-resolved
+// frozen input category. MachineCategory and ReplaySHA256 are never accepted
+// from the client as truth.
+type CategoryDecision struct {
+	ID                string `json:"id"`
+	MachineCategory   string `json:"machine_category"`
+	EffectiveCategory string `json:"effective_category"`
+	Decision          string `json:"decision"` // confirm|reclassify|replacement
+	MatchID           string `json:"match_id"`
+	ReplaySHA256      string `json:"replay_sha256"`
+	Author            string `json:"author"`
+	Reason            string `json:"reason"`
+	AppliedAt         string `json:"applied_at"`
+	// BasedOnRevision is the exact optimistic revision accepted before this
+	// immutable decision advanced the document revision.
+	BasedOnRevision string `json:"based_on_revision"`
+}
+
+// FinalChecklist records the required human inspection evidence. Booleans are
+// intentionally never defaulted by the server or UI.
+type FinalChecklist struct {
+	PhaseStreamReviewed              bool   `json:"phase_stream_reviewed"`
+	RoleProvenanceReviewed           bool   `json:"role_provenance_reviewed"`
+	RoleProvenanceEvidence           string `json:"role_provenance_evidence"`
+	OfficialExperimentalAcknowledged bool   `json:"official_experimental_acknowledged"`
+}
+
+// FinalReviewSnapshot is an immutable sign-off of one exact review revision.
+type FinalReviewSnapshot struct {
+	ID               string           `json:"id"`
+	MatchID          string           `json:"match_id"`
+	ReplaySHA256     string           `json:"replay_sha256"`
+	SignedRevision   string           `json:"signed_revision"`
+	PhaseRuleVersion string           `json:"phase_rule_version"`
+	FinalPhaseStream []PhaseInterval  `json:"final_phase_stream"`
+	CategoryDecision CategoryDecision `json:"category_decision"`
+	Checklist        FinalChecklist   `json:"checklist"`
+	Author           string           `json:"author"`
+	Reason           string           `json:"reason"`
+	SignedAt         string           `json:"signed_at"`
+}
+
+// CategoryContext and FinalizeContext are authoritative server-side inputs.
+type CategoryContext struct{ MachineCategory, ReplaySHA256 string }
+type FinalizeContext struct {
+	ReplaySHA256     string
+	MachineCategory  string
+	PhaseRuleVersion string
+	EligibleSeconds  int
+	MachineIntervals []PhaseInterval
+}
+
+type CategoryDecisionRequest struct {
+	Decision          string `json:"decision"`
+	EffectiveCategory string `json:"effective_category"`
+	Author            string `json:"author"`
+	Reason            string `json:"reason"`
+	ExpectedRevision  string `json:"expected_revision"`
+	MachineCategory   string `json:"machine_category,omitempty"`
+	ReplaySHA256      string `json:"replay_sha256,omitempty"`
+}
+
+type FinalizeRequest struct {
+	Author           string         `json:"author"`
+	Reason           string         `json:"reason"`
+	ExpectedRevision string         `json:"expected_revision"`
+	ReplaySHA256     string         `json:"replay_sha256,omitempty"`
+	Checklist        FinalChecklist `json:"checklist"`
+}
 
 // MachineTruth is the authoritative machine-side facts for one correction:
 // the immutable machine value, the replay content identity, and the machine
@@ -113,11 +184,15 @@ type PhaseCorrectionV2 struct {
 // Review is the per-match review document: the machine overlay target plus all
 // corrections and the effective (corrected) overlay stream.
 type Review struct {
-	SchemaVersion string       `json:"schema_version"`
-	RuleVersion   string       `json:"rule_version"`
-	MatchID       string       `json:"match_id"`
-	ReplaySHA256  string       `json:"replay_sha256,omitempty"`
-	Corrections   []Correction `json:"corrections"`
+	SchemaVersion string `json:"schema_version"`
+	RuleVersion   string `json:"rule_version"`
+	MatchID       string `json:"match_id"`
+	ReplaySHA256  string `json:"replay_sha256,omitempty"`
+	// MachineCategory and MissingRequirements are resolved for queue reads.
+	// They are informational and excluded from revision derivation.
+	MachineCategory     string       `json:"machine_category,omitempty"`
+	MissingRequirements []string     `json:"missing_requirements,omitempty"`
+	Corrections         []Correction `json:"corrections"`
 	// PhaseCorrections is the ordered v2 audit of phase operations. v1
 	// documents are migrated deterministically into this field on load.
 	PhaseCorrections []PhaseCorrectionV2 `json:"phase_corrections,omitempty"`
@@ -134,10 +209,75 @@ type Review struct {
 	// 409 and changes no bytes or counts.
 	ReviewRevision string `json:"review_revision,omitempty"`
 	// ReviewStatus is the review workflow state.
-	ReviewStatus string `json:"review_status"` // pending|in_progress|reviewed
+	ReviewStatus      string                `json:"review_status"` // pending|in_progress|reviewed
+	CategoryDecisions []CategoryDecision    `json:"category_decisions,omitempty"`
+	FinalSnapshots    []FinalReviewSnapshot `json:"final_snapshots,omitempty"`
+	// CurrentFinalSnapshotID is cleared by every later analytical/review
+	// mutation. Historical snapshots remain immutable for audit.
+	CurrentFinalSnapshotID string `json:"current_final_snapshot_id,omitempty"`
 	// RecomputeVersion is the scoring contract version that a synchronous
 	// recompute ran under (set by the API after role-override recompute).
 	RecomputeVersion string `json:"recompute_version,omitempty"`
+}
+
+func invalidateFinal(r *Review) {
+	if r.CurrentFinalSnapshotID != "" || r.ReviewStatus == "reviewed" {
+		r.CurrentFinalSnapshotID = ""
+		r.ReviewStatus = "in_progress"
+	}
+}
+
+// IsUsableReviewRevision reports whether revision is a persisted optimistic-
+// concurrency token produced by revisionOfReview. Legacy migration markers
+// deliberately do not match this shape and can never authorize sign-off.
+func IsUsableReviewRevision(revision string) bool {
+	if len(revision) != len("rev-")+32 || !strings.HasPrefix(revision, "rev-") {
+		return false
+	}
+	for _, c := range revision[len("rev-"):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// HasUsableCategoryDecisionRevision validates both the latest category
+// decision and, when present, the category decision embedded in the current
+// final snapshot. Historical marker-backed decisions remain visible but do
+// not satisfy the completion gate.
+func HasUsableCategoryDecisionRevision(r *Review) bool {
+	if len(r.CategoryDecisions) == 0 || !IsUsableReviewRevision(r.CategoryDecisions[len(r.CategoryDecisions)-1].BasedOnRevision) {
+		return false
+	}
+	if r.CurrentFinalSnapshotID == "" {
+		return true
+	}
+	for i := range r.FinalSnapshots {
+		if r.FinalSnapshots[i].ID == r.CurrentFinalSnapshotID {
+			return IsUsableReviewRevision(r.FinalSnapshots[i].CategoryDecision.BasedOnRevision)
+		}
+	}
+	return false
+}
+
+func migrateMissingDecisionRevisions(r *Review, marker string) {
+	byID := map[string]string{}
+	for i := range r.CategoryDecisions {
+		if r.CategoryDecisions[i].BasedOnRevision == "" {
+			r.CategoryDecisions[i].BasedOnRevision = marker
+		}
+		byID[r.CategoryDecisions[i].ID] = r.CategoryDecisions[i].BasedOnRevision
+	}
+	for i := range r.FinalSnapshots {
+		if r.FinalSnapshots[i].CategoryDecision.BasedOnRevision == "" {
+			if based := byID[r.FinalSnapshots[i].CategoryDecision.ID]; based != "" {
+				r.FinalSnapshots[i].CategoryDecision.BasedOnRevision = based
+			} else {
+				r.FinalSnapshots[i].CategoryDecision.BasedOnRevision = marker
+			}
+		}
+	}
 }
 
 // Audit is the append-only audit log for one review store.
@@ -302,6 +442,7 @@ func (s *Store) AddAuthoritative(matchID string, c Correction, truth MachineTrut
 		c.AppliedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	r.Corrections = append(r.Corrections, c)
+	invalidateFinal(r)
 	if r.ReplaySHA256 == "" {
 		r.ReplaySHA256 = truth.ReplaySHA256
 	}
@@ -387,6 +528,7 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 	}
 	r.PhaseCorrections = append(r.PhaseCorrections, pc)
 	r.EffectivePhaseIntervals = ToJSON(after)
+	invalidateFinal(r)
 	if r.ReplaySHA256 == "" {
 		r.ReplaySHA256 = ctx.ReplaySHA256
 	}
@@ -416,11 +558,14 @@ func (s *Store) ApplyPhaseOp(matchID string, ctx PhaseContext, req PhaseOpReq) (
 func revisionOfReview(r *Review) string {
 	h := sha256.New()
 	payload := struct {
-		Corrections             []Correction        `json:"corrections"`
-		PhaseCorrections        []PhaseCorrectionV2 `json:"phase_corrections"`
-		EffectivePhaseIntervals []json.RawMessage   `json:"effective_phase_intervals"`
-		ReviewStatus            string              `json:"review_status"`
-	}{r.Corrections, r.PhaseCorrections, r.EffectivePhaseIntervals, r.ReviewStatus}
+		Corrections             []Correction          `json:"corrections"`
+		PhaseCorrections        []PhaseCorrectionV2   `json:"phase_corrections"`
+		EffectivePhaseIntervals []json.RawMessage     `json:"effective_phase_intervals"`
+		ReviewStatus            string                `json:"review_status"`
+		CategoryDecisions       []CategoryDecision    `json:"category_decisions"`
+		FinalSnapshots          []FinalReviewSnapshot `json:"final_snapshots"`
+		CurrentFinalSnapshotID  string                `json:"current_final_snapshot_id"`
+	}{r.Corrections, r.PhaseCorrections, r.EffectivePhaseIntervals, r.ReviewStatus, r.CategoryDecisions, r.FinalSnapshots, r.CurrentFinalSnapshotID}
 	if b, err := json.Marshal(payload); err == nil {
 		h.Write(b)
 	}
@@ -564,6 +709,7 @@ func (s *Store) SetEffectivePhases(matchID string, effective []json.RawMessage, 
 		return nil, err
 	}
 	r.EffectivePhaseIntervals = effective
+	invalidateFinal(r)
 	r.ReviewRevision = revisionOfReview(r)
 	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: author, Action: "effective_phase_overlay", MatchID: matchID,
@@ -591,11 +737,156 @@ func (s *Store) SetReviewStatus(matchID, status, author, expectedRevision string
 	if expectedRevision != r.ReviewRevision {
 		return nil, staleErrorf("review_revision_mismatch:expected=%s current=%s", expectedRevision, r.ReviewRevision)
 	}
+	if status == "reviewed" && r.CurrentFinalSnapshotID == "" {
+		return nil, fmt.Errorf("review_requirements_missing:final_snapshot")
+	}
+	if status == "reviewed" {
+		found := false
+		for i := range r.FinalSnapshots {
+			if r.FinalSnapshots[i].ID == r.CurrentFinalSnapshotID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("review_requirements_missing:current_final_snapshot_invalid")
+		}
+		if !HasUsableCategoryDecisionRevision(r) {
+			return nil, fmt.Errorf("review_requirements_missing:category_decision_revision")
+		}
+	}
+	if status != "reviewed" {
+		r.CurrentFinalSnapshotID = ""
+	}
 	r.ReviewStatus = status
 	r.ReviewRevision = revisionOfReview(r)
 	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{
 		Author: author, Action: "review_status", MatchID: matchID, Summary: status,
 	}); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// DecideCategory records an auditable classification using only server-side
+// machine category and replay identity.
+func (s *Store) DecideCategory(matchID string, ctx CategoryContext, req CategoryDecisionRequest) (*Review, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{err}
+	}
+	r, err := s.loadUnlocked(matchID)
+	if err != nil {
+		return nil, err
+	}
+	if req.ExpectedRevision == "" || req.ExpectedRevision != r.ReviewRevision {
+		return nil, staleErrorf("review_revision_mismatch:expected=%s current=%s", req.ExpectedRevision, r.ReviewRevision)
+	}
+	if strings.TrimSpace(req.Author) == "" || strings.TrimSpace(req.Reason) == "" || strings.TrimSpace(ctx.MachineCategory) == "" || ctx.ReplaySHA256 == "" {
+		return nil, fmt.Errorf("category_author_reason_machine_identity_required")
+	}
+	if req.MachineCategory != "" && req.MachineCategory != ctx.MachineCategory {
+		return nil, fmt.Errorf("machine_category_mismatch")
+	}
+	if req.ReplaySHA256 != "" && req.ReplaySHA256 != ctx.ReplaySHA256 {
+		return nil, fmt.Errorf("replay_sha256_mismatch")
+	}
+	if req.Decision != "confirm" && req.Decision != "reclassify" && req.Decision != "replacement" {
+		return nil, fmt.Errorf("invalid_category_decision")
+	}
+	effective := req.EffectiveCategory
+	if req.Decision == "confirm" {
+		if effective != "" && effective != ctx.MachineCategory {
+			return nil, fmt.Errorf("confirmed_category_must_match_machine")
+		}
+		effective = ctx.MachineCategory
+	}
+	if strings.TrimSpace(effective) == "" {
+		return nil, fmt.Errorf("effective_category_required")
+	}
+	d := CategoryDecision{ID: fmt.Sprintf("category-%s-%04d", matchID, len(r.CategoryDecisions)+1), MachineCategory: ctx.MachineCategory, EffectiveCategory: effective, Decision: req.Decision, MatchID: matchID, ReplaySHA256: ctx.ReplaySHA256, Author: req.Author, Reason: req.Reason, AppliedAt: time.Now().UTC().Format(time.RFC3339), BasedOnRevision: r.ReviewRevision}
+	r.CategoryDecisions = append(r.CategoryDecisions, d)
+	r.ReplaySHA256 = ctx.ReplaySHA256
+	invalidateFinal(r)
+	if r.ReviewStatus == "pending" || r.ReviewStatus == "" {
+		r.ReviewStatus = "in_progress"
+	}
+	r.ReviewRevision = revisionOfReview(r)
+	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{Author: req.Author, Action: "category_decision", MatchID: matchID, CorrectionID: d.ID, Summary: req.Decision + " " + effective}); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// FinalizeReview atomically signs the exact current effective phase stream and
+// checklist and transitions to reviewed. No client phase/category/hash is
+// trusted.
+func (s *Store) FinalizeReview(matchID string, ctx FinalizeContext, req FinalizeRequest) (*Review, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.recoverPending(); err != nil {
+		return nil, &storageError{err}
+	}
+	r, err := s.loadUnlocked(matchID)
+	if err != nil {
+		return nil, err
+	}
+	if req.ExpectedRevision == "" || req.ExpectedRevision != r.ReviewRevision {
+		return nil, staleErrorf("review_revision_mismatch:expected=%s current=%s", req.ExpectedRevision, r.ReviewRevision)
+	}
+	if strings.TrimSpace(req.Author) == "" || strings.TrimSpace(req.Reason) == "" {
+		return nil, fmt.Errorf("final_author_reason_required")
+	}
+	if req.ReplaySHA256 != "" && req.ReplaySHA256 != ctx.ReplaySHA256 {
+		return nil, fmt.Errorf("replay_sha256_mismatch")
+	}
+	missing := []string{}
+	if len(r.CategoryDecisions) == 0 {
+		missing = append(missing, "category_decision")
+	}
+	if !req.Checklist.PhaseStreamReviewed {
+		missing = append(missing, "phase_stream_reviewed")
+	}
+	if !req.Checklist.RoleProvenanceReviewed || strings.TrimSpace(req.Checklist.RoleProvenanceEvidence) == "" {
+		missing = append(missing, "role_provenance_evidence")
+	}
+	if !req.Checklist.OfficialExperimentalAcknowledged {
+		missing = append(missing, "official_experimental_acknowledged")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("review_requirements_missing:%s", strings.Join(missing, ","))
+	}
+	stream := append([]PhaseInterval(nil), ctx.MachineIntervals...)
+	if len(r.EffectivePhaseIntervals) > 0 {
+		stream, err = FromJSON(r.EffectivePhaseIntervals)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(stream) == 0 || ctx.ReplaySHA256 == "" {
+		return nil, fmt.Errorf("review_requirements_missing:phase_stream_or_replay_identity")
+	}
+	// A retained legacy overlay is not trusted merely because it decodes.
+	// Validate complete coverage and the exact official phase vocabulary
+	// against the authoritative eligible_seconds before changing any bytes.
+	if err := validateStream(stream, ctx.EligibleSeconds); err != nil {
+		return nil, fmt.Errorf("final_phase_stream_invalid:%w", err)
+	}
+	d := r.CategoryDecisions[len(r.CategoryDecisions)-1]
+	if !IsUsableReviewRevision(d.BasedOnRevision) {
+		return nil, fmt.Errorf("review_requirements_missing:category_decision_revision")
+	}
+	if d.ReplaySHA256 != ctx.ReplaySHA256 || (ctx.MachineCategory != "" && d.MachineCategory != ctx.MachineCategory) {
+		return nil, fmt.Errorf("review_requirements_missing:category_decision_identity_mismatch")
+	}
+	snap := FinalReviewSnapshot{ID: fmt.Sprintf("final-%s-%04d", matchID, len(r.FinalSnapshots)+1), MatchID: matchID, ReplaySHA256: ctx.ReplaySHA256, SignedRevision: r.ReviewRevision, PhaseRuleVersion: ctx.PhaseRuleVersion, FinalPhaseStream: stream, CategoryDecision: d, Checklist: req.Checklist, Author: req.Author, Reason: req.Reason, SignedAt: time.Now().UTC().Format(time.RFC3339)}
+	r.FinalSnapshots = append(r.FinalSnapshots, snap)
+	r.CurrentFinalSnapshotID = snap.ID
+	r.ReviewStatus = "reviewed"
+	r.ReplaySHA256 = ctx.ReplaySHA256
+	r.ReviewRevision = revisionOfReview(r)
+	if err := s.commitReviewAndAudit(matchID, r, AuditEntry{Author: req.Author, Action: "final_review_snapshot", MatchID: matchID, CorrectionID: snap.ID, Summary: "reviewed"}); err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -618,14 +909,45 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 		}
 		return nil, err
 	}
-	if r.SchemaVersion == version.CorrectionSchema {
+	if r.SchemaVersion == version.CorrectionSchema || r.SchemaVersion == version.CorrectionSchemaV3 || r.SchemaVersion == version.CorrectionSchemaV2 {
+		wasV2 := r.SchemaVersion == version.CorrectionSchemaV2
+		wasV3 := r.SchemaVersion == version.CorrectionSchemaV3
+		categorySignoffInvalidated := false
+		r.SchemaVersion = version.CorrectionSchema
+		r.RuleVersion = version.CorrectionRuleVersion
 		if r.PhaseCorrections == nil {
 			r.PhaseCorrections = []PhaseCorrectionV2{}
+		}
+		if r.CategoryDecisions == nil {
+			r.CategoryDecisions = []CategoryDecision{}
+		}
+		if r.FinalSnapshots == nil {
+			r.FinalSnapshots = []FinalReviewSnapshot{}
+		}
+		if wasV3 {
+			migrateMissingDecisionRevisions(&r, "legacy-v3-revision-unavailable")
+		}
+		if wasV2 {
+			migrateMissingDecisionRevisions(&r, "legacy-v2-revision-unavailable")
+		}
+		// V3 could persist an apparent sign-off before category decisions
+		// recorded an accepted optimistic revision. This also covers a V3
+		// document that an earlier V4 reader already tagged as current schema.
+		// Preserve immutable history, but never retain marker-backed approval.
+		if (r.ReviewStatus == "reviewed" || r.CurrentFinalSnapshotID != "") && !HasUsableCategoryDecisionRevision(&r) {
+			invalidateFinal(&r)
+			categorySignoffInvalidated = true
+		}
+		// A v2 "reviewed" flag had no signed category/stream/checklist proof.
+		// Migrate it deterministically to in_progress rather than grandfathering
+		// an unauditable completion.
+		if r.ReviewStatus == "reviewed" && r.CurrentFinalSnapshotID == "" {
+			r.ReviewStatus = "in_progress"
 		}
 		// Deterministically derive the revision when the persisted document
 		// predates the optimistic-concurrency field, so the UI always has a
 		// valid token for its first mutation.
-		if r.ReviewRevision == "" {
+		if !IsUsableReviewRevision(r.ReviewRevision) || wasV2 || wasV3 || categorySignoffInvalidated {
 			r.ReviewRevision = revisionOfReview(&r)
 		}
 		return &r, nil
@@ -636,15 +958,20 @@ func (s *Store) loadUnlocked(matchID string) (*Review, error) {
 	if err != nil {
 		return nil, err
 	}
-	if migrated.ReviewRevision == "" {
-		migrated.ReviewRevision = revisionOfReview(migrated)
+	migrateMissingDecisionRevisions(migrated, "legacy-v1-revision-unavailable")
+	// V1 had no usable signed-final contract. Always fail closed and derive a
+	// deterministic V4 revision from the complete migrated document.
+	if migrated.ReviewStatus == "reviewed" || migrated.CurrentFinalSnapshotID != "" {
+		migrated.ReviewStatus = "in_progress"
+		migrated.CurrentFinalSnapshotID = ""
 	}
+	migrated.ReviewRevision = revisionOfReview(migrated)
 	return migrated, nil
 }
 
-// MigrateV1 loads a legacy v1 review document, migrates it to the current v2
+// MigrateV1 loads a legacy v1 review document, migrates it to the current
 // schema, and writes the migrated document back without losing machine truth
-// or prior corrections. Missing documents become a fresh pending v2 review.
+// or prior corrections. Missing documents become a fresh pending review.
 func (s *Store) MigrateV1(matchID string) (*Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -661,7 +988,7 @@ func (s *Store) MigrateV1(matchID string) (*Review, error) {
 	return r, nil
 }
 
-// migrateV1 converts a legacy v1 review document to the v2 schema
+// migrateV1 converts a legacy v1 review document to the current schema
 // deterministically. It preserves the machine value (previous_value) and all
 // prior corrections: non-phase corrections are kept verbatim, and v1
 // phase-interval corrections are replayed against the machine stream to
@@ -745,6 +1072,12 @@ func (s *Store) migrateV1(matchID string, r *Review) (*Review, error) {
 	r.PhaseCorrections = append(phaseCorrections, r.PhaseCorrections...)
 	if r.Corrections == nil {
 		r.Corrections = []Correction{}
+	}
+	if r.CategoryDecisions == nil {
+		r.CategoryDecisions = []CategoryDecision{}
+	}
+	if r.FinalSnapshots == nil {
+		r.FinalSnapshots = []FinalReviewSnapshot{}
 	}
 	return r, nil
 }
@@ -867,7 +1200,7 @@ func (s *Store) recoverPending() error {
 	if err := json.Unmarshal(b, &tx); err != nil {
 		return fmt.Errorf("decode transaction journal: %w", err)
 	}
-	if tx.SchemaVersion != version.CorrectionRuleVersion || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
+	if (tx.SchemaVersion != version.CorrectionRuleVersion && tx.SchemaVersion != version.CorrectionRuleVersionV5 && tx.SchemaVersion != version.CorrectionRuleVersionV4 && tx.SchemaVersion != version.CorrectionRuleVersionV3) || tx.AuditPath != s.AuditPath() || filepath.Dir(tx.ReviewPath) == "." || !filepath.IsAbs(tx.ReviewPath) || filepath.Clean(tx.ReviewPath) != tx.ReviewPath {
 		return fmt.Errorf("invalid transaction journal")
 	}
 	reviewRoot := filepath.Join(s.Root, "matches") + string(os.PathSeparator)
@@ -901,6 +1234,7 @@ func (s *Store) commitReviewAndAudit(matchID string, r *Review, e AuditEntry) er
 	} else {
 		audit = Audit{SchemaVersion: version.CorrectionSchema, Entries: []AuditEntry{}}
 	}
+	audit.SchemaVersion = version.CorrectionSchema
 	e.Seq = int64(len(audit.Entries) + 1)
 	e.AppliedAt = time.Now().UTC()
 	e.MatchID = matchID
