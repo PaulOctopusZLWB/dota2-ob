@@ -611,6 +611,15 @@ func (s *Store) RebuildCatalog(now string) (*Catalog, error) {
 
 func (s *Store) catalogRow(matchID string) CatalogRow {
 	row := CatalogRow{MatchID: matchID}
+	// Category is frozen input, not derived terminal state. Load it before the
+	// authoritative status fast path so verified, quarantined, and resumed
+	// rows retain the exact manifest classification after every rebuild.
+	var input struct {
+		Category string `json:"category"`
+	}
+	if err := s.ReadJSON(matchID, ArtifactInput, &input); err == nil {
+		row.Category = input.Category
+	}
 	// Authoritative gated state: prefer the persisted status record written
 	// after the publication gate. It is the single source of truth for
 	// terminal status and publication; derivation is only a fallback for

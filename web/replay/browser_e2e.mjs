@@ -307,6 +307,11 @@ async function main() {
   const WORK = mkdtempSync(join(tmpdir(), "r3f-browser-"));
   const DATA = join(WORK, "probe");
   cpSync(SOURCE_ROOT, DATA, { recursive: true });
+  // Rebuild only the disposable catalog so this scenario exercises category
+  // recovery from frozen input.json without touching the preserved source.
+  const rebuild = spawn(BIN, ["replay", "rebuild-catalog", "--data-root", DATA], { cwd: ROOT, stdio: "inherit" });
+  const rebuildCode = await new Promise((r) => rebuild.on("close", r));
+  assert.strictEqual(rebuildCode, 0, "disposable catalog rebuild failed");
   const phasePath = join(DATA, "matches", MATCH, "phases.json");
   const phaseHashBefore = sha256File(phasePath);
 
@@ -326,6 +331,18 @@ async function main() {
       page.on("pageerror", (e) => errors.push(String(e)));
 
       await setToken(page, base);
+	  const initialReviewQueue = await api(page, `${base}/api/replay/v1/reviews/queue`);
+	  assert.strictEqual(initialReviewQueue.data.queue.length, 5, "review queue must contain five probes");
+	  assert.ok(initialReviewQueue.data.queue.every(row => row.category && row.replay_sha256), "all five probes must expose frozen category and replay identity");
+	  assert.deepStrictEqual(initialReviewQueue.data.progress, { reviewed: 0, pending: 5, total: 5 }, "initial review progress");
+	  const initialTarget = initialReviewQueue.data.reviews.find(r => r.match_id === MATCH);
+	  const premature = await post(page, `${base}/api/replay/v1/reviews/status`, { match_id:MATCH, status:"reviewed", author:"browser", expected_revision:initialTarget.review_revision }, TOKEN);
+	  assert.strictEqual(premature.status, 400, "premature completion must fail closed");
+	  assert.ok(premature.body.error.includes("final_snapshot"), `premature reason=${premature.body.error}`);
+	  await page.goto(`${base}/review.html`, { waitUntil: "domcontentloaded" });
+	  await page.waitForSelector("[data-machine-category]", { timeout: 15000 });
+	  assert.strictEqual(await page.$$eval("[data-machine-category]", els => els.filter(e => e.textContent.trim()).length), 5, "rendered non-empty machine categories");
+	  assert.ok((await page.evaluate(() => document.body.innerText)).includes("语料审核进度 0/5"), "rendered initial corpus progress");
 	  await assertFrozenOpportunityAndLineage(page, base, true);
 
       // ============ Coherent product workflow: corpus + 5 matches ============
@@ -614,9 +631,38 @@ async function main() {
         writeFileSync(factsPath, factsBytes);
       }
 
+      // ============ Category decision + final signed snapshot + restart ==========
+	  const beforeFinalQueue = await api(page, `${restartedBase2}/api/replay/v1/reviews/queue`);
+	  const beforeFinal = beforeFinalQueue.data.reviews.find(r => r.match_id === MATCH);
+	  const category = await post(page, `${restartedBase2}/api/replay/v1/reviews/category-decisions`, {
+		match_id:MATCH, decision:"confirm", author:"browser", reason:"frozen category and replay identity inspected", expected_revision:beforeFinal.review_revision,
+	  }, TOKEN);
+	  assert.strictEqual(category.status, 200, `category decision failed: ${JSON.stringify(category.body)}`);
+	  const finalized = await post(page, `${restartedBase2}/api/replay/v1/reviews/finalize`, {
+		match_id:MATCH, author:"browser", reason:"full effective stream and required product checks inspected", expected_revision:category.body.data.review_revision,
+		checklist:{ phase_stream_reviewed:true, role_provenance_reviewed:true, role_provenance_evidence:"role registry sources and effective override inspected", official_experimental_acknowledged:true },
+	  }, TOKEN);
+	  assert.strictEqual(finalized.status, 200, `final review failed: ${JSON.stringify(finalized.body)}`);
+	  assert.strictEqual(finalized.body.data.review_status, "reviewed", "final action did not mark reviewed");
+	  assert.ok(finalized.body.data.final_snapshots[0].final_phase_stream.length > 0, "signed phase stream missing");
+	  await page.goto(`${restartedBase2}/review.html`, { waitUntil:"domcontentloaded" });
+	  await page.waitForSelector("#review-progress", { timeout:15000 });
+	  assert.ok((await page.evaluate(() => document.body.innerText)).includes("语料审核进度 1/5"), "reviewed progress not rendered after reload");
+	  await stopServer(server);
+	  server = await startServer(DATA);
+	  const finalBase = server.base;
+	  await setToken(page, finalBase);
+	  const afterFinalRestart = await api(page, `${finalBase}/api/replay/v1/reviews/queue`);
+	  const persistedFinal = afterFinalRestart.data.reviews.find(r => r.match_id === MATCH);
+	  assert.strictEqual(persistedFinal.review_status, "reviewed", "restart lost reviewed status");
+	  assert.strictEqual(persistedFinal.category_decisions.length, 1, "restart lost category decision");
+	  assert.strictEqual(persistedFinal.final_snapshots.length, 1, "restart lost final snapshot");
+	  assert.deepStrictEqual(afterFinalRestart.data.progress, { reviewed:1, pending:4, total:5 }, "restart reviewed/pending reconciliation");
+	  assert.ok(afterFinalRestart.data.queue.every(row => row.category), "restart lost a machine category");
+
       // Zero uncaught page errors across the whole run.
       assert.deepStrictEqual(errors, [], `page JS errors: ${errors.join(" | ")}`);
-      console.log(`browser_e2e: OK — corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, team 9823272 hero_damage_total=172402 reconciles to two distinct match-qualified team-match entities whose rendered links resolve before/after restart and whose rendered stale link returns the exact 404 reason, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
+      console.log(`browser_e2e: OK — five non-empty frozen categories, premature completion rejected, signed category/final stream/checklist survives reload+restart, review progress reconciles 1/5 reviewed and 4/5 pending; corpus, 5 matches, roles 1-5, frozen kill observed-zero/opportunity rows and death zero-vs-unavailable API/render assertions, complete 1467/693 contributor lineage rendered+navigable before/after restart, team official/experimental layers, every rendered player/team score component carries its registry metric version, score-rule-qualified aggregation links resolve after restart, team 9823272 hero_damage_total=172402 reconciles to two distinct match-qualified team-match entities whose rendered links resolve before/after restart and whose rendered stale link returns the exact 404 reason, 7 phase ops via rendered UI on ${MATCH} with [0,2705] coverage + restart + stale-ref(409)/illegal(400)/unauth(403) + revision-conflict(409 same-boundary) atomicity, role override author/record/override-version agreement before/after restart, rendered lineage-link clicks (fact/episode/phase/metric_observation/aggregation/algorithm) + rendered stale fact exact 404 reason; phases.json byte-identical`);
     } finally {
       await browser.close();
     }

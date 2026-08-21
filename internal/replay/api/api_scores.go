@@ -52,12 +52,20 @@ func (s *Server) handleReviewsQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	queue := []interface{}{}
 	reviews := []interface{}{}
+	reviewedCount := 0
+	pendingCount := 0
 	for _, row := range cat.Matches {
 		if row.Status != store.StatusVerified {
 			continue
 		}
+		ctx := review.CategoryContext{MachineCategory: row.Category, ReplaySHA256: s.replaySHA(row.MatchID)}
+		// input.json is authoritative when present; legacy test/fixture roots may
+		// lack one of these read-only display fields but remain visible.
+		if resolved, err := s.categoryContext(row.MatchID); err == nil {
+			ctx = resolved
+		}
 		queue = append(queue, map[string]interface{}{
-			"match_id": row.MatchID, "category": row.Category,
+			"match_id": row.MatchID, "category": ctx.MachineCategory, "replay_sha256": ctx.ReplaySHA256,
 			"status": row.Status, "publication": row.Publication,
 		})
 		var rv *review.Review
@@ -69,6 +77,15 @@ func (s *Server) handleReviewsQueue(w http.ResponseWriter, r *http.Request) {
 			rv = r
 		}
 		if rv != nil {
+			missing := reviewMissing(rv)
+			if rv.ReviewStatus == "reviewed" && len(missing) == 0 {
+				reviewedCount++
+			} else {
+				pendingCount++
+			}
+			rv.MachineCategory = ctx.MachineCategory
+			rv.ReplaySHA256 = ctx.ReplaySHA256
+			rv.MissingRequirements = missing
 			reviews = append(reviews, rv)
 		}
 	}
@@ -79,8 +96,136 @@ func (s *Server) handleReviewsQueue(w http.ResponseWriter, r *http.Request) {
 			"reviews":      reviews,
 			"review_store": s.Reviews != nil,
 			"stage":        "3",
+			"progress":     map[string]int{"reviewed": reviewedCount, "pending": pendingCount, "total": reviewedCount + pendingCount},
 		},
 	})
+}
+
+func reviewMissing(rv *review.Review) []string {
+	missing := []string{}
+	if len(rv.CategoryDecisions) == 0 {
+		missing = append(missing, "category_decision")
+	}
+	if rv.CurrentFinalSnapshotID == "" {
+		missing = append(missing, "phase_stream_reviewed", "role_provenance_evidence", "official_experimental_acknowledged")
+	}
+	if rv.ReviewStatus != "reviewed" {
+		missing = append(missing, "reviewed_status")
+	}
+	return missing
+}
+
+func (s *Server) categoryContext(matchID string) (review.CategoryContext, error) {
+	var in struct {
+		Category string `json:"category"`
+	}
+	if err := s.Store.ReadJSON(matchID, store.ArtifactInput, &in); err != nil || in.Category == "" {
+		return review.CategoryContext{}, fmt.Errorf("machine_category_unavailable")
+	}
+	sha := s.replaySHA(matchID)
+	if sha == "" {
+		return review.CategoryContext{}, fmt.Errorf("replay_sha256_unavailable")
+	}
+	return review.CategoryContext{MachineCategory: in.Category, ReplaySHA256: sha}, nil
+}
+
+func (s *Server) handleCategoryDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !s.requireSessionToken(w, r) {
+		return
+	}
+	if s.Reviews == nil {
+		writeErr(w, http.StatusServiceUnavailable, "review_store_unavailable")
+		return
+	}
+	var wire struct {
+		MatchID string `json:"match_id"`
+		review.CategoryDecisionRequest
+	}
+	if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_payload")
+		return
+	}
+	if !s.validMatchID(wire.MatchID) {
+		writeErr(w, http.StatusBadRequest, "match_id_not_in_catalog")
+		return
+	}
+	ctx, err := s.categoryContext(wire.MatchID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rv, err := s.Reviews.DecideCategory(wire.MatchID, ctx, wire.CategoryDecisionRequest)
+	if err != nil {
+		if review.IsStale(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if review.IsStorageError(err) {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
+}
+
+func (s *Server) handleReviewFinalize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !s.requireSessionToken(w, r) {
+		return
+	}
+	if s.Reviews == nil {
+		writeErr(w, http.StatusServiceUnavailable, "review_store_unavailable")
+		return
+	}
+	var wire struct {
+		MatchID string `json:"match_id"`
+		review.FinalizeRequest
+	}
+	if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_payload")
+		return
+	}
+	if !s.validMatchID(wire.MatchID) {
+		writeErr(w, http.StatusBadRequest, "match_id_not_in_catalog")
+		return
+	}
+	var ph phase.Output
+	if err := s.Store.ReadJSON(wire.MatchID, store.ArtifactPhases, &ph); err != nil {
+		writeErr(w, http.StatusBadRequest, "machine_phases_unavailable")
+		return
+	}
+	machine := make([]review.PhaseInterval, 0, len(ph.Intervals))
+	for _, iv := range ph.Intervals {
+		machine = append(machine, review.PhaseInterval{StartGameSecond: iv.StartGameSecond, EndGameSecond: iv.EndGameSecond, GlobalPhase: string(iv.GlobalPhase), RoundIndex: iv.RoundIndex})
+	}
+	catCtx, err := s.categoryContext(wire.MatchID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rv, err := s.Reviews.FinalizeReview(wire.MatchID, review.FinalizeContext{ReplaySHA256: catCtx.ReplaySHA256, MachineCategory: catCtx.MachineCategory, PhaseRuleVersion: ph.RuleVersion, MachineIntervals: machine}, wire.FinalizeRequest)
+	if err != nil {
+		if review.IsStale(err) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if review.IsStorageError(err) {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})
 }
 
 // handleReviewsAudit serves the immutable audit log (newest first).
@@ -312,6 +457,14 @@ func (s *Server) handleReviewStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "match_id_author_required")
 		return
 	}
+	if !s.validMatchID(req.MatchID) {
+		writeErr(w, http.StatusBadRequest, "match_id_not_in_catalog")
+		return
+	}
+	if s.Reviews == nil {
+		writeErr(w, http.StatusServiceUnavailable, "review_store_unavailable")
+		return
+	}
 	switch req.Status {
 	case "pending", "in_progress", "reviewed":
 	default:
@@ -324,7 +477,11 @@ func (s *Server) handleReviewStatus(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, "review_status_failed")
+		if review.IsStorageError(err) {
+			writeErr(w, http.StatusInternalServerError, "review_status_failed")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope{SchemaVersion: version.CorrectionSchema, Data: rv})

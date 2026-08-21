@@ -220,3 +220,36 @@ func TestStatusConsumedByCatalog(t *testing.T) {
 		t.Fatalf("catalog=%+v want verified/published", cat.Matches[0])
 	}
 }
+
+func TestCatalogRebuildPreservesFrozenCategoryAcrossStates(t *testing.T) {
+	st, _ := New(t.TempDir())
+	cases := []struct{ id, category, status string }{
+		{"verified", "long_decisive", StatusVerified},
+		{"quarantined", "role_uncertain", StatusQuarantined},
+		{"resumed", "short_stomp", "resumed"},
+		{"rebuilt", "comeback", StatusVerified},
+	}
+	for _, tc := range cases {
+		if err := st.WriteJSON(tc.id, ArtifactInput, map[string]string{"category": tc.category}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.WriteStatus(tc.id, &StatusRecord{SchemaVersion: StatusSchema, MatchID: tc.id, Status: tc.status, Publication: "published"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		cat, err := st.RebuildCatalog(fmt.Sprintf("build-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, row := range cat.Matches {
+			got[row.MatchID] = row.Category
+		}
+		for _, tc := range cases {
+			if got[tc.id] != tc.category {
+				t.Fatalf("build %d %s category=%q want %q", i, tc.id, got[tc.id], tc.category)
+			}
+		}
+	}
+}
