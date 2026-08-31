@@ -1,0 +1,737 @@
+// Package main is the M1 history composition root. It keeps the deterministic
+// JSON fixture corpus explicitly separate from the production-shaped offline
+// PBDEMS2 path, which invokes internal/replay and pinned manta. Neither path
+// performs GC/account automation or enters the live-output plane.
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"runtime"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/atomicfile"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/contracts"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/history"
+	"github.com/PaulOctopusZLWB/dota2-ob/internal/replay"
+)
+
+// errorsAs is a thin wrapper around errors.As so callers stay readable.
+func errorsAs(err error, dst any) bool { return errors.As(err, dst) }
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "history:", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		printUsage(os.Stderr)
+		return fmt.Errorf("no subcommand")
+	}
+	switch args[0] {
+	case "corpus":
+		return runCorpus(args[1:])
+	case "report":
+		return runReport(args[1:])
+	case "real-replay":
+		return runRealReplay(args[1:])
+	case "dot54-evidence":
+		return runDOT54EvidenceCommand(args[1:])
+	case "-h", "--help", "help":
+		printUsage(os.Stdout)
+		return nil
+	default:
+		printUsage(os.Stderr)
+		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func printUsage(w *os.File) {
+	fmt.Fprintln(w, "usage: history <corpus|report|real-replay|dot54-evidence> [flags]")
+	fmt.Fprintln(w, "  corpus  run the deterministic representative corpus twice and print hashes, ids, and resource measurements")
+	fmt.Fprintln(w, "  report  emit the M1 readiness/no-go evidence report for the representative corpus")
+	fmt.Fprintln(w, "  real-replay  run one genuine PBDEMS2 replay twice through internal/replay+manta into independent durable artifacts")
+	fmt.Fprintln(w, "  dot54-evidence  seal the DOT-54 real-source terminal evidence package from checkpointed provider pages")
+}
+
+func runRealReplay(args []string) error {
+	fs := flag.NewFlagSet("real-replay", flag.ContinueOnError)
+	dem := fs.String("dem", "", "decompressed PBDEMS2 .dem source")
+	dataDir := fs.String("data-dir", "data/history/real-replay", "clean artifact root")
+	matchID := fs.String("match-id", "8941092540", "public match id")
+	replayURL := fs.String("replay-url", "http://replay273.valve.net/570/8941092540_1595018738.dem.bz2", "recorded public Valve replay URL")
+	sourceTimeText := fs.String("source-event-time", "2026-08-11T20:33:21Z", "recorded public match time (RFC3339)")
+	patchID := fs.String("patch-id", "60", "OpenDota gameplay patch id")
+	gameBuild := fs.Uint("game-build", 6896, "parsed/public correlated game build")
+	radiant := fs.String("radiant-team", "zero-tenacity", "public radiant team identity")
+	dire := fs.String("dire-team", "rune-eaters", "public dire team identity")
+	duration := fs.Int64("duration-seconds", 3297, "public match duration")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dem == "" {
+		return errors.New("real-replay requires --dem")
+	}
+	sourceTime, err := time.Parse(time.RFC3339, *sourceTimeText)
+	if err != nil {
+		return fmt.Errorf("source-event-time: %w", err)
+	}
+	res, err := runRealReplayComposition(realReplayConfig{SourcePath: *dem, Root: *dataDir, MatchID: *matchID, ReplayURL: *replayURL, SourceEventTime: sourceTime, PatchID: *patchID, GameBuild: uint32(*gameBuild), RadiantTeamID: *radiant, DireTeamID: *dire, DurationSeconds: *duration})
+	if err != nil {
+		return err
+	}
+	entry := res.Batch.Entries[*matchID]
+	fmt.Println("=== M1 real-replay production-shaped evidence (offline; NOT tournament readiness) ===")
+	fmt.Printf("match_id=%s source=%s\n", *matchID, *replayURL)
+	fmt.Printf("replay_sha256=%s bytes=%d magic=%s\n", res.ReplayIdentity.SHA256, res.ReplayIdentity.Bytes, res.ReplayIdentity.Magic)
+	fmt.Printf("parser=%s/%s adapter=%s/%s\n", replay.ParserName, replay.ParserVersion, replay.AdapterName, replay.AdapterVersion)
+	fmt.Printf("manifest_sha256=%s parsed_index_sha256=%s facts_sha256=%s aggregate_sha256=%s\n", res.ManifestSHA256, entry.ArtifactSHA256[history.StageParse], res.Facts.ContentSHA256, res.AggregateSHA)
+	for i, pass := range res.Processed.Passes {
+		fmt.Printf("execution_%d id=%s parsed=%s normalized=%s run=%s checkpoint=%s\n", i+1, pass.ExecutionID, pass.ParsedArtifactSHA256, pass.NormalizedArtifactSHA256, pass.RunArtifactSHA256, pass.CheckpointSHA256)
+	}
+	fmt.Printf("deterministic=%t identity_status=%s stage_calls=%v\n", len(res.Processed.Passes) == 2 && res.Processed.Passes[0].FactsSHA256 == res.Processed.Passes[1].FactsSHA256, res.Facts.IdentityStatus, res.StageCalls)
+	for i, m := range res.ParseMetrics {
+		fmt.Printf("parse_%d elapsed=%.3fs user_cpu=%.3fs system_cpu=%.3fs peak_heap=%dMiB raw_bytes=%d\n", i+1, m.ElapsedSec, m.UserCPUSec, m.SystemCPUSec, m.PeakHeapMiB, m.RawDecompressed)
+	}
+	fmt.Printf("artifact_tree_sha256=%s storage_bytes=%d files=%d\n", res.ArtifactTree, res.StorageBytes, res.ArtifactFiles)
+	return nil
+}
+
+// runCorpus builds the deterministic representative corpus, runs the full M1
+// pipeline (discovery -> acquire/verify/parse/normalize/aggregate batch ->
+// snapshot seal), prints the deterministic content identities, then runs the
+// batch a second time to prove idempotent resume (no stage re-runs, identical
+// hashes). All generated artifacts stay under the canonical git-ignored data
+// root; nothing raw or generated is committed to git.
+func runCorpus(args []string) error {
+	fs := flag.NewFlagSet("corpus", flag.ContinueOnError)
+	var matches = fs.Int("matches", 12, "number of representative accessible matches")
+	var quarantined = fs.Int("quarantined", 2, "number of quarantined matches")
+	var expired = fs.Int("expired", 1, "number of expired (no replay) matches")
+	var dataDir = fs.String("data-dir", "data", "canonical local data root (git-ignored)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	res := measureRun(func() (*corpusResult, error) {
+		return buildAndRunCorpus(*matches, *quarantined, *expired, *dataDir)
+	})
+	if res.err != nil {
+		return res.err
+	}
+	printCorpus(res)
+	return nil
+}
+
+type corpusResult struct {
+	err               error
+	discoveryID       string
+	discovery         history.DiscoveryManifestV1
+	roster            history.RosterManifestV1
+	facts             []history.NormalizedMatchFacts
+	processed         []history.ProcessedReplayEvidence
+	executionRoot     string
+	batch             history.StageBatch
+	windows           history.CutoffWindow
+	patch             history.PatchWindow
+	snapshotID        string
+	baselineCount     int
+	includedCount     int
+	excludedCount     int
+	quarantined       int
+	stageCalls        map[string]int
+	resumeCalls       map[string]int
+	elapsed           time.Duration
+	userCPU           float64
+	sysCPU            float64
+	peakHeapMiB       uint64
+	statePath         string
+	artifactTreeSHA   string
+	storageBytes      int64
+	artifactFiles     int
+	interruptionCalls map[string]int
+}
+
+func printCorpus(r *corpusResult) {
+	fmt.Println("=== M1 representative corpus ===")
+	fmt.Printf("discovery_manifest_id = %s\n", r.discoveryID)
+	fmt.Printf("snapshot_manifest_id  = %s\n", r.snapshotID)
+	fmt.Printf("baselines             = %d\n", r.baselineCount)
+	fmt.Printf("included_matches      = %d\n", r.includedCount)
+	fmt.Printf("excluded_matches       = %d\n", r.excludedCount)
+	fmt.Printf("quarantined_excluded  = %d\n", r.quarantined)
+	fmt.Printf("stage_calls(pass1)     = %v\n", r.stageCalls)
+	fmt.Printf("stage_calls(resume,2)  = %v  (idempotent: must equal pass1 per stage)\n", r.resumeCalls)
+	fmt.Println("=== measurements ===")
+	fmt.Printf("elapsed_sec            = %.6f\n", r.elapsed.Seconds())
+	fmt.Printf("user_cpu_sec           = %.6f\n", r.userCPU)
+	fmt.Printf("system_cpu_sec         = %.6f\n", r.sysCPU)
+	fmt.Printf("peak_heap_mib          = %d\n", r.peakHeapMiB)
+	fmt.Printf("batch_state_path       = %s (git-ignored under canonical data root)\n", r.statePath)
+	fmt.Printf("artifact_tree_sha256   = %s\n", r.artifactTreeSHA)
+	fmt.Printf("storage_bytes/files    = %d/%d\n", r.storageBytes, r.artifactFiles)
+	fmt.Printf("interruption_effects   = %v\n", r.interruptionCalls)
+}
+
+func measureRun(f func() (*corpusResult, error)) *corpusResult {
+	var ru0, ru1 syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru0)
+	t0 := time.Now()
+	var peak uint64
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(25 * time.Millisecond)
+		defer t.Stop()
+		var s runtime.MemStats
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				runtime.ReadMemStats(&s)
+				if s.Alloc > peak {
+					peak = s.Alloc
+				}
+			}
+		}
+	}()
+	r, err := f()
+	close(done)
+	<-stopped
+	elapsed := time.Since(t0)
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru1)
+	if r == nil {
+		r = &corpusResult{}
+	}
+	r.elapsed = elapsed
+	r.userCPU = timevalDiff(ru1.Utime, ru0.Utime)
+	r.sysCPU = timevalDiff(ru1.Stime, ru0.Stime)
+	if peak > r.peakHeapMiB {
+		r.peakHeapMiB = peak / (1 << 20)
+	}
+	r.err = err
+	return r
+}
+
+func timevalDiff(end, start syscall.Timeval) float64 {
+	us := int64(end.Sec-start.Sec)*1_000_000 + int64(end.Usec-start.Usec)
+	return float64(us) / 1_000_000.0
+}
+
+// buildAndRunCorpus assembles the deterministic corpus, seals the discovery
+// manifest, runs the stage pipeline twice (second pass proves idempotent
+// resume), aggregates, seals the prematch snapshot, and records resource
+// measurements. No network or replay download occurs; participant identities
+// are deterministic fixtures.
+func buildAndRunCorpus(nMatches, nQuarantined, nExpired int, dataDir string) (*corpusResult, error) {
+	cutoff, _ := time.Parse(time.RFC3339, "2026-08-12T00:00:00Z")
+	patchRelease, _ := time.Parse(time.RFC3339, "2026-03-24T00:00:00Z")
+	scope := buildScopeFixture(cutoff)
+	roster := buildRosterFixture(scope)
+	windows := history.NewCutoffWindow(cutoff, history.PatchWindow{PatchID: "60", DotaPatch: "7.41"}, patchRelease)
+
+	// Participant mapping fixtures: deterministic hero assignments so the
+	// normalizer can verify identity for accessible matches and quarantine the
+	// quarantined set (deliberately unmapped).
+	teams := scopeTeams(scope)
+	heroes := []string{"npc_dota_hero_invoker", "npc_dota_hero_juggernaut", "npc_dota_hero_lina",
+		"npc_dota_hero_axe", "npc_dota_hero_crystal_maiden", "npc_dota_hero_phantom_assassin",
+		"npc_dota_hero_earthshaker", "npc_dota_hero_lion", "npc_dota_hero_sniper", "npc_dota_hero_drow_ranger"}
+
+	var facts []history.NormalizedMatchFacts
+	var discoveryMatches []history.DiscoveryMatch
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	radiantTeams := []string{"team-a", "team-b", "team-c", "team-d"}
+	direTeams := []string{"team-b", "team-c", "team-d", "team-a"}
+
+	idx := 0
+	// Accessible verified matches.
+	for i := 0; i < nMatches; i++ {
+		mid := fmt.Sprintf("8941000%03d", i)
+		radiant := radiantTeams[i%len(radiantTeams)]
+		dire := direTeams[i%len(direTeams)]
+		f := buildVerifiedFacts(idx, mid, base.Add(time.Duration(i)*time.Hour), radiant, dire, teams, heroes, i%2 == 0)
+		var err error
+		f, err = bindLocalReplayFixture(f)
+		if err != nil {
+			return nil, fmt.Errorf("bind local replay fixture: %w", err)
+		}
+		facts = append(facts, f)
+		discoveryMatches = append(discoveryMatches, history.DiscoveryMatch{
+			MatchID: mid, SourceEventTime: f.SourceEventTime, PatchID: "60", GameBuild: f.GameBuild,
+			RadiantTeamID: radiant, DireTeamID: dire, State: history.MatchReplayAccessible,
+			ReplaySHA256: f.ReplaySHA256, IdentityStatus: contracts.IdentityVerified,
+			PlayerPersonIDs: participantIDs(f.Participants),
+			Providers:       []string{history.ProviderOpenDota, history.ProviderSteam},
+		})
+		idx++
+	}
+	// Quarantined matches (parsed but identity not correlated).
+	quarantinedCount := 0
+	for i := 0; i < nQuarantined; i++ {
+		mid := fmt.Sprintf("8941000%03d", nMatches+i)
+		f := buildQuarantinedFacts(idx, mid, base.Add(time.Duration(nMatches+i)*time.Hour), "team-e", "team-f", heroes)
+		facts = append(facts, f)
+		discoveryMatches = append(discoveryMatches, history.DiscoveryMatch{
+			MatchID: mid, SourceEventTime: f.SourceEventTime, PatchID: "60",
+			RadiantTeamID: "team-e", DireTeamID: "team-f", State: history.MatchReplayQuarantined,
+			IdentityStatus: contracts.IdentityQuarantined,
+			Providers:      []string{history.ProviderOpenDota},
+		})
+		quarantinedCount++
+		idx++
+	}
+	// Expired (no replay available) matches.
+	for i := 0; i < nExpired; i++ {
+		mid := fmt.Sprintf("8941000%03d", nMatches+nQuarantined+i)
+		discoveryMatches = append(discoveryMatches, history.DiscoveryMatch{
+			MatchID: mid, SourceEventTime: base.Add(time.Duration(nMatches+nQuarantined+i) * time.Hour),
+			PatchID: "60", RadiantTeamID: "team-g", DireTeamID: "team-h",
+			State: history.MatchReplayExpired, Providers: []string{history.ProviderOpenDota},
+		})
+	}
+
+	dm := history.DiscoveryManifestV1{
+		SchemaVersion: history.DiscoverySchema, TournamentScopeID: scope.ScopeID,
+		TournamentScopeSHA: scope.ContentSHA256, RosterManifestID: roster.ManifestID,
+		CutoffTime: scope.HistoryCutoff,
+		Request: history.DiscoveryRequest{
+			ContractVersion: history.DiscoveryContractVersion,
+			Providers:       []string{history.ProviderOpenDota, history.ProviderSteam},
+			Endpoint:        "https://api.opendota.com/api/explorer", Query: map[string]string{"q": "pro"},
+			PageLimit: 100, CutoffTime: scope.HistoryCutoff, RetrievedAt: scope.SampledAt,
+			PageSHA256: []string{"page-hash-fixed"},
+		},
+		Matches: history.DedupeAndSortMatches(discoveryMatches),
+	}
+	dm.Coverage = history.SummarizeCoverage(dm.Matches)
+	if err := history.SealDiscoveryManifestV1(&dm); err != nil {
+		return nil, fmt.Errorf("seal discovery: %w", err)
+	}
+	if err := dm.ValidateAgainstScope(scope, roster); err != nil {
+		return nil, fmt.Errorf("discovery binding: %w", err)
+	}
+
+	// The fixture adapters implement the same injectable, durable stage ports as
+	// production: each stage writes a content-addressed artifact and reconciles
+	// it after interruption before any side effect can repeat.
+	if err := os.MkdirAll(dataDir+"/history", 0o755); err != nil {
+		return nil, err
+	}
+	statePath := dataDir + "/history/corpus-batch-state.json"
+	aggregateArtifact := func(f history.NormalizedMatchFacts) (string, error) {
+		cells, err := history.Aggregate(history.AggregateInput{Facts: []history.NormalizedMatchFacts{f}, Roster: roster, Windows: windows, Patch: history.PatchWindow{PatchID: "60", DotaPatch: "7.41"}, GeneratedAt: cutoff.Add(-time.Hour)})
+		if err != nil {
+			return "", err
+		}
+		b, err := contracts.MarshalCanonical(cells)
+		if err != nil {
+			return "", err
+		}
+		return sha256Hex(string(b)), nil
+	}
+	mu := newLocalReplayStageComposition(facts, dataDir+"/history/artifacts", aggregateArtifact)
+	pipeline := &history.StagePipeline{
+		Stages:            mu.stages,
+		Reconcile:         mu.reconcile,
+		StageOrder:        mu.order,
+		MaxRetries:        3,
+		ValidateCompleted: mu.validate,
+		Save: func(b history.StageBatch) error {
+			return saveBatch(statePath, b)
+		},
+	}
+	callsRecorder := mu.calls
+	expectedTerminal := map[string]bool{}
+	for _, m := range dm.Matches {
+		if m.State != history.MatchReplayAccessible {
+			expectedTerminal[m.MatchID] = true
+		}
+	}
+	completedBatch, runErr := pipeline.Run(dm, history.NewStageBatch(dm))
+	if runErr != nil {
+		// Quarantined matches legitimately reach terminal dead-letter in the
+		// stage pipeline (identity not correlated). That is an expected, not a
+		// fatal, outcome: the snapshot excludes them. Any OTHER terminal entry
+		// is a real failure and must abort.
+		var tf *history.TerminalFailures
+		if !errorsAs(runErr, &tf) {
+			return nil, fmt.Errorf("batch pass 1: %w", runErr)
+		}
+		for _, id := range tf.IDs {
+			if !expectedTerminal[id] {
+				return nil, fmt.Errorf("batch pass 1 unexpected terminal %s: %w", id, runErr)
+			}
+		}
+	}
+	stageCalls := map[string]int{}
+	for k, v := range callsRecorder {
+		stageCalls[k] = v
+	}
+
+	// Snapshot: baselines are recomputed from the included facts inside
+	// BuildSnapshot, so the snapshot provably derives from the sealed input
+	// manifest rather than caller-supplied cells.
+	snap, err := history.BuildSnapshot(history.SnapshotInput{
+		Scope: scope, Roster: roster, Discovery: dm, Facts: facts,
+		Windows: windows, Patch: history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
+		Binding: contracts.LiveSessionBindingV1{
+			SessionID: "sess-corpus", ActiveMatchID: "active",
+			SessionStartTime:  time.Date(2026, 8, 11, 23, 0, 0, 0, time.UTC),
+			TournamentScopeID: scope.ScopeID, TournamentScopeSHA256: scope.ContentSHA256,
+		},
+		SealedAt:         time.Date(2026, 8, 11, 22, 0, 0, 0, time.UTC),
+		GeneratedAt:      time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
+		ParserVersion:    "dotabuff/manta v1.5.0",
+		AggregateVersion: history.AdapterName + "/" + history.AdapterVersion,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: %w", err)
+	}
+
+	// Idempotent resume: re-run the batch over the persisted state; no stage
+	// should re-execute and no fact should be duplicated. A missing, corrupt, or
+	// manifest-mismatched checkpoint is a hard error, never silently empty.
+	prior, err := loadBatch(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("batch resume load: %w", err)
+	}
+	if _, err := pipeline.Run(dm, prior); err != nil {
+		var tf *history.TerminalFailures
+		if !errorsAs(err, &tf) {
+			return nil, fmt.Errorf("batch resume: %w", err)
+		}
+		for _, id := range tf.IDs {
+			if !expectedTerminal[id] {
+				return nil, fmt.Errorf("batch resume unexpected terminal %s: %w", id, err)
+			}
+		}
+	}
+	resumeCalls := map[string]int{}
+	for k, v := range callsRecorder {
+		resumeCalls[k] = v
+	}
+	interruptionCalls, err := verifyInterruptionRecovery(dm, facts, dataDir+"/history/interruption-matrix", aggregateArtifact)
+	if err != nil {
+		return nil, fmt.Errorf("interruption matrix: %w", err)
+	}
+	treeSHA, storageBytes, artifactFiles, err := artifactTreeSHA(dataDir + "/history")
+	if err != nil {
+		return nil, fmt.Errorf("artifact tree: %w", err)
+	}
+
+	return &corpusResult{
+		discoveryID:       dm.ContentSHA256,
+		discovery:         dm,
+		roster:            roster,
+		facts:             facts,
+		processed:         sortedProcessedEvidence(mu.processed),
+		executionRoot:     dataDir + "/history/artifacts/executions",
+		batch:             completedBatch,
+		windows:           windows,
+		patch:             history.PatchWindow{PatchID: "60", DotaPatch: "7.41"},
+		snapshotID:        snap.Snapshot.ContentSHA256,
+		baselineCount:     len(snap.Baselines),
+		includedCount:     len(snap.Snapshot.IncludedMatches),
+		excludedCount:     len(snap.Snapshot.ExcludedMatches),
+		quarantined:       quarantinedCount,
+		stageCalls:        stageCalls,
+		resumeCalls:       resumeCalls,
+		statePath:         statePath,
+		artifactTreeSHA:   treeSHA,
+		storageBytes:      storageBytes,
+		artifactFiles:     artifactFiles,
+		interruptionCalls: interruptionCalls,
+	}, nil
+}
+
+func saveBatch(path string, b history.StageBatch) error {
+	enc, err := contracts.MarshalCanonical(b)
+	if err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(path, append(enc, '\n'), 0o644)
+}
+
+func loadBatch(path string) (history.StageBatch, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return history.StageBatch{}, fmt.Errorf("checkpoint missing: %w", err)
+	}
+	var out history.StageBatch
+	if err := contracts.DecodeStrict(b, &out); err != nil {
+		return history.StageBatch{}, fmt.Errorf("checkpoint corrupt/truncated: %w", err)
+	}
+	if out.Entries == nil {
+		out.Entries = map[string]history.StageEntry{}
+	}
+	return out, nil
+}
+
+// runReport emits the readiness/no-go evidence for the representative corpus
+// to stdout. It documents the restricted-history outcome honestly: the
+// representative corpus is deliberately below the 100-replay gate, so the gate
+// returns restricted_history_go and the report records the disabled families
+// rather than fabricating coverage.
+func runReport(args []string) error {
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	var dataDir = fs.String("data-dir", "data", "canonical local data root (git-ignored)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cutoff, _ := time.Parse(time.RFC3339, "2026-08-12T00:00:00Z")
+	scope := buildScopeFixture(cutoff)
+
+	// Run the SAME deterministic corpus the `corpus` subcommand runs, then
+	// evaluate the readiness gate against the sealed manifest it produced, so
+	// the report's accessible total, per-state coverage, and gate outcome are
+	// internally consistent (one coherent manifest).
+	res, err := buildAndRunCorpus(6, 2, 1, *dataDir)
+	if err != nil {
+		return err
+	}
+	evidence := history.ReadinessGate(history.ReadinessInput{Scope: scope, Roster: res.roster, Manifest: res.discovery, Facts: res.facts, Processed: res.processed, ValidateExecution: func(pass history.ParseExecutionEvidence) error {
+		return validateParseExecutionArtifacts(res.executionRoot, pass)
+	}, Batch: res.batch, Windows: res.windows, Patch: res.patch, GeneratedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)})
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "=== M1 deterministic fixture-corpus gate (NOT real tournament readiness evidence) ===")
+	fmt.Fprintf(&b, "outcome                = %s\n", evidence.Outcome)
+	fmt.Fprintf(&b, "replay_accessible_total= %d\n", evidence.ReplayAccessibleTotal)
+	fmt.Fprintf(&b, "repeatably_processed   = %d\n", evidence.RepeatablyProcessedTotal)
+	fmt.Fprintf(&b, "enabled_cells          = %d\n", evidence.EnabledCellTotal)
+	fmt.Fprintf(&b, "full_history_target    = %d\n", scope.Discovery.FullHistoryReplayTarget)
+	fmt.Fprintf(&b, "minimum_team_matches   = %d\n", scope.Discovery.MinimumTeamMatches)
+	fmt.Fprintf(&b, "teams_represented      = %d\n", len(evidence.TeamsRepresented))
+	fmt.Fprintf(&b, "restricted_reason      = %s\n", evidence.RestrictedReason)
+	fmt.Fprintf(&b, "disabled_families      = %v\n", evidence.DisabledFamilies)
+	fmt.Fprintln(&b, "=== per-state coverage ===")
+	keys := make([]string, 0, len(evidence.PerStateCounts))
+	for k := range evidence.PerStateCounts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&b, "  %-24s %d\n", k, evidence.PerStateCounts[k])
+	}
+	fmt.Fprintln(&b, "=== representative-corpus checkpoints ===")
+	fmt.Fprintf(&b, "discovery_manifest_id  = %s\n", res.discoveryID)
+	fmt.Fprintf(&b, "snapshot_manifest_id   = %s\n", res.snapshotID)
+	fmt.Fprintln(&b, "=== residual risks ===")
+	fmt.Fprintln(&b, "- Valve/OpenDota replay availability is best-effort; every missing replay")
+	fmt.Fprintln(&b, "  must be classified with a bounded reason, not fabricated.")
+	fmt.Fprintln(&b, "- manta string-table updates bound actor resolution; first-blood/building-kill")
+	fmt.Fprintln(&b, "  gold-XP actors and named item purchases/entity-state metrics stay deferred.")
+	fmt.Fprintln(&b, "- HTTP replay CDN bytes are unauthenticated; SHA-256 is identity, not authenticity.")
+	fmt.Fprintln(&b, "  M1 quarantines any metadata/parser identity mismatch before publication.")
+	fmt.Println(b.String())
+	return nil
+}
+
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func participantIDs(in []history.ParticipantFacts) []string {
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		out = append(out, p.PersonID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedProcessedEvidence(byID map[string]history.ProcessedReplayEvidence) []history.ProcessedReplayEvidence {
+	out := []history.ProcessedReplayEvidence{}
+	for _, proof := range byID {
+		out = append(out, proof)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].MatchID < out[j].MatchID })
+	return out
+}
+
+// buildScopeFixture constructs a sealed 16-team TI-2026-shaped TournamentScopeV1
+// for the DETERMINISTIC FIXTURE corpus only. It is NOT the accepted real TI
+// scope: handles/aliases are neutral placeholders (team-a, person-a0, ...) and
+// the source URL is a fixture URL, never the real tournament site, so invented
+// identity is never attributed to real tournament evidence. Real roster
+// provenance is an upstream M1 input (a roster manifest) that binds to the
+// accepted scope. Handles/aliases here are neutral placeholders so no personal
+// data is committed.
+func buildScopeFixture(cutoff time.Time) contracts.TournamentScopeV1 {
+	const fixtureSource = "https://dota2-ob.fixture/deterministic-corpus/scope"
+	effFrom := cutoff.AddDate(0, 0, -180)
+	effUntil := cutoff.Add(time.Hour)
+	teamIDs := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p"}
+	teams := make([]contracts.TournamentTeamV1, 0, 16)
+	participants := make([]contracts.TournamentParticipantV1, 0, 80)
+	for _, id := range teamIDs {
+		teamID := "team-" + id
+		teams = append(teams, contracts.TournamentTeamV1{TeamID: teamID, RosterID: "roster-" + id, EffectiveFrom: effFrom, EffectiveUntil: effUntil})
+		for j := 0; j < 5; j++ {
+			participants = append(participants, contracts.TournamentParticipantV1{
+				PersonID: "person-" + id + string(rune('0'+j)), TeamID: teamID,
+				Handle: "player-" + id + string(rune('0'+j)), Role: "player",
+				EffectiveFrom: effFrom, EffectiveUntil: effUntil,
+			})
+		}
+	}
+	scope := contracts.TournamentScopeV1{
+		SchemaVersion:            contracts.TournamentScopeSchemaV1,
+		Edition:                  "ti-2026-fixture",
+		SampledAt:                cutoff,
+		HistoryCutoff:            cutoff,
+		DiscoveryContractVersion: history.DiscoveryContractVersion,
+		PatchID:                  "60",
+		DotaPatch:                "7.41",
+		Teams:                    teams,
+		Participants:             participants,
+		Sources:                  []contracts.PublicSourceV1{{URL: fixtureSource, RetrievedAt: cutoff}},
+		Discovery: contracts.DiscoveryPolicyV1{
+			ContractVersion:         history.DiscoveryContractVersion,
+			Providers:               []string{history.ProviderOpenDota, history.ProviderSteam},
+			PageLimit:               100,
+			FullHistoryReplayTarget: 100,
+			MinimumTeamMatches:      5,
+			AllowedOutcomes:         []string{history.ReadinessFullHistoryGo, history.ReadinessHistoricalNoGo, history.ReadinessRestrictedGo},
+		},
+	}
+	if err := contracts.SealTournamentScopeV1(&scope); err != nil {
+		panic("seal scope: " + err.Error())
+	}
+	return scope
+}
+
+func buildRosterFixture(scope contracts.TournamentScopeV1) history.RosterManifestV1 {
+	const fixtureSource = "https://dota2-ob.fixture/deterministic-corpus/roster"
+	roster := history.RosterManifestV1{
+		SchemaVersion:      history.RosterSchema,
+		TournamentScopeID:  scope.ScopeID,
+		TournamentScopeSHA: scope.ContentSHA256,
+		Edition:            scope.Edition,
+		SampledAt:          scope.SampledAt,
+		EffectiveCutoff:    scope.HistoryCutoff,
+		Sources:            []history.ProvenanceRef{{URL: fixtureSource, RetrievedAt: scope.SampledAt}},
+	}
+	for _, t := range scope.Teams {
+		roster.Teams = append(roster.Teams, history.RosterTeam{
+			TeamID: t.TeamID, RosterID: t.RosterID, Handle: "Team " + t.TeamID,
+			Aliases: []string{"T" + t.TeamID}, EffectiveFrom: t.EffectiveFrom, EffectiveUntil: t.EffectiveUntil,
+			Provenance: []history.ProvenanceRef{{URL: fixtureSource, RetrievedAt: scope.SampledAt}},
+		})
+	}
+	for _, p := range scope.Participants {
+		roster.Players = append(roster.Players, history.RosterPlayer{
+			PersonID: p.PersonID, TeamID: p.TeamID, Handle: p.Handle, Aliases: []string{p.Handle + "-alt"},
+			Role: p.Role, EffectiveFrom: p.EffectiveFrom, EffectiveUntil: p.EffectiveUntil,
+			Provenance: []history.ProvenanceRef{{URL: fixtureSource, RetrievedAt: scope.SampledAt}},
+		})
+	}
+	if err := history.SealRosterManifestV1(&roster); err != nil {
+		panic("seal roster: " + err.Error())
+	}
+	return roster
+}
+
+func scopeTeams(scope contracts.TournamentScopeV1) []string {
+	out := make([]string, 0, len(scope.Teams))
+	for _, t := range scope.Teams {
+		out = append(out, t.TeamID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// buildVerifiedFacts constructs a sealed, identity-verified NormalizedMatchFacts.
+// Ten participants (two teams of five) get deterministic hero assignments and
+// combat-log scalars (kills/deaths only; other metrics stay nil — never
+// fabricated). The participant binding is encoded directly in Participants.
+func buildVerifiedFacts(idx int, matchID string, eventTime time.Time, radiant, dire string, teams []string, heroes []string, radiantWin bool) history.NormalizedMatchFacts {
+	rPpl := teamPersons(radiant, 5)
+	dPpl := teamPersons(dire, 5)
+	var parts []history.ParticipantFacts
+	for i, pid := range rPpl {
+		hero := heroes[i%len(heroes)]
+		k, d := int64(idx*2+i), int64(i+1)
+		parts = append(parts, history.ParticipantFacts{
+			PersonID: pid, TeamID: radiant, HeroName: hero, Role: "player", Slot: i,
+			Kills: &k, Deaths: &d,
+		})
+	}
+	for i, pid := range dPpl {
+		hero := heroes[(5+i)%len(heroes)]
+		k, d := int64(idx+i+1), int64(5+i+1)
+		parts = append(parts, history.ParticipantFacts{
+			PersonID: pid, TeamID: dire, HeroName: hero, Role: "player", Slot: 5 + i,
+			Kills: &k, Deaths: &d,
+		})
+	}
+	parts = sortParticipants(parts)
+	replaySHA := sha256Hex(matchID)
+	nf := history.NormalizedMatchFacts{
+		SchemaVersion: history.FactsSchema, MatchID: matchID, ReplaySHA256: replaySHA,
+		SourceEventTime: eventTime, PatchID: "60", GameBuild: 6896,
+		RadiantTeamID: radiant, DireTeamID: dire, RadiantWin: &radiantWin,
+		Participants: parts, IdentityStatus: contracts.IdentityVerified,
+		Availability: history.FactsAvailability{
+			Available:   []string{"match_header", "game_build", history.MetricKills, history.MetricDeaths, history.MetricGames, history.MetricWins},
+			Deferred:    []string{history.MetricAssists, history.MetricGPM, history.MetricXPM, history.MetricLastHits, history.MetricDenies, history.MetricNetWorth, history.MetricLevel, history.MetricKillParticipation, history.MetricFarmCheckpoint, history.MetricKeyItemTiming},
+			Unavailable: []string{"replay_salt_or_gc_credentials", "hidden_fog_of_war_state"},
+		},
+	}
+	if err := history.SealNormalizedMatchFacts(&nf); err != nil {
+		panic("seal facts: " + err.Error())
+	}
+	return nf
+}
+
+func buildQuarantinedFacts(idx int, matchID string, eventTime time.Time, radiant, dire string, heroes []string) history.NormalizedMatchFacts {
+	// Quarantined: two unbound heroes, no participant mapping. The match is
+	// observable but never publish-able; participants are nil so no person id
+	// is fabricated.
+	replaySHA := sha256Hex(matchID)
+	nf := history.NormalizedMatchFacts{
+		SchemaVersion: history.FactsSchema, MatchID: matchID, ReplaySHA256: replaySHA,
+		SourceEventTime: eventTime, PatchID: "60", GameBuild: 6896,
+		RadiantTeamID: radiant, DireTeamID: dire,
+		Participants: nil, IdentityStatus: contracts.IdentityQuarantined,
+		Availability: history.FactsAvailability{
+			Available:   []string{"match_header", "game_build"},
+			Deferred:    []string{history.MetricKills, history.MetricDeaths, history.MetricAssists, history.MetricGPM, history.MetricXPM, history.MetricKillParticipation, history.MetricFarmCheckpoint, history.MetricKeyItemTiming},
+			Unavailable: []string{"replay_salt_or_gc_credentials", "hidden_fog_of_war_state", "identity_not_correlated"},
+		},
+	}
+	_ = idx
+	_ = heroes
+	if err := history.SealNormalizedMatchFacts(&nf); err != nil {
+		panic("seal quarantined facts: " + err.Error())
+	}
+	return nf
+}
+
+func teamPersons(teamID string, n int) []string {
+	out := make([]string, n)
+	for j := 0; j < n; j++ {
+		out[j] = "person-" + strings.TrimPrefix(teamID, "team-") + string(rune('0'+j))
+	}
+	return out
+}
+
+func sortParticipants(in []history.ParticipantFacts) []history.ParticipantFacts {
+	out := append([]history.ParticipantFacts(nil), in...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].PersonID < out[j].PersonID })
+	return out
+}
