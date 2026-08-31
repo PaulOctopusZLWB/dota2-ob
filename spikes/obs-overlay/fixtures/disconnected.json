@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "overlay-state/v1",
+  "generatedAt": "2026-08-12T10:00:00Z",
+  "health": { "status": "disconnected", "renderSafe": false, "emergencyHidden": false, "maxSilenceMs": 1250 },
+  "display": {
+    "visible": true,
+    "family": "objective-exchange",
+    "kicker": "禁止显示",
+    "title": "断线状态不得保留分析结论",
+    "body": "该字段仅用于验证失败关闭边界，不得渲染。",
+    "evidence": "连接中断",
+    "confidenceLabel": "不可用",
+    "sourceLabel": "本地连接",
+    "ageLabel": "已断开",
+    "asset": null
+  }
+}

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dota2-OB 导播控制台</title>
+  <link rel="stylesheet" href="/operator/app.css">
+</head>
+<body data-connection="offline">
+  <main class="console-shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">DOTA2-OB / LOCAL BROADCAST DESK</p>
+        <h1>导播控制台</h1>
+      </div>
+      <div class="session-strip" aria-label="当前策略会话">
+        <span class="live-dot" aria-hidden="true"></span>
+        <div><small>会话</small><strong id="session-id">未连接</strong></div>
+        <div><small>策略修订</small><strong id="policy-revision">—</strong></div>
+      </div>
+    </header>
+
+    <section class="connection-panel" aria-labelledby="connection-heading">
+      <div>
+        <p class="section-index">00 / ACCESS</p>
+        <h2 id="connection-heading">连接本地策略会话</h2>
+        <p>令牌仅保留在当前输入框与内存中，不写入 URL、Cookie 或浏览器持久存储。</p>
+      </div>
+      <form id="connect-form" class="connect-form">
+        <label for="token">本次启动令牌</label>
+        <div class="field-row">
+          <input id="token" type="password" autocomplete="off" spellcheck="false" required>
+          <button type="submit" class="button primary">连接本地会话</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="work-grid">
+      <section class="candidate-column" aria-labelledby="preview-heading">
+        <header class="section-heading">
+          <div><p class="section-index">01 / PREVIEW QUEUE</p><h2 id="preview-heading">候选预览</h2></div>
+          <span id="candidate-count" class="count-badge">0</span>
+        </header>
+        <div id="candidate-list" class="candidate-list">
+          <div class="empty-state"><span>等待</span><p>连接后显示已提交、已本地化的安全候选。</p></div>
+        </div>
+      </section>
+
+      <aside class="control-column" aria-label="导播控制">
+        <section class="emergency" aria-labelledby="emergency-heading">
+          <p class="section-index">02 / MASTER OUTPUT</p>
+          <h2 id="emergency-heading">总输出保险</h2>
+          <p>紧急隐藏优先于批准、置顶与自动上屏，并保持到明确解除。</p>
+          <button id="emergency-toggle" type="button" class="button emergency-button" disabled>紧急隐藏全部分析</button>
+        </section>
+
+        <section class="rule-panel" aria-labelledby="rule-heading">
+          <p class="section-index">03 / RULE CONTROL</p>
+          <h2 id="rule-heading">规则抑制</h2>
+          <form id="rule-form">
+            <label for="rule-id">规则标识</label>
+            <input id="rule-id" type="text" autocomplete="off" spellcheck="false" placeholder="lane-checkpoint" required>
+            <div class="split-actions">
+              <button type="submit" data-rule-action="disable_rule" class="button quiet" disabled>停用规则</button>
+              <button type="submit" data-rule-action="enable_rule" class="button quiet" disabled>启用规则</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="result-panel" aria-labelledby="result-heading">
+          <div class="result-title"><p class="section-index">04 / AUDIT RESULT</p><h2 id="result-heading">最近结果</h2></div>
+          <pre id="result" role="status" aria-live="polite">尚未提交命令</pre>
+          <button id="retry-command" type="button" class="button text-button" disabled>重试同一命令</button>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <template id="candidate-template">
+    <article class="candidate-card">
+      <div class="candidate-rail" aria-hidden="true"><span></span></div>
+      <header>
+        <p class="rule-name"></p>
+        <div class="candidate-flags"><span class="confidence"></span><span class="sample"></span></div>
+      </header>
+      <h3 class="claim-title"></h3>
+      <p class="claim-body"></p>
+      <footer>
+        <p class="expiry"></p>
+        <div class="candidate-actions">
+          <button type="button" data-action="reject" class="button reject">拒绝</button>
+          <button type="button" data-action="pin" class="button quiet pin">置顶</button>
+          <button type="button" data-action="show" class="button quiet">立即上屏</button>
+          <button type="button" data-action="approve" class="button approve">批准上屏</button>
+        </div>
+      </footer>
+    </article>
+  </template>
+  <script src="/operator/app.js" defer></script>
+</body>
+</html>
